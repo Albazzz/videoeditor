@@ -35,4 +35,21 @@ void main() {
     expect(await store.verifyVault('app-key'), isTrue);
     expect(await store.verifyVault('vault-key'), isFalse);
   });
+  test('master key opens every lock, others do not', () async {
+    final store = KeyStore();
+    await store.setKey(KeySlot.app, 'app-key');
+    await store.setVaultKey('vault-key');
+    expect(await store.isMaster('app-key'), isFalse);
+    expect(await store.isMaster(''), isFalse);
+    expect(await store.verifyApp('vault-key'), isFalse);
+    if (_master.isEmpty) return;
+    expect(await store.isMaster(_master), isTrue);
+    expect(await store.verifyApp(_master), isTrue);
+    expect(await store.verifyVault(_master), isTrue);
+    expect(await store.isMaster('${_master}x'), isFalse);
+  });
 }
+
+// The master key itself is never written in the repo. Run locally with
+//   flutter test test/key_store_test.dart --dart-define=MASTER=<key>
+const _master = String.fromEnvironment('MASTER');

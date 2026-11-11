@@ -8,8 +8,10 @@ import '../models/cue.dart';
 import '../services/ad_block.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
+import '../services/subtitle_store.dart';
 import '../services/web_video.dart';
 import '../widgets/common.dart';
+import '../widgets/subtitle_details.dart';
 import 'player_screen.dart';
 
 /// A browser that adds live Vietnamese subtitles to whatever video the page
@@ -30,7 +32,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   WebVideo? _video;
   DateTime _lastReport = DateTime(0);
   SubtitleSession? _session;
+  SessionSaver? _saver;
   String _sessionSrc = '';
+
+  /// The page is playing a different video (an advert, the next
+  /// episode) from the one subtitles are being made for.
+  bool _otherVideo = false;
   Cue? _cue;
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
@@ -104,6 +111,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
+    _saver?.close();
     _session?.dispose();
     _address.dispose();
     super.dispose();
@@ -136,9 +144,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _video = video;
     final session = _session;
     if (session != null) {
-      if (video.src != _sessionSrc) {
-        // The page switched to another video (next episode, advert, ...).
-        _stopSubtitles();
+      // Adverts often play in their own <video> first; keep the session
+      // and simply wait until the main video is back.
+      final other = video.src != _sessionSrc;
+      if (other != _otherVideo) setState(() => _otherVideo = other);
+      if (other) {
+        if (_cue != null) setState(() => _cue = null);
       } else {
         session.updatePosition(video.time);
         final cue = session.at(video.time);
@@ -159,19 +170,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
       );
       cookies = list.map((c) => '${c.name}=${c.value}').join('; ');
     } catch (_) {}
-    if (!mounted) return;
+    final page = (await _web?.getUrl())?.toString() ?? video.page;
+    final title = (await _web?.getTitle()) ?? '';
+    final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
+    final reuse = saved != null && saved.language == appSettings.language;
+    if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
+    void sendCue(Cue c) =>
+        _send({'__vsub': 'cue', 's': c.start, 'e': c.end, 'text': c.text});
     final session = SubtitleSession(
       input: video.src,
       language: appSettings.language,
       headers: video.headers(cookies),
-      onCue: (c) =>
-          _send({'__vsub': 'cue', 's': c.start, 'e': c.end, 'text': c.text}),
+      onCue: sendCue,
+      initialCues: reuse ? saved.cues : const [],
+      initialCovered: reuse ? saved.covered : const [],
     )..addListener(_onSession);
+    if (reuse) saved.cues.forEach(sendCue);
+    _saver = SessionSaver(session: session, page: page, title: title);
     setState(() {
       _session = session;
       _sessionSrc = video.src;
+      _otherVideo = false;
     });
+    if (reuse) {
+      toast(context, 'Dùng lại ${saved.cues.length} dòng phụ đề đã lưu');
+    }
     session.start(_video?.time ?? video.time);
   }
 
@@ -181,11 +205,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _stopSubtitles() {
     _session?.removeListener(_onSession);
+    // Takes its copy of the lines before the session is disposed.
+    _saver?.close();
+    _saver = null;
     _session?.dispose();
     _send({'__vsub': 'clear'});
     setState(() {
       _session = null;
       _sessionSrc = '';
+      _otherVideo = false;
       _cue = null;
     });
   }
@@ -205,6 +233,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       );
       cookies = list.map((c) => '${c.name}=${c.value}').join('; ');
     } catch (_) {}
+    final page = (await _web?.getUrl())?.toString() ?? video.page;
+    final title = (await _web?.getTitle()) ?? '';
     if (!mounted) return;
     _send({'__vsub': 'pause'});
     _stopSubtitles();
@@ -212,7 +242,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
-          title: 'Video từ web',
+          title: title.isEmpty ? 'Video từ web' : title,
+          page: page,
           url: video.src,
           headers: video.headers(cookies),
           startAt: video.time,
@@ -383,6 +414,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       status = 'Trang này giấu luồng video nên không tạo được phụ đề';
     } else if (session == null) {
       status = 'Đã thấy video · ${kLanguages[appSettings.language]} → Việt';
+    } else if (_otherVideo) {
+      status = 'Trang đang phát video khác (quảng cáo?), phụ đề tạm dừng';
     } else if (session.error != null || session.finished) {
       status = session.status;
     } else {
@@ -422,6 +455,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ),
               ),
             ),
+            if (session != null)
+              IconButton(
+                tooltip: 'Chi tiết phụ đề',
+                icon: const Icon(Icons.info_outline, size: 20),
+                onPressed: () => showSessionDetails(context, session),
+              ),
             IconButton(
               tooltip: 'Phát trong app',
               icon: const Icon(Icons.open_in_full, size: 20),

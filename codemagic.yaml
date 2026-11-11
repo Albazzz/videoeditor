@@ -37,7 +37,7 @@ workflows:
           flutter analyze
           # export_ffmpeg_test needs a desktop ffmpeg with libass, so it is
           # left for local runs.
-          flutter test --no-pub test/core_test.dart test/key_store_test.dart
+          flutter test --no-pub test/core_test.dart test/key_store_test.dart test/subtitle_store_test.dart
 
       - name: Build iOS app without signing
         script: |

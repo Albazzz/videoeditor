@@ -4,7 +4,9 @@ import 'screens/browser_screen.dart';
 import 'screens/library_screen.dart';
 import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/subtitle_library_screen.dart';
 import 'services/app_settings.dart';
+import 'services/subtitle_session.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +30,7 @@ class _VideoSubAppState extends State<VideoSubApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     appSettings.load();
+    SubtitleSession.cleanLeftovers();
     keyStore.hasKey(KeySlot.app).then((v) => setState(() => _hasKey = v));
   }
 
@@ -91,22 +94,37 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tab = 0;
 
+  /// Bumped on every visit so the subtitle list reloads.
+  int _subsVisit = 0;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: IndexedStack(
         index: _tab,
-        children: const [BrowserScreen(), LibraryScreen(), SettingsScreen()],
+        children: [
+          const BrowserScreen(),
+          const LibraryScreen(),
+          SubtitleLibraryScreen(key: ValueKey(_subsVisit)),
+          const SettingsScreen(),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         height: 60,
         selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
+        onDestinationSelected: (i) => setState(() {
+          if (i == 2 && _tab != 2) _subsVisit++;
+          _tab = i;
+        }),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.public), label: 'Xem web'),
           NavigationDestination(
             icon: Icon(Icons.video_library_outlined),
             label: 'Thư viện',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.subtitles_outlined),
+            label: 'Phụ đề',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),

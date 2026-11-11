@@ -7,8 +7,10 @@ import 'package:video_player/video_player.dart';
 import '../models/cue.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
+import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
 import '../widgets/common.dart';
+import '../widgets/subtitle_details.dart';
 import 'export_sheet.dart';
 
 /// Plays a library video or a stream found in the browser, with subtitles
@@ -22,6 +24,7 @@ class PlayerScreen extends StatefulWidget {
     this.headers = const {},
     this.startAt = 0,
     this.autoSubtitles = false,
+    this.page,
   }) : assert(item != null || url != null);
 
   final String title;
@@ -31,6 +34,9 @@ class PlayerScreen extends StatefulWidget {
   final double startAt;
   final bool autoSubtitles;
 
+  /// Web page the stream came from; its subtitles are kept in the store.
+  final String? page;
+
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -38,6 +44,7 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   late final VideoPlayerController _player;
   SubtitleSession? _session;
+  SessionSaver? _saver;
   List<Cue> _cues = [];
   bool _showSubs = true;
   bool _showControls = true;
@@ -105,11 +112,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _startSubtitles() async {
     if (_session != null) return;
     if (!await ensureModels(context) || !mounted) return;
+    final page = widget.item == null ? widget.page : null;
+    final saved = page == null
+        ? null
+        : await SubtitleStore.load(SubtitleStore.idFor(page));
+    final reuse = saved != null && saved.language == appSettings.language;
+    if (!mounted || _session != null) return;
     final session = SubtitleSession(
       input: _input,
       language: appSettings.language,
       headers: widget.headers,
+      initialCues: reuse ? saved.cues : const [],
+      initialCovered: reuse ? saved.covered : const [],
     )..addListener(_onSession);
+    if (page != null) {
+      _saver = SessionSaver(session: session, page: page, title: widget.title);
+    }
     setState(() {
       _session = session;
       _cues = session.cues;
@@ -186,6 +204,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.removeListener(_onTick);
     _player.dispose();
     _session?.removeListener(_onSession);
+    _saver?.close();
     _session?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -287,6 +306,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ],
               ),
             ),
+            if (session != null)
+              IconButton(
+                tooltip: 'Chi tiết phụ đề',
+                icon: const Icon(Icons.info_outline, color: Colors.white),
+                onPressed: () => showSessionDetails(context, session),
+              ),
             if (widget.item != null)
               IconButton(
                 tooltip: 'Cắt / đổi tốc độ / gắn phụ đề',
