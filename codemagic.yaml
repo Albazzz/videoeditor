@@ -1,0 +1,65 @@
+workflows:
+  ios-unsigned:
+    name: Build iPhone IPA (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+      cancel_previous_builds: true
+
+    scripts:
+      - name: Get Flutter packages
+        script: |
+          set -euo pipefail
+          # google_mlkit_translation ships as a Swift package only.
+          flutter config --enable-swift-package-manager
+          flutter pub get
+
+      - name: Analyze and test
+        script: |
+          set -euo pipefail
+          flutter analyze
+          # export_ffmpeg_test needs a desktop ffmpeg with libass, so it is
+          # left for local runs.
+          flutter test --no-pub test/core_test.dart test/key_store_test.dart
+
+      - name: Build iOS app without signing
+        script: |
+          set -euo pipefail
+          plutil -lint ios/Runner/Info.plist
+          rm -rf build/ios
+          flutter build ios --release --no-codesign \
+            --build-name=1.0.0 \
+            --build-number="$BUILD_NUMBER"
+          test -d build/ios/iphoneos/Runner.app
+          file build/ios/iphoneos/Runner.app/Runner | grep -q arm64
+
+      - name: Create unsigned IPA
+        script: |
+          set -euo pipefail
+          rm -rf build/ios/ipa
+          mkdir -p build/ios/ipa/Payload
+          ditto build/ios/iphoneos/Runner.app build/ios/ipa/Payload/Runner.app
+          cd build/ios/ipa
+          ditto -c -k --sequesterRsrc --keepParent Payload Video-Sub-unsigned.ipa
+          unzip -tq Video-Sub-unsigned.ipa
+          ls -lh Video-Sub-unsigned.ipa
+
+    artifacts:
+      - build/ios/ipa/*.ipa
