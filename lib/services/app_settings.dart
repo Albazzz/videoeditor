@@ -27,17 +27,28 @@ class AppSettings extends ChangeNotifier {
   /// Block adverts and pop-ups in the in-app browser.
   bool adBlock = true;
 
+  /// Translate recognised speech into Vietnamese. Off shows the
+  /// original language.
+  bool translate = true;
+
   Future<void> load() async {
     final prefs = _prefs = await SharedPreferences.getInstance();
     language = prefs.getString('language') ?? 'ja';
     showSource = prefs.getBool('showSource') ?? false;
     adBlock = prefs.getBool('adBlock') ?? true;
+    translate = prefs.getBool('translate') ?? true;
     notifyListeners();
   }
 
   void setLanguage(String value) {
     language = value;
     _prefs?.setString('language', value);
+    notifyListeners();
+  }
+
+  void setTranslate(bool value) {
+    translate = value;
+    _prefs?.setBool('translate', value);
     notifyListeners();
   }
 

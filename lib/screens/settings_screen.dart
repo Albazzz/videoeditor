@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/app_settings.dart';
 import '../services/model_store.dart';
 import '../widgets/common.dart';
+import 'downloads_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -130,12 +131,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           SwitchListTile(
+            title: const Text('Dịch sang tiếng Việt'),
+            subtitle: const Text('Tắt thì phụ đề hiện nguyên tiếng Nhật/Trung'),
+            value: appSettings.translate,
+            onChanged: appSettings.setTranslate,
+          ),
+          SwitchListTile(
             title: const Text('Hiện cả câu gốc'),
             subtitle: const Text(
               'Câu tiếng Nhật/Trung nằm trên câu tiếng Việt',
             ),
             value: appSettings.showSource,
             onChanged: appSettings.setShowSource,
+          ),
+          ListTile(
+            leading: const Icon(Icons.download_done),
+            title: const Text('Tình trạng tải về'),
+            subtitle: const Text(
+              'Bộ nhận dạng, gói dịch và phần trăm phụ đề từng phim',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DownloadsScreen()),
+              );
+              await _load();
+            },
           ),
           ListTile(
             title: const Text('Bộ nhận dạng giọng nói'),

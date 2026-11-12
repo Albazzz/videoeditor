@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
+import 'crash_trail.dart';
+
 const int kSampleRate = 16000;
 
 class AsrConfig {
@@ -102,6 +104,7 @@ class AsrWorker {
       config.asrModel,
       config.tokens,
       config.language,
+      CrashTrail.path,
     ]);
     try {
       final port = await ready.future;
@@ -163,6 +166,15 @@ void _entry(List<Object?> args) {
   final asrModel = args[2] as String;
   final tokens = args[3] as String;
   final language = args[4] as String;
+  final trail = args[5] as String?;
+  var step = 0;
+  int begin(String label) {
+    final id = step++;
+    CrashTrail.write(trail, '+w$id|$label');
+    return id;
+  }
+
+  void end(int id) => CrashTrail.write(trail, '-w$id');
 
   late final sherpa.OfflineRecognizer recognizer;
   sherpa.VoiceActivityDetector newVad() => sherpa.VoiceActivityDetector(
@@ -181,6 +193,7 @@ void _entry(List<Object?> args) {
   );
   late sherpa.VoiceActivityDetector vad;
 
+  final loading = begin('Nạp bộ nhận dạng giọng nói (sherpa-onnx)');
   try {
     sherpa.initBindings();
     recognizer = sherpa.OfflineRecognizer(
@@ -199,9 +212,11 @@ void _entry(List<Object?> args) {
     );
     vad = newVad();
   } catch (e) {
+    end(loading);
     out.send({'type': 'fatal', 'message': '$e'});
     return;
   }
+  end(loading);
 
   var gen = 0;
   var base = 0.0;
@@ -256,6 +271,7 @@ void _entry(List<Object?> args) {
       return;
     }
     final last = m['last'] as bool;
+    final working = begin('Nhận dạng giọng nói (sherpa-onnx)');
     try {
       final pcm = readPcm16Wav(file.readAsBytesSync());
       try {
@@ -283,6 +299,8 @@ void _entry(List<Object?> args) {
       });
     } catch (e) {
       out.send({'type': 'error', 'gen': gen, 'message': '$e'});
+    } finally {
+      end(working);
     }
   });
   out.send({'type': 'ready', 'port': inbox.sendPort});

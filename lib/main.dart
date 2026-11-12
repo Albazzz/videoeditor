@@ -6,15 +6,20 @@ import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/subtitle_library_screen.dart';
 import 'services/app_settings.dart';
+import 'services/crash_trail.dart';
 import 'services/subtitle_session.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const VideoSubApp());
+  final crash = await CrashTrail.init();
+  runApp(VideoSubApp(crash: crash));
 }
 
 class VideoSubApp extends StatefulWidget {
-  const VideoSubApp({super.key});
+  const VideoSubApp({super.key, this.crash});
+
+  /// What the previous run was doing when it was killed, if anything.
+  final CrashReport? crash;
 
   @override
   State<VideoSubApp> createState() => _VideoSubAppState();
@@ -79,13 +84,15 @@ class _VideoSubAppState extends State<VideoSubApp> with WidgetsBindingObserver {
             ),
         ],
       ),
-      home: const HomeScreen(),
+      home: HomeScreen(crash: widget.crash),
     );
   }
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.crash});
+
+  final CrashReport? crash;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -96,6 +103,47 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Bumped on every visit so the subtitle list reloads.
   int _subsVisit = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    final crash = widget.crash;
+    if (crash != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showCrash(crash));
+    }
+  }
+
+  Future<void> _showCrash(CrashReport crash) async {
+    // Lists, oldest first, the steps that never finished.
+    final steps = crash.steps.map((s) => '• $s').join('\n');
+    final hint = crash.inTranslator
+        ? '\n\nCó vẻ do bộ dịch. Tắt dịch để xem phụ đề tiếng gốc '
+              'trong lúc chờ sửa?'
+        : '';
+    final turnOff = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Lần trước app bị văng'),
+        content: Text(
+          'Lúc đó app đang:\n$steps\n\n'
+          'Nếu là bạn tự tắt app thì bỏ qua. Nếu không, chụp màn hình '
+          'này gửi người làm app.$hint',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Đóng'),
+          ),
+          if (crash.inTranslator && appSettings.translate)
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Tắt dịch'),
+            ),
+        ],
+      ),
+    );
+    if (turnOff == true) appSettings.setTranslate(false);
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -65,4 +65,43 @@ void main() {
     bad.writeAsStringSync('{not json');
     expect(await SubtitleStore.list(), isEmpty);
   });
+
+  test('ranges merge and measure what was listened to', () {
+    final r = mergeRanges([(100, 200), (0, 50), (49.5, 90), (190, 210)]);
+    expect(r, [(0.0, 90.0), (100.0, 210.0)]);
+    expect(coveredSeconds([(0, 50), (40, 60)]), 60);
+    expect(coveredSeconds([]), 0);
+  });
+
+  test('whole video needs one range from the start to near the end', () {
+    expect(coversWholeVideo([(0, 1395)], 1400), isTrue);
+    expect(coversWholeVideo([(0, 700), (700.5, 1400)], 1400), isTrue);
+    expect(coversWholeVideo([(0, 700), (800, 1400)], 1400), isFalse);
+    expect(coversWholeVideo([(30, 1400)], 1400), isFalse);
+    expect(coversWholeVideo([(0, 600)], 0), isFalse);
+    expect(coversWholeVideo([(0, 600)], 0, reachedEnd: true), isTrue);
+  });
+
+  test('progress and completeness survive a save', () async {
+    final subs = SavedSubs(
+      id: 'p',
+      title: 't',
+      page: 'https://x.example/p',
+      language: 'ja',
+      updated: DateTime(2026, 3, 1),
+      cues: const [Cue(start: 1, end: 2, text: 'a')],
+      covered: const [(0, 300)],
+      duration: 1200,
+    );
+    await SubtitleStore.save(subs);
+    final back = (await SubtitleStore.load('p'))!;
+    expect(back.duration, 1200);
+    expect(back.complete, isFalse);
+    expect(back.progress, closeTo(0.25, 0.001));
+    expect(back.isWholeVideo, isFalse);
+
+    final old = SavedSubs.fromJson({'id': 'o', 'cues': [], 'covered': []});
+    expect(old.duration, 0);
+    expect(old.progress, isNull);
+  });
 }

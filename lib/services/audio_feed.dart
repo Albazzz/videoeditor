@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
+import 'crash_trail.dart';
+
 bool get _hasFfmpegKit => Platform.isIOS || Platform.isAndroid;
 
 /// Seconds of audio per chunk file.
@@ -69,17 +71,20 @@ class AudioFeed {
     ];
 
     if (_hasFfmpegKit) {
-      final session = await FFmpegKit.executeWithArgumentsAsync(args, (
-        s,
-      ) async {
-        if (_stopped) return;
-        final rc = await s.getReturnCode();
-        if (!ReturnCode.isSuccess(rc)) {
-          final logs = await s.getAllLogsAsString();
-          error = (logs ?? '').trim().isEmpty ? 'ffmpeg lỗi $rc' : logs!.trim();
-        }
-        done = true;
-      });
+      final session = await CrashTrail.guard(
+        'Khởi động ffmpeg để lấy âm thanh',
+        () => FFmpegKit.executeWithArgumentsAsync(args, (s) async {
+          if (_stopped) return;
+          final rc = await s.getReturnCode();
+          if (!ReturnCode.isSuccess(rc)) {
+            final logs = await s.getAllLogsAsString();
+            error = (logs ?? '').trim().isEmpty
+                ? 'ffmpeg lỗi $rc'
+                : logs!.trim();
+          }
+          done = true;
+        }),
+      );
       _sessionId = session.getSessionId();
     } else {
       // Desktop (development only): use the ffmpeg on PATH.

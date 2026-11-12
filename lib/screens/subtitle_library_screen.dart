@@ -5,6 +5,7 @@ import '../services/app_settings.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
 import '../widgets/common.dart';
+import 'downloads_screen.dart';
 import '../widgets/subtitle_details.dart';
 
 /// Every subtitle the app has made: for web videos and for library videos.
@@ -71,7 +72,19 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   Widget build(BuildContext context) {
     final web = _web;
     return Scaffold(
-      appBar: AppBar(title: const Text('Kho phụ đề')),
+      appBar: AppBar(
+        title: const Text('Kho phụ đề'),
+        actions: [
+          IconButton(
+            tooltip: 'Tình trạng tải về',
+            icon: const Icon(Icons.download_done),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const DownloadsScreen()),
+            ),
+          ),
+        ],
+      ),
       body: web == null
           ? const Center(child: CircularProgressIndicator())
           : web.isEmpty && _videos.isEmpty
@@ -99,14 +112,44 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      subtitle: Text(
-                        '${s.cues.length} dòng · '
-                        '${kLanguages[s.language] ?? s.language} · '
-                        '${_date(s.updated)}',
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            subtitleProgressLabel(
+                              covered: s.covered,
+                              duration: s.duration,
+                              reachedEnd: s.complete,
+                            ),
+                            style: TextStyle(
+                              color: s.isWholeVideo
+                                  ? Colors.green
+                                  : Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (s.progress != null) ...[
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: s.progress,
+                              minHeight: 3,
+                              color: s.isWholeVideo ? Colors.green : null,
+                            ),
+                            const SizedBox(height: 4),
+                          ],
+                          Text(
+                            '${s.cues.length} dòng · '
+                            '${kLanguages[s.language] ?? s.language} · '
+                            '${_date(s.updated)}',
+                          ),
+                        ],
                       ),
+                      isThreeLine: true,
                       onTap: () => _open(
                         title: s.title.isEmpty ? _host(s.page) : s.title,
-                        subtitle: s.page,
+                        subtitle:
+                            '${subtitleProgressLabel(covered: s.covered, duration: s.duration, reachedEnd: s.complete)}'
+                            '\n${s.page}',
                         cues: s.cues,
                         onDelete: () => SubtitleStore.delete(s.id),
                       ),
@@ -121,7 +164,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      subtitle: Text('${cues.length} dòng'),
+                      subtitle: Text('Đủ cả video · ${cues.length} dòng'),
                       onTap: () => _open(
                         title: item.name,
                         subtitle: 'Video trong Thư viện',

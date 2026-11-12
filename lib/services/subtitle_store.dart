@@ -9,6 +9,39 @@ import 'package:path_provider/path_provider.dart';
 import '../models/cue.dart';
 import 'subtitle_session.dart';
 
+/// Joins overlapping or touching ranges and sorts them.
+List<(double, double)> mergeRanges(List<(double, double)> ranges) {
+  final sorted = ranges.where((r) => r.$2 > r.$1).toList()
+    ..sort((a, b) => a.$1.compareTo(b.$1));
+  final out = <(double, double)>[];
+  for (final r in sorted) {
+    if (out.isNotEmpty && r.$1 <= out.last.$2 + 1) {
+      final last = out.removeLast();
+      out.add((last.$1, r.$2 > last.$2 ? r.$2 : last.$2));
+    } else {
+      out.add(r);
+    }
+  }
+  return out;
+}
+
+/// Seconds of video that have been listened to.
+double coveredSeconds(List<(double, double)> ranges) =>
+    mergeRanges(ranges).fold(0.0, (sum, r) => sum + r.$2 - r.$1);
+
+/// True when the listened ranges span the whole video. [reachedEnd] means
+/// the audio ran out, for when the length of the video is unknown.
+bool coversWholeVideo(
+  List<(double, double)> ranges,
+  double duration, {
+  bool reachedEnd = false,
+}) {
+  final merged = mergeRanges(ranges);
+  if (merged.length != 1 || merged.first.$1 > 3) return false;
+  if (duration > 0) return merged.first.$2 >= duration - 15;
+  return reachedEnd;
+}
+
 /// Subtitles generated for one web video, kept so they can be read later
 /// and reused the next time the same page is watched.
 class SavedSubs {
@@ -20,6 +53,8 @@ class SavedSubs {
     required this.updated,
     required this.cues,
     required this.covered,
+    this.duration = 0,
+    this.complete = false,
   });
 
   final String id;
@@ -34,12 +69,31 @@ class SavedSubs {
   /// Stretches of the video that were listened to, in seconds.
   final List<(double, double)> covered;
 
+  /// Length of the video in seconds, 0 when the page did not say.
+  final double duration;
+
+  /// The audio was listened to all the way to the end.
+  final bool complete;
+
+  bool get isWholeVideo =>
+      coversWholeVideo(covered, duration, reachedEnd: complete);
+
+  /// Share of the video listened to, 0..1, or null when the length is
+  /// unknown.
+  double? get progress => isWholeVideo
+      ? 1
+      : duration <= 0
+      ? null
+      : (coveredSeconds(covered) / duration).clamp(0.0, 1.0);
+
   Map<String, Object?> toJson() => {
     'id': id,
     'title': title,
     'page': page,
     'language': language,
     'updated': updated.millisecondsSinceEpoch,
+    'duration': duration,
+    'complete': complete,
     'covered': [
       for (final r in covered) [r.$1, r.$2],
     ],
@@ -56,6 +110,8 @@ class SavedSubs {
       page: (j['page'] as String?) ?? '',
       language: (j['language'] as String?) ?? '',
       updated: DateTime.fromMillisecondsSinceEpoch((j['updated'] as int?) ?? 0),
+      duration: (j['duration'] as num?)?.toDouble() ?? 0,
+      complete: j['complete'] == true,
       covered: [
         for (final r in (j['covered'] as List? ?? const []))
           (d((r as List)[0]), d(r[1])),
@@ -146,20 +202,34 @@ class SubtitleStore {
 
 /// Keeps a web session's subtitles in the store while it runs.
 class SessionSaver {
-  SessionSaver({required this.session, required this.page, required this.title})
-    : id = SubtitleStore.idFor(page) {
+  SessionSaver({
+    required this.session,
+    required this.page,
+    required this.title,
+    this.duration,
+  }) : id = SubtitleStore.idFor(page) {
     session.addListener(_changed);
   }
+
+  /// Current length of the video, read at every save.
+  final double Function()? duration;
 
   final SubtitleSession session;
   final String page;
   final String title;
   final String id;
   int _savedCount = -1;
+  bool _savedFinished = false;
+  double _savedCovered = 0;
   Timer? _timer;
 
   void _changed() {
-    if (session.cues.length == _savedCount) return;
+    final moved = coveredSeconds(session.covered) - _savedCovered > 60;
+    if (session.cues.length == _savedCount &&
+        session.finished == _savedFinished &&
+        !moved) {
+      return;
+    }
     // Lines arrive in bursts; one write a few seconds later covers them.
     _timer ??= Timer(const Duration(seconds: 5), () {
       _timer = null;
@@ -169,7 +239,15 @@ class SessionSaver {
 
   Future<void> save() async {
     if (session.cues.isEmpty) return;
-    _savedCount = session.cues.length;
+    // Copy everything first: the session may be disposed while we wait.
+    final cues = List.of(session.cues);
+    final covered = session.covered;
+    final finished = session.finished;
+    final length = duration?.call() ?? 0;
+    _savedCount = cues.length;
+    _savedFinished = finished;
+    _savedCovered = coveredSeconds(covered);
+    final previous = await SubtitleStore.load(id);
     try {
       await SubtitleStore.save(
         SavedSubs(
@@ -178,8 +256,10 @@ class SessionSaver {
           page: page,
           language: session.language,
           updated: DateTime.now(),
-          cues: List.of(session.cues),
-          covered: session.covered,
+          cues: cues,
+          covered: covered,
+          duration: length > 0 ? length : (previous?.duration ?? 0),
+          complete: finished || (previous?.complete ?? false),
         ),
       );
     } catch (_) {}

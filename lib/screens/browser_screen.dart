@@ -187,7 +187,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
       initialCovered: reuse ? saved.covered : const [],
     )..addListener(_onSession);
     if (reuse) saved.cues.forEach(sendCue);
-    _saver = SessionSaver(session: session, page: page, title: title);
+    _saver = SessionSaver(
+      session: session,
+      page: page,
+      title: title,
+      duration: () => _video?.duration ?? 0,
+    );
     setState(() {
       _session = session;
       _sessionSrc = video.src;
@@ -405,6 +410,44 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  /// How much of the video has subtitles, and what the translator does.
+  List<Widget> _progress(SubtitleSession session, WebVideo video) {
+    final theme = Theme.of(context);
+    final whole = coversWholeVideo(
+      session.covered,
+      video.duration,
+      reachedEnd: session.finished && session.covered.isNotEmpty,
+    );
+    final done = coveredSeconds(session.covered);
+    final style = theme.textTheme.labelSmall;
+    return [
+      const SizedBox(height: 4),
+      Text(
+        '${subtitleProgressLabel(covered: session.covered, duration: video.duration, reachedEnd: whole)}'
+        ' · ${session.cues.length} dòng',
+        style: style?.copyWith(
+          color: whole ? Colors.green : theme.colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      if (video.duration > 0) ...[
+        const SizedBox(height: 3),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(
+            value: whole ? 1 : (done / video.duration).clamp(0.0, 1.0),
+            minHeight: 3,
+            color: whole ? Colors.green : null,
+          ),
+        ),
+      ],
+      if (session.translatorNote.isNotEmpty) ...[
+        const SizedBox(height: 3),
+        Text(session.translatorNote, style: style),
+      ],
+    ];
+  }
+
   Widget _videoPanel() {
     final video = _video!;
     final session = _session;
@@ -432,11 +475,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                status,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    status,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  if (session != null) ..._progress(session, video),
+                ],
               ),
             ),
             PopupMenuButton<double>(

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/cue.dart';
 import '../services/app_settings.dart';
 import '../services/model_store.dart';
+import '../services/subtitle_store.dart';
 
 void toast(BuildContext context, String message) {
   ScaffoldMessenger.of(context)
@@ -190,3 +191,18 @@ const kSpeeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5];
 
 String speedLabel(double s) =>
     '${s.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '')}x';
+
+/// "Đủ cả phim", "Đã làm 42% (12:30/30:00)" or "Đã làm 12:30".
+String subtitleProgressLabel({
+  required List<(double, double)> covered,
+  required double duration,
+  bool reachedEnd = false,
+}) {
+  if (coversWholeVideo(covered, duration, reachedEnd: reachedEnd)) {
+    return 'Đủ cả phim';
+  }
+  final done = coveredSeconds(covered);
+  if (duration <= 0) return 'Đã làm ${formatTime(done)}';
+  final pct = (done / duration * 100).clamp(0, 100).floor();
+  return 'Đã làm $pct% (${formatTime(done)}/${formatTime(duration)})';
+}

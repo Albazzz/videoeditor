@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 
 import '../models/cue.dart';
 import '../services/app_settings.dart';
+import '../services/crash_trail.dart';
 import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
@@ -73,7 +74,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _init() async {
     try {
-      await _player.initialize();
+      await CrashTrail.guard(
+        'Mở video bằng trình phát',
+        () => _player.initialize(),
+      );
       if (widget.startAt > 1) {
         await _player.seekTo(
           Duration(milliseconds: (widget.startAt * 1000).round()),
@@ -126,7 +130,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       initialCovered: reuse ? saved.covered : const [],
     )..addListener(_onSession);
     if (page != null) {
-      _saver = SessionSaver(session: session, page: page, title: widget.title);
+      _saver = SessionSaver(
+        session: session,
+        page: page,
+        title: widget.title,
+        duration: () => _duration,
+      );
     }
     setState(() {
       _session = session;
@@ -292,10 +301,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                   if (session != null)
                     Text(
-                      session.finished || session.error != null
+                      session.error != null
                           ? session.status
-                          : '${session.status} '
-                                '${formatTime(session.processedUntil)}',
+                          : '${subtitleProgressLabel(covered: session.covered, duration: _duration, reachedEnd: session.finished)}'
+                                ' · ${session.cues.length} dòng'
+                                '${session.finished ? '' : ' · ${session.status}'}'
+                                '${session.translatorNote.isEmpty ? '' : ' · ${session.translatorNote}'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
