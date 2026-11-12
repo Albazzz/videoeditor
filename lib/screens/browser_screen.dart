@@ -38,7 +38,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   /// The page is playing a different video (an advert, the next
   /// episode) from the one subtitles are being made for.
   bool _otherVideo = false;
-  Cue? _cue;
+  DateTime _lastResend = DateTime(0);
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
@@ -148,15 +148,29 @@ class _BrowserScreenState extends State<BrowserScreen> {
       // and simply wait until the main video is back.
       final other = video.src != _sessionSrc;
       if (other != _otherVideo) setState(() => _otherVideo = other);
-      if (other) {
-        if (_cue != null) setState(() => _cue = null);
-      } else {
+      if (!other) {
         session.updatePosition(video.time);
-        final cue = session.at(video.time);
-        if (!identical(cue, _cue)) setState(() => _cue = cue);
+        // The player frame was reloaded and lost its lines: send them again.
+        final now = DateTime.now();
+        if (video.cueCount < session.cues.length &&
+            now.difference(_lastResend) > const Duration(seconds: 3)) {
+          _lastResend = now;
+          _sendAllCues(session.cues);
+        }
       }
     }
     if (changed) setState(() {});
+  }
+
+  static List<Object> _cueData(Cue c) => [c.start, c.end, c.text, c.source];
+
+  /// Replaces every line the page holds; the page draws them itself.
+  void _sendAllCues(List<Cue> cues) {
+    _send({'__vsub': 'opts', 'showSource': appSettings.showSource});
+    _send({
+      '__vsub': 'cues',
+      'list': [for (final c in cues) _cueData(c)],
+    });
   }
 
   Future<void> _startSubtitles() async {
@@ -176,8 +190,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final reuse = saved != null && saved.language == appSettings.language;
     if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
-    void sendCue(Cue c) =>
-        _send({'__vsub': 'cue', 's': c.start, 'e': c.end, 'text': c.text});
+    _send({'__vsub': 'opts', 'showSource': appSettings.showSource});
+    void sendCue(Cue c) => _send({'__vsub': 'cue', 'c': _cueData(c)});
     final session = SubtitleSession(
       input: video.src,
       language: appSettings.language,
@@ -186,7 +200,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       initialCues: reuse ? saved.cues : const [],
       initialCovered: reuse ? saved.covered : const [],
     )..addListener(_onSession);
-    if (reuse) saved.cues.forEach(sendCue);
+    if (reuse) _sendAllCues(saved.cues);
     _saver = SessionSaver(
       session: session,
       page: page,
@@ -219,7 +233,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _session = null;
       _sessionSrc = '';
       _otherVideo = false;
-      _cue = null;
     });
   }
 
@@ -264,7 +277,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final session = _session;
     return SafeArea(
       bottom: false,
       child: Column(
@@ -337,13 +349,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   },
                 ),
                 if (!_started) const _StartHint(),
-                if (session != null)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 84,
-                    child: Center(child: SubtitleText(cue: _cue)),
-                  ),
                 if (_videoVisible)
                   Positioned(
                     left: 8,
@@ -562,7 +567,8 @@ class _StartHint extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 'Mở trang phim ở ô địa chỉ phía trên, bấm phát video, '
-                'rồi bấm nút CC ở thanh hiện ra phía dưới.',
+                'rồi bấm nút CC ở thanh hiện ra phía dưới. Phụ đề hiện '
+                'ngay trên khung video của trang.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium,
               ),

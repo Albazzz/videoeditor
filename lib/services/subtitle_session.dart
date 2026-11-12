@@ -173,6 +173,7 @@ class SubtitleSession extends ChangeNotifier {
           text: text,
           source: c.source,
         );
+        onCue?.call(cues[i]);
         notifyListeners();
       });
     }
