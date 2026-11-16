@@ -5,7 +5,9 @@ workflows:
     max_build_duration: 60
 
     environment:
-      flutter: stable
+      # Same Flutter as local development, so a new stable release cannot
+      # change the build behind our back.
+      flutter: 3.44.0
       xcode: latest
       cocoapods: default
 
@@ -34,7 +36,8 @@ workflows:
       - name: Analyze and test
         script: |
           set -euo pipefail
-          flutter analyze
+          # Deprecation notices (infos) must not stop the build.
+          flutter analyze --no-fatal-infos
           # export_ffmpeg_test needs a desktop ffmpeg with libass, so it is
           # left for local runs.
           flutter test --no-pub test/core_test.dart test/key_store_test.dart test/subtitle_store_test.dart test/subtitle_file_test.dart
