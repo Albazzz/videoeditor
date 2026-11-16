@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../models/cue.dart';
@@ -30,6 +31,7 @@ class BrowserScreen extends StatefulWidget {
 
 class _BrowserScreenState extends State<BrowserScreen> {
   final _address = TextEditingController();
+  final _addressFocus = FocusNode();
   InAppWebViewController? _web;
   double _loading = 0;
   bool _started = false;
@@ -182,6 +184,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _saver?.close();
     _session?.dispose();
     _address.dispose();
+    _addressFocus.dispose();
     super.dispose();
   }
 
@@ -528,6 +531,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  /// Opens what is on the clipboard. Shared text often wraps the link in
+  /// other words ("Xem phim này https://…"), so the link is picked out.
+  Future<void> _pasteAndGo() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim() ?? '';
+    if (!mounted) return;
+    if (text.isEmpty) {
+      toast(context, 'Bộ nhớ tạm đang trống, hãy sao chép link trước');
+      return;
+    }
+    final found = RegExp(r'https?://\S+').firstMatch(text)?.group(0);
+    // A link at the end of a sentence carries its full stop or bracket.
+    final link =
+        found?.replaceFirst(RegExp(r'''[.,;:!?)\]'"]+$'''), '') ?? text;
+    _address.text = link;
+    _go(link);
+  }
+
   Widget _addressBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
@@ -540,6 +561,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           Expanded(
             child: TextField(
               controller: _address,
+              focusNode: _addressFocus,
               keyboardType: TextInputType.url,
               autocorrect: false,
               textInputAction: TextInputAction.go,
@@ -547,9 +569,30 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 hintText: 'Nhập địa chỉ web hoặc từ khoá',
                 isDense: true,
                 filled: true,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
+                contentPadding: const EdgeInsets.fromLTRB(14, 10, 0, 10),
+                suffixIcon: ListenableBuilder(
+                  listenable: _address,
+                  builder: (context, _) => Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_address.text.isNotEmpty)
+                        IconButton(
+                          tooltip: 'Xoá',
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(Icons.cancel, size: 18),
+                          onPressed: () {
+                            _address.clear();
+                            _addressFocus.requestFocus();
+                          },
+                        ),
+                      IconButton(
+                        tooltip: 'Dán link và mở',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.content_paste_go, size: 20),
+                        onPressed: _pasteAndGo,
+                      ),
+                    ],
+                  ),
                 ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(22),
