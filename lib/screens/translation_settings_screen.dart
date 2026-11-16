@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../services/app_settings.dart';
 import '../services/openrouter_translator.dart';
 
-/// Chooses between the offline translator and a language model on
-/// OpenRouter, with the user's own key.
+/// Chooses between the offline translator and a language model on an AI
+/// service (OpenRouter, Vercel AI Gateway), with the user's own key.
 class TranslationSettingsScreen extends StatefulWidget {
   const TranslationSettingsScreen({super.key});
 
@@ -33,19 +33,21 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _editKey() async {
-    final controller = TextEditingController(text: appSettings.openRouterKey);
+  Future<void> _editKey(AiProvider provider) async {
+    final controller = TextEditingController(
+      text: appSettings.keyFor(provider),
+    );
     final key = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Key OpenRouter'),
+        title: Text('Key ${provider.name}'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Tạo key ở openrouter.ai → Keys, rồi dán vào đây. Key được '
-              'cất trong Keychain của iPhone.',
+            Text(
+              '${provider.keyHelp}, rồi dán vào đây. Key được cất trong '
+              'Keychain của iPhone.',
             ),
             const SizedBox(height: 12),
             TextField(
@@ -53,9 +55,9 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
               autocorrect: false,
               enableSuggestions: false,
               obscureText: true,
-              decoration: const InputDecoration(
-                hintText: 'sk-or-v1-…',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                hintText: provider.keyHint,
+                border: const OutlineInputBorder(),
               ),
             ),
           ],
@@ -78,12 +80,14 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
     );
     controller.dispose();
     if (key == null) return;
-    await appSettings.setOpenRouterKey(key);
+    await appSettings.setKey(provider, key);
     setState(() => _testResult = null);
   }
 
-  Future<void> _editCustomModel() async {
-    final controller = TextEditingController(text: appSettings.openRouterModel);
+  Future<void> _editCustomModel(AiProvider provider) async {
+    final controller = TextEditingController(
+      text: appSettings.modelFor(provider),
+    );
     final model = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -93,7 +97,7 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
           autocorrect: false,
           decoration: const InputDecoration(
             hintText: 'vd. openai/gpt-5-mini',
-            helperText: 'Tên model như trên trang openrouter.ai/models',
+            helperText: 'Tên model đúng như trang danh sách model',
             border: OutlineInputBorder(),
           ),
         ),
@@ -111,18 +115,19 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
     );
     controller.dispose();
     if (model != null && model.isNotEmpty) {
-      appSettings.setOpenRouterModel(model);
+      appSettings.setModel(provider, model);
     }
   }
 
-  Future<void> _test() async {
+  Future<void> _test(AiProvider provider) async {
     setState(() {
       _testing = true;
       _testResult = null;
     });
     final t = OpenRouterTranslator(
-      apiKey: appSettings.openRouterKey,
-      model: appSettings.openRouterModel,
+      provider: provider,
+      apiKey: appSettings.keyFor(provider),
+      model: appSettings.modelFor(provider),
       retryDelay: const Duration(milliseconds: 500),
     );
     try {
@@ -143,10 +148,10 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final cloud = appSettings.translateEngine == 'openrouter';
-    final key = appSettings.openRouterKey;
-    final model = appSettings.openRouterModel;
-    final preset = kOpenRouterModels.where((m) => m.id == model).firstOrNull;
+    final provider = appSettings.aiProvider;
+    final key = provider == null ? '' : appSettings.keyFor(provider);
+    final model = provider == null ? '' : appSettings.modelFor(provider);
+    final preset = provider?.models.where((m) => m.id == model).firstOrNull;
     return Scaffold(
       appBar: AppBar(title: const Text('Cách dịch')),
       body: ListView(
@@ -171,24 +176,32 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
                     'tốn rất ít tiền hoặc dùng model miễn phí',
                   ),
                 ),
+                RadioListTile(
+                  value: 'vercel',
+                  title: Text('Vercel AI Gateway (AI)'),
+                  subtitle: Text(
+                    'Cùng các model như OpenRouter, trả tiền qua Vercel. '
+                    'Cần key AI Gateway và mạng',
+                  ),
+                ),
               ],
             ),
           ),
-          if (cloud) ...[
+          if (provider != null) ...[
             const Divider(),
             ListTile(
               leading: const Icon(Icons.key),
-              title: const Text('Key OpenRouter'),
+              title: Text('Key ${provider.name}'),
               subtitle: Text(
                 key.isEmpty
-                    ? 'Chưa có key: chưa dịch bằng OpenRouter được'
-                    : 'sk-…${key.substring(key.length - 4)}',
+                    ? 'Chưa có key: chưa dịch bằng ${provider.name} được'
+                    : '…${key.substring(key.length < 4 ? 0 : key.length - 4)}',
                 style: key.isEmpty
                     ? const TextStyle(color: Colors.orange)
                     : null,
               ),
               trailing: const Icon(Icons.edit),
-              onTap: _editKey,
+              onTap: () => _editKey(provider),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -197,11 +210,11 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
             RadioGroup<String>(
               groupValue: preset?.id ?? '',
               onChanged: (v) {
-                if (v != null) appSettings.setOpenRouterModel(v);
+                if (v != null) appSettings.setModel(provider, v);
               },
               child: Column(
                 children: [
-                  for (final m in kOpenRouterModels)
+                  for (final m in provider.models)
                     RadioListTile(
                       value: m.id,
                       title: Text(m.name),
@@ -219,7 +232,7 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
               ),
               title: const Text('Model khác…'),
               subtitle: Text(preset == null ? model : 'Gõ tên model bất kỳ'),
-              onTap: _editCustomModel,
+              onTap: () => _editCustomModel(provider),
             ),
             Padding(
               padding: const EdgeInsets.all(16),
@@ -227,7 +240,9 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   FilledButton.tonalIcon(
-                    onPressed: key.isEmpty || _testing ? null : _test,
+                    onPressed: key.isEmpty || _testing
+                        ? null
+                        : () => _test(provider),
                     icon: _testing
                         ? const SizedBox.square(
                             dimension: 16,
@@ -242,9 +257,11 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
                   ],
                   const SizedBox(height: 12),
                   Text(
-                    'Phim dài được gửi từng đoạn 30 câu, kèm vài câu trước đó '
-                    'để giữ mạch và cách xưng hô. Đoạn nào lỗi mạng sẽ tự '
-                    'thử lại. Chi tiết từng lần gửi có trong Nhật ký lỗi.',
+                    'Câu được gom thành từng đoạn khoảng 1.500 chữ (không cắt '
+                    'ngang câu), gửi 3 đoạn cùng lúc, kèm vài câu trước đó để '
+                    'giữ mạch và cách xưng hô. Đoạn lỗi mạng tự thử lại; hết '
+                    'tiền hoặc sai key thì tự chuyển sang dịch trên máy. Chi '
+                    'tiết từng lần gửi có trong Nhật ký lỗi.',
                     style: theme.textTheme.bodySmall,
                   ),
                 ],
@@ -259,14 +276,12 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
 
 /// One-line summary for the Settings list.
 String translationSummary() {
-  if (appSettings.translateEngine != 'openrouter') {
-    return 'Trên máy (Google ML Kit)';
+  final p = appSettings.aiProvider;
+  if (p == null) return 'Trên máy (Google ML Kit)';
+  if (appSettings.keyFor(p).isEmpty) {
+    return '${p.name} · chưa có key, đang dùng dịch trên máy';
   }
-  if (appSettings.openRouterKey.isEmpty) {
-    return 'OpenRouter · chưa có key, đang dùng dịch trên máy';
-  }
-  final m = kOpenRouterModels
-      .where((x) => x.id == appSettings.openRouterModel)
-      .firstOrNull;
-  return 'OpenRouter · ${m?.name ?? appSettings.openRouterModel}';
+  final id = appSettings.modelFor(p);
+  final m = p.models.where((x) => x.id == id).firstOrNull;
+  return '${p.name} · ${m?.name ?? id}';
 }

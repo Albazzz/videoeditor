@@ -43,8 +43,20 @@ class AppSettings extends ChangeNotifier {
   /// Kept in the Keychain, not with the other settings.
   String openRouterKey = '';
 
-  bool get useOpenRouter =>
-      translateEngine == 'openrouter' && openRouterKey.isNotEmpty;
+  String vercelModel = kVercel.defaultModel;
+  String vercelKey = '';
+
+  /// The AI service chosen for translation, or null for the phone's own.
+  AiProvider? get aiProvider => aiProviderById(translateEngine);
+
+  String keyFor(AiProvider p) => p == kVercel ? vercelKey : openRouterKey;
+  String modelFor(AiProvider p) => p == kVercel ? vercelModel : openRouterModel;
+
+  /// Translation goes to an AI service (one is chosen and has a key).
+  bool get useCloud {
+    final p = aiProvider;
+    return p != null && keyFor(p).isNotEmpty;
+  }
 
   static const _secure = FlutterSecureStorage();
 
@@ -74,8 +86,10 @@ class AppSettings extends ChangeNotifier {
     translateEngine = prefs.getString('translateEngine') ?? 'device';
     openRouterModel =
         prefs.getString('openRouterModel') ?? kDefaultOpenRouterModel;
+    vercelModel = prefs.getString('vercelModel') ?? kVercel.defaultModel;
     try {
       openRouterKey = await _secure.read(key: 'openrouter_key') ?? '';
+      vercelKey = await _secure.read(key: 'vercel_key') ?? '';
     } catch (_) {}
     notifyListeners();
   }
@@ -101,6 +115,29 @@ class AppSettings extends ChangeNotifier {
   void setTranslateEngine(String value) {
     translateEngine = value;
     _prefs?.setString('translateEngine', value);
+    notifyListeners();
+  }
+
+  void setModel(AiProvider p, String value) {
+    if (p == kVercel) {
+      vercelModel = value;
+      _prefs?.setString('vercelModel', value);
+      notifyListeners();
+    } else {
+      setOpenRouterModel(value);
+    }
+  }
+
+  Future<void> setKey(AiProvider p, String value) async {
+    if (p != kVercel) return setOpenRouterKey(value);
+    vercelKey = value.trim();
+    try {
+      if (vercelKey.isEmpty) {
+        await _secure.delete(key: 'vercel_key');
+      } else {
+        await _secure.write(key: 'vercel_key', value: vercelKey);
+      }
+    } catch (_) {}
     notifyListeners();
   }
 

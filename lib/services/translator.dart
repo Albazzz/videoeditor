@@ -33,10 +33,12 @@ abstract class Translator {
   /// switch, for when the user asked for a translation there and then.
   static Translator create({bool force = false}) {
     if (!force && !appSettings.translate) return PassthroughTranslator();
-    if (appSettings.useOpenRouter) {
+    final cloud = appSettings.aiProvider;
+    if (cloud != null && appSettings.useCloud) {
       return OpenRouterTranslator(
-        apiKey: appSettings.openRouterKey,
-        model: appSettings.openRouterModel,
+        provider: cloud,
+        apiKey: appSettings.keyFor(cloud),
+        model: appSettings.modelFor(cloud),
       );
     }
     return TranslatorPacks.supported
@@ -46,11 +48,12 @@ abstract class Translator {
 
   /// Whether anything can translate on this device.
   static bool get available =>
-      appSettings.useOpenRouter || TranslatorPacks.supported;
+      appSettings.useCloud || TranslatorPacks.supported;
 
   /// Short description for screens.
-  static String get label => appSettings.useOpenRouter
-      ? 'OpenRouter · ${appSettings.openRouterModel}'
+  static String get label => appSettings.useCloud
+      ? '${appSettings.aiProvider!.name} · '
+            '${appSettings.modelFor(appSettings.aiProvider!)}'
       : 'trên máy (Google ML Kit)';
 }
 

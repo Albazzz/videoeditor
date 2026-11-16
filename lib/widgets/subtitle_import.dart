@@ -168,8 +168,8 @@ class _ImportSheetState extends State<_ImportSheet> {
                     ? 'Máy này không có bộ dịch'
                     : _language == 'vi'
                     ? 'Phụ đề đã là tiếng Việt'
-                    : appSettings.useOpenRouter
-                    ? 'Dịch qua OpenRouter (${appSettings.openRouterModel})'
+                    : appSettings.useCloud
+                    ? 'Dịch qua ${Translator.label}'
                     : 'Dịch ngay trên máy, lần đầu tải gói dịch ~30 MB',
               ),
               value: canTranslate && _translate,
@@ -228,7 +228,7 @@ class _TranslateDialogState extends State<_TranslateDialog> {
 
   Future<void> _run() async {
     final name = kSubtitleLanguages[widget.language] ?? widget.language;
-    final cloud = appSettings.useOpenRouter;
+    final cloud = appSettings.useCloud;
     try {
       if (!cloud) {
         setState(
@@ -245,7 +245,7 @@ class _TranslateDialogState extends State<_TranslateDialog> {
     if (!mounted || _cancelled) return;
     setState(
       () => _status = cloud
-          ? 'Đang dịch $name → tiếng Việt qua OpenRouter, từng đoạn 30 dòng'
+          ? 'Đang dịch $name → tiếng Việt qua ${Translator.label}'
           : 'Đang dịch $name → tiếng Việt',
     );
 

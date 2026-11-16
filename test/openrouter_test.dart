@@ -12,12 +12,14 @@ MockClient fakeServer({
   List<Map<String, Object?>>? seen,
   Duration delay = Duration.zero,
   void Function(int inFlight)? onLoad,
+  void Function(Uri url)? onUrl,
 }) {
   var call = 0;
   var inFlight = 0;
   return MockClient((req) async {
     final body = jsonDecode(req.body) as Map<String, Object?>;
     seen?.add(body);
+    onUrl?.call(req.url);
     if (call < failFirst.length) {
       return http.Response('{"error":{"message":"busy"}}', failFirst[call++]);
     }
@@ -203,5 +205,40 @@ void main() {
             .having((e) => e.message, 'message', contains('hết tiền')),
       ),
     );
+  });
+
+  test('Vercel AI Gateway: same requests, its own address and name', () async {
+    Uri? sentTo;
+    final t = OpenRouterTranslator(
+      provider: kVercel,
+      apiKey: 'k',
+      model: kVercel.defaultModel,
+      client: fakeServer(onUrl: (u) => sentTo = u),
+      retryDelay: const Duration(milliseconds: 1),
+    );
+    expect(await t.translateBatch(['你好'], 'zh'), ['VI:你好']);
+    expect(
+      sentTo.toString(),
+      'https://ai-gateway.vercel.sh/v1/chat/completions',
+    );
+
+    final broke = OpenRouterTranslator(
+      provider: kVercel,
+      apiKey: 'k',
+      model: 'm',
+      client: MockClient((_) async => http.Response('{}', 401)),
+    );
+    await expectLater(
+      broke.translateBatch(['a'], 'ja'),
+      throwsA(
+        isA<OpenRouterError>().having(
+          (e) => e.message,
+          'message',
+          contains('Vercel AI Gateway'),
+        ),
+      ),
+    );
+    expect(aiProviderById('vercel'), kVercel);
+    expect(aiProviderById('device'), isNull);
   });
 }

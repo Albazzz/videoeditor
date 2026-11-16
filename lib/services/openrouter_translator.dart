@@ -32,6 +32,11 @@ const kOpenRouterModels = [
     'Rất giỏi tiếng Trung · ~500đ một phim',
   ),
   OpenRouterModel(
+    'mistralai/mistral-nemo',
+    'Mistral Nemo',
+    'Rẻ nhất (~60đ một phim), nhanh',
+  ),
+  OpenRouterModel(
     'google/gemma-4-31b-it:free',
     'Gemma 4 31B (miễn phí)',
     'Không mất tiền nhưng bị giới hạn số lần gọi mỗi ngày',
@@ -39,6 +44,88 @@ const kOpenRouterModels = [
 ];
 
 const kDefaultOpenRouterModel = 'qwen/qwen3.7-flash';
+
+/// Prices as listed by Vercel AI Gateway in November 2026. The first is
+/// the default.
+const kVercelModels = [
+  OpenRouterModel(
+    'mistral/mistral-nemo',
+    'Mistral Nemo',
+    'Rẻ nhất (~60đ một phim), nhanh',
+  ),
+  OpenRouterModel(
+    'alibaba/qwen3.7-flash',
+    'Qwen 3.7 Flash',
+    'Rẻ nhất, giỏi tiếng Trung/Nhật · ~150đ một phim',
+  ),
+  OpenRouterModel(
+    'deepseek/deepseek-v4-flash',
+    'DeepSeek V4 Flash',
+    'Rất giỏi tiếng Trung, rẻ · ~300đ một phim',
+  ),
+  OpenRouterModel(
+    'google/gemini-3.1-flash-lite',
+    'Gemini 3.1 Flash Lite',
+    'Dịch tự nhiên hơn · ~1.500đ một phim',
+  ),
+  OpenRouterModel(
+    'openai/gpt-5-nano',
+    'GPT-5 Nano',
+    'Rẻ, ổn với tiếng Nhật · ~300đ một phim',
+  ),
+];
+
+/// A service that runs language models behind an OpenAI-style
+/// chat-completions API.
+class AiProvider {
+  const AiProvider({
+    required this.id,
+    required this.name,
+    required this.endpoint,
+    required this.models,
+    required this.keyHelp,
+    required this.keyHint,
+  });
+
+  /// Stored in Settings as the translation engine.
+  final String id;
+  final String name;
+  final String endpoint;
+  final List<OpenRouterModel> models;
+
+  /// Where the user gets a key.
+  final String keyHelp;
+  final String keyHint;
+
+  String get defaultModel => models.first.id;
+}
+
+const kOpenRouter = AiProvider(
+  id: 'openrouter',
+  name: 'OpenRouter',
+  endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+  models: kOpenRouterModels,
+  keyHelp: 'Tạo key ở openrouter.ai → Keys',
+  keyHint: 'sk-or-v1-…',
+);
+
+const kVercel = AiProvider(
+  id: 'vercel',
+  name: 'Vercel AI Gateway',
+  endpoint: 'https://ai-gateway.vercel.sh/v1/chat/completions',
+  models: kVercelModels,
+  keyHelp: 'Tạo key ở vercel.com → AI Gateway → API Keys',
+  keyHint: 'Khoá API của AI Gateway',
+);
+
+const kAiProviders = [kOpenRouter, kVercel];
+
+AiProvider? aiProviderById(String id) {
+  for (final p in kAiProviders) {
+    if (p.id == id) return p;
+  }
+  return null;
+}
 
 /// Raised for problems retrying will not fix (wrong key, no credit).
 class OpenRouterError implements Exception {
@@ -75,7 +162,8 @@ const _languageNames = {
 String _languageName(String code) =>
     _languageNames[code] ?? 'the language with code "$code"';
 
-/// Translates subtitles with a language model on OpenRouter.
+/// Translates subtitles with a language model on OpenRouter or another
+/// [AiProvider] with the same API.
 ///
 /// Lines go in requests of about [budget] characters (never cutting a
 /// line), up to [parallel] requests at a time. Each request numbers its
@@ -86,6 +174,7 @@ class OpenRouterTranslator implements Translator {
   OpenRouterTranslator({
     required this.apiKey,
     required this.model,
+    this.provider = kOpenRouter,
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
     this.budget = 1500,
@@ -97,6 +186,7 @@ class OpenRouterTranslator implements Translator {
 
   final String apiKey;
   final String model;
+  final AiProvider provider;
   final Duration gatherFor;
 
   /// Characters of original text per request: Chinese or Japanese lines
@@ -112,9 +202,7 @@ class OpenRouterTranslator implements Translator {
 
   final http.Client _client;
   final bool _ownsClient;
-  static final _endpoint = Uri.parse(
-    'https://openrouter.ai/api/v1/chat/completions',
-  );
+  late final _endpoint = Uri.parse(provider.endpoint);
 
   final _waiting = <_Waiting>[];
   int _waitingChars = 0;
@@ -399,28 +487,28 @@ class OpenRouterTranslator implements Translator {
         final ms = DateTime.now().difference(started).inMilliseconds;
         final code = res.statusCode;
         if (code == 401 || code == 403) {
-          throw const OpenRouterError(
-            'Key OpenRouter không đúng hoặc đã bị thu hồi',
+          throw OpenRouterError(
+            'Key ${provider.name} không đúng hoặc đã bị thu hồi',
             account: true,
           );
         }
         if (code == 402) {
-          throw const OpenRouterError(
-            'Tài khoản OpenRouter hết tiền, nạp thêm hoặc chọn model miễn phí',
+          throw OpenRouterError(
+            'Tài khoản ${provider.name} hết tiền, nạp thêm hoặc chọn model rẻ hơn',
             account: true,
           );
         }
         if (code == 400 || code == 404) {
           throw OpenRouterError(
-            'OpenRouter từ chối ($code): ${_errorText(res.body)}',
+            '${provider.name} từ chối ($code): ${_errorText(res.body)}',
           );
         }
         if (code != 200) {
-          throw _Retry('OpenRouter lỗi $code: ${_errorText(res.body)}');
+          throw _Retry('${provider.name} lỗi $code: ${_errorText(res.body)}');
         }
         final body = jsonDecode(utf8.decode(res.bodyBytes));
         if (body is Map && body['error'] != null) {
-          throw _Retry('OpenRouter: ${_errorText(res.body)}');
+          throw _Retry('${provider.name}: ${_errorText(res.body)}');
         }
         final content = '${body['choices']?[0]?['message']?['content'] ?? ''}';
         final usage = body['usage'];
@@ -446,7 +534,7 @@ class OpenRouterTranslator implements Translator {
       } catch (e) {
         if (attempt >= attempts || _disposed) {
           AppLog.e('openrouter', 'Bỏ sau $attempt lần: $e');
-          throw OpenRouterError('Không dịch được qua OpenRouter: $e');
+          throw OpenRouterError('Không dịch được qua ${provider.name}: $e');
         }
         final wait = retryDelay * (1 << (attempt - 1));
         AppLog.i(
