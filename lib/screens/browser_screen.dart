@@ -67,6 +67,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   /// Lines on show were made earlier but do not cover the whole film.
   bool _canCarryOn = false;
 
+  /// Subtitles are kept but not drawn (CC switched off).
+  bool _hidden = false;
+
+  /// The page has confirmed it holds the lines sent (logged once).
+  bool _ackLogged = false;
+
   /// Top-level page address, kept in step with navigation.
   String _pageUrl = '';
 
@@ -290,9 +296,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
     _video = video;
     final fileCues = _fileCues;
+    final want = _session?.cues.length ?? fileCues?.length ?? 0;
+    if (!_ackLogged && want > 0 && !_hidden && video.cueCount >= want) {
+      _ackLogged = true;
+      AppLog.i('web', 'Trang đã nhận ${video.cueCount} dòng phụ đề');
+    }
     if (fileCues != null &&
+        !_hidden &&
         video.cueCount < fileCues.length &&
-        DateTime.now().difference(_lastResend) > const Duration(seconds: 3)) {
+        DateTime.now().difference(_lastResend) > const Duration(seconds: 1)) {
       _lastResend = DateTime.now();
       _sendAllCues(fileCues);
     }
@@ -306,8 +318,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
         session.updatePosition(video.time, duration: video.duration);
         // The player frame was reloaded and lost its lines: send them again.
         final now = DateTime.now();
-        if (video.cueCount < session.cues.length &&
-            now.difference(_lastResend) > const Duration(seconds: 3)) {
+        if (!_hidden &&
+            video.cueCount < session.cues.length &&
+            now.difference(_lastResend) > const Duration(seconds: 1)) {
           _lastResend = now;
           _sendAllCues(session.cues);
         }
@@ -508,8 +521,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     bool imported = true,
   }) {
     if (_session != null) _stopSubtitles();
+    _ackLogged = false;
     setState(() {
       _canCarryOn = false;
+      _hidden = false;
       _fileImported = imported;
       _fileCues = cues;
       _filePage = page;
@@ -562,7 +577,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
     _send(appSettings.subtitleOpts);
-    void sendCue(Cue c) => _send({'__vsub': 'cue', 'c': _cueData(c)});
+    void sendCue(Cue c) {
+      if (!_hidden) _send({'__vsub': 'cue', 'c': _cueData(c)});
+    }
+
     final session = SubtitleSession(
       input: video.src,
       language: appSettings.language,
@@ -599,6 +617,37 @@ class _BrowserScreenState extends State<BrowserScreen> {
     session.start(_video?.time ?? video.time);
   }
 
+  /// CC with lines on the page: show or hide them; work goes on.
+  void _toggleVisible() {
+    setState(() => _hidden = !_hidden);
+    if (_hidden) {
+      _send({'__vsub': 'clear'});
+    } else {
+      _ackLogged = false;
+      _sendAllCues(_session?.cues ?? _fileCues ?? const []);
+    }
+  }
+
+  /// Stops making subtitles but keeps the lines made so far on screen;
+  /// "Làm tiếp" carries on later.
+  Future<void> _stopMaking() async {
+    final session = _session;
+    if (session == null) return;
+    final cues = List.of(session.cues);
+    final whole = coversWholeVideo(
+      session.covered,
+      session.duration,
+      reachedEnd: session.reachedEnd,
+    );
+    final language = session.language;
+    final (page, _) = await _pageInfo();
+    if (!mounted || _session != session) return;
+    AppLog.i('web', 'Dừng làm phụ đề (${cues.length} dòng)');
+    _stopSubtitles();
+    _showFileCues(cues, page, language, imported: false);
+    _canCarryOn = !whole && (_video?.playable ?? false);
+  }
+
   void _onSession() {
     KeepAwake.update(_session);
     if (mounted) setState(() {});
@@ -606,6 +655,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _stopSubtitles() {
     KeepAwake.set(false);
+    _hidden = false;
+    _ackLogged = false;
     ActiveWork.end(_session);
     _canCarryOn = false;
     _session?.removeListener(_onSession);
@@ -801,11 +852,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
               ),
             IconButton(
               tooltip: 'Phụ đề',
-              color: active ? Colors.lightBlueAccent : Colors.white,
+              color: active && !_hidden ? Colors.lightBlueAccent : Colors.white,
               icon: Icon(
-                active ? Icons.closed_caption : Icons.closed_caption_outlined,
+                active && !_hidden
+                    ? Icons.closed_caption
+                    : Icons.closed_caption_outlined,
               ),
-              onPressed: active ? _stopSubtitles : _startSubtitles,
+              onPressed: active ? _toggleVisible : _startSubtitles,
             ),
           ],
         ),
@@ -1109,6 +1162,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onSelected: (v) => switch (v) {
                 'import' => _importForPage(),
                 'library' => _useFromLibrary(),
+                'player' => _openInPlayer(),
+                'remove' => _stopSubtitles(),
                 'details' when session != null => showSessionDetails(
                   context,
                   session,
@@ -1156,6 +1211,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     value: 'details',
                     child: Text('Chi tiết phụ đề'),
                   ),
+                if (video.playable)
+                  const PopupMenuItem(
+                    value: 'player',
+                    child: Text('Phát trong app (toàn màn hình)'),
+                  ),
+                if (active)
+                  const PopupMenuItem(
+                    value: 'remove',
+                    child: Text('Bỏ phụ đề khỏi trang'),
+                  ),
               ],
             ),
             if (active)
@@ -1164,23 +1229,28 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 icon: const Icon(Icons.text_fields, size: 20),
                 onPressed: () => showSubtitleStyle(context),
               ),
-            IconButton(
-              tooltip: 'Phát trong app',
-              icon: const Icon(Icons.open_in_full, size: 20),
-              onPressed: video.playable ? _openInPlayer : null,
-            ),
-            if (_canCarryOn && fileCues != null && session == null)
-              TextButton.icon(
+            // Making subtitles: stop (keeping the lines) or carry on.
+            if (session != null)
+              IconButton(
+                tooltip: 'Dừng làm phụ đề (giữ các dòng đã có)',
+                icon: const Icon(Icons.pause_circle_outline, size: 24),
+                onPressed: _stopMaking,
+              )
+            else if (_canCarryOn && fileCues != null)
+              IconButton(
+                tooltip: 'Làm tiếp phần còn thiếu',
+                color: Colors.green,
+                icon: const Icon(Icons.play_circle, size: 26),
                 onPressed: _startSubtitles,
-                icon: const Icon(Icons.play_arrow, size: 18),
-                label: const Text('Làm tiếp'),
               ),
             IconButton.filledTonal(
-              tooltip: 'Phụ đề',
-              isSelected: active,
+              tooltip: active
+                  ? (_hidden ? 'Hiện phụ đề' : 'Ẩn phụ đề')
+                  : 'Làm phụ đề',
+              isSelected: active && !_hidden,
               icon: const Icon(Icons.closed_caption_outlined),
               selectedIcon: const Icon(Icons.closed_caption),
-              onPressed: active ? _stopSubtitles : _startSubtitles,
+              onPressed: active ? _toggleVisible : _startSubtitles,
             ),
           ],
         ),

@@ -466,6 +466,17 @@ class SubtitleSession extends ChangeNotifier {
           : _feedError;
       AppLog.e('ffmpeg', tail);
     }
+    // Links often expire near the end of a long film; a few seconds
+    // short of the known length is the end.
+    if (_feedError.isNotEmpty &&
+        duration > 0 &&
+        processedUntil >= duration - 20) {
+      AppLog.i(
+        'phụ đề',
+        'Lỗi ở ${_clock(processedUntil)}, sát cuối phim: coi là xong',
+      );
+      _feedError = '';
+    }
     if (_feedError.isNotEmpty && !heardNothing && _feedRetries < 6) {
       // Part way through: links often carry a token that expires. Fetch
       // the playlist again and carry on from where it stopped.
@@ -487,6 +498,8 @@ class SubtitleSession extends ChangeNotifier {
       // The audio really ran out (not a stop at existing subtitles).
       if (_runEnd == null) reachedEnd = true;
       finished = true;
+      // Lines whose translation failed or timed out get another go.
+      _retranslate();
       _set(
         cues.isEmpty
             ? 'Đã nghe hết nhưng không thấy lời thoại'
@@ -854,7 +867,7 @@ class SubtitleSession extends ChangeNotifier {
       'Chế độ: ${_mode == SubtitleMode.whole ? 'làm hết phim' : 'chỉ làm trước chỗ đang xem'}'
           '${paused ? ' (đang nghỉ)' : ''}',
       'Số dòng phụ đề: ${cues.length}',
-      'Bộ dịch: ${_translatorReady ? 'sẵn sàng' : 'chưa sẵn sàng'}'
+      'Bộ dịch: ${Translator.label} · ${_translatorReady ? 'sẵn sàng' : 'chưa sẵn sàng'}'
           '${translatorNote.isEmpty ? '' : ' ($translatorNote)'}',
       'Dịch lỗi: $_translateFailures lần'
           '${_lastTranslateError.isEmpty ? '' : ' · ${clip(_lastTranslateError)}'}',

@@ -106,6 +106,27 @@ void main() {
     expect(File('${dir.path}/subs/old.json').existsSync(), isFalse);
   });
 
+  test('renaming keeps the lines; untranslated ones are counted', () async {
+    final s = SavedSubs(
+      id: 'r',
+      title: 'tên cũ',
+      page: 'https://x.example/r',
+      language: 'ja',
+      updated: DateTime(2026, 1, 1),
+      cues: const [
+        Cue(start: 1, end: 2, text: 'Xin chào', source: 'こんにちは'),
+        Cue(start: 3, end: 4, text: 'ありがとう', source: 'ありがとう'),
+      ],
+      covered: const [(0, 10)],
+    );
+    expect(s.untranslated, 1);
+    await SubtitleStore.save(s.withTitle('Tập 1 - bản đẹp'));
+    final back = (await SubtitleStore.load('r'))!;
+    expect(back.title, 'Tập 1 - bản đẹp');
+    expect(back.cues.length, 2);
+    expect(back.covered.single, (0.0, 10.0));
+  });
+
   test('a damaged file is skipped instead of breaking the list', () async {
     final bad = await File('${dir.path}/subs/bad.json').create(recursive: true);
     bad.writeAsStringSync('{not json');

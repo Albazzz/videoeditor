@@ -79,6 +79,24 @@ class SavedSubs {
   /// Read from a subtitle file instead of made from the audio.
   final bool imported;
 
+  SavedSubs withTitle(String newTitle) => SavedSubs(
+    id: id,
+    title: newTitle,
+    page: page,
+    language: language,
+    updated: updated,
+    cues: cues,
+    covered: covered,
+    duration: duration,
+    complete: complete,
+    imported: imported,
+  );
+
+  /// Lines still in the original language (translation failed or was
+  /// off when they were made).
+  int get untranslated =>
+      cues.where((c) => c.source.isNotEmpty && c.text == c.source).length;
+
   SavedSubs withCues(List<Cue> newCues) => SavedSubs(
     id: id,
     title: title,

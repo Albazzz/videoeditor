@@ -161,6 +161,7 @@ const String kPageScript = r'''
     if (trackVideo !== v) {
       trackVideo = v;
       track = v.addTextTrack('subtitles', 'Tiếng Việt', 'vi');
+      fullscreen = !!v.webkitDisplayingFullscreen;
       track.mode = fullscreen ? 'showing' : 'hidden';
       v.addEventListener('webkitbeginfullscreen', function () {
         fullscreen = true;
@@ -257,6 +258,18 @@ const String kPageScript = r'''
   // Ten times a second is plenty for subtitles and spares busy pages the
   // layout work of every animation frame; without lines it barely runs.
   (function loop() {
+    // The system's full screen only shows the text track. Follow it from
+    // the video itself: the events are missed when the track is made
+    // after the video went full screen.
+    try {
+      if (track && trackVideo) {
+        var fs = !!trackVideo.webkitDisplayingFullscreen;
+        if (fs !== fullscreen) {
+          fullscreen = fs;
+          track.mode = fs ? 'showing' : 'hidden';
+        }
+      }
+    } catch (e) {}
     try { draw(); } catch (e) {}
     setTimeout(loop, cues.length ? 100 : 500);
   })();

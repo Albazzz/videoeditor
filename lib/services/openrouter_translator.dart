@@ -139,22 +139,45 @@ class OpenRouterTranslator implements Translator {
     final w = _Waiting(text, lang);
     _waiting.add(w);
     _waitingChars += text.length;
-    // A full request goes at once; otherwise wait a moment for more.
-    if (_waitingChars >= budget || _waiting.length >= maxLines) {
-      _flush();
-    } else {
-      _gather ??= Timer(gatherFor, _flush);
-    }
+    _dispatch();
     return w.done.future;
   }
 
-  void _flush() {
+  /// Live lines in requests now running.
+  int _liveRequests = 0;
+
+  /// Sends waiting lines whenever a request slot is free. A request goes
+  /// once it is full (about [budget] characters) or its oldest line has
+  /// waited [gatherFor]; while all slots are busy lines pile up, so the
+  /// next request takes many at once. That way translation keeps up even
+  /// when speech is heard much faster than the film plays.
+  void _dispatch() {
     _gather?.cancel();
     _gather = null;
-    if (_waiting.isEmpty) return;
-    final batch = List.of(_waiting);
-    _waiting.clear();
-    _waitingChars = 0;
+    while (_waiting.isNotEmpty && _liveRequests < parallel && !_disposed) {
+      final full = _waitingChars >= budget || _waiting.length >= maxLines;
+      final age = DateTime.now().difference(_waiting.first.since);
+      if (!full && age < gatherFor) {
+        _gather = Timer(gatherFor - age, _dispatch);
+        return;
+      }
+      final batch = <_Waiting>[];
+      var chars = 0;
+      while (_waiting.isNotEmpty) {
+        final next = _waiting.first;
+        if (batch.isNotEmpty &&
+            (chars + next.text.length > budget || batch.length >= maxLines)) {
+          break;
+        }
+        batch.add(_waiting.removeAt(0));
+        chars += next.text.length;
+      }
+      _waitingChars -= chars;
+      _sendLive(batch);
+    }
+  }
+
+  void _sendLive(List<_Waiting> batch) {
     // Lines heard as different languages ('auto') go separately.
     final byLang = <String, List<_Waiting>>{};
     for (final w in batch) {
@@ -163,31 +186,37 @@ class OpenRouterTranslator implements Translator {
     for (final entry in byLang.entries) {
       final items = entry.value;
       final context = List.of(_recent);
-      _translateChunk([for (final w in items) w.text], entry.key, context).then(
-        (out) {
-          for (var i = 0; i < items.length; i++) {
-            final t = out[i];
-            if (t == null) {
-              items[i].done.completeError(
-                const OpenRouterError('Model không trả câu này'),
-              );
-            } else {
-              if (_done.length > 3000) _done.clear();
-              _done['${items[i].lang}|${items[i].text}'] = t;
-              _recent.add((items[i].text, t));
-              items[i].done.complete(t);
-            }
-          }
-          while (_recent.length > 6) {
-            _recent.removeAt(0);
-          }
-        },
-        onError: (Object e) {
-          for (final w in items) {
-            w.done.completeError(e);
-          }
-        },
-      );
+      _liveRequests++;
+      _translateChunk([for (final w in items) w.text], entry.key, context)
+          .then(
+            (out) {
+              for (var i = 0; i < items.length; i++) {
+                final t = out[i];
+                if (t == null) {
+                  items[i].done.completeError(
+                    const OpenRouterError('Model không trả câu này'),
+                  );
+                } else {
+                  if (_done.length > 3000) _done.clear();
+                  _done['${items[i].lang}|${items[i].text}'] = t;
+                  _recent.add((items[i].text, t));
+                  items[i].done.complete(t);
+                }
+              }
+              while (_recent.length > 6) {
+                _recent.removeAt(0);
+              }
+            },
+            onError: (Object e) {
+              for (final w in items) {
+                w.done.completeError(e);
+              }
+            },
+          )
+          .whenComplete(() {
+            _liveRequests--;
+            _dispatch();
+          });
     }
   }
 
@@ -354,7 +383,7 @@ class OpenRouterTranslator implements Translator {
               headers: {
                 'Authorization': 'Bearer $apiKey',
                 'Content-Type': 'application/json',
-                'X-Title': 'Video Sub',
+                'X-Title': 'AIcall app',
               },
               body: jsonEncode({
                 'model': model,
@@ -510,6 +539,7 @@ class _Waiting {
   _Waiting(this.text, this.lang);
   final String text;
   final String lang;
+  final since = DateTime.now();
   final done = Completer<String>();
 }
 

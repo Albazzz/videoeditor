@@ -167,4 +167,27 @@ void main() {
     expect(seen.length, 1);
     await t.dispose();
   });
+
+  test('a backlog of live lines goes in a few big requests', () async {
+    final seen = <Map<String, Object?>>[];
+    final t = OpenRouterTranslator(
+      apiKey: 'k',
+      model: 'm',
+      client: fakeServer(seen: seen, delay: const Duration(milliseconds: 200)),
+      gatherFor: const Duration(milliseconds: 20),
+      parallel: 1,
+      retryDelay: const Duration(milliseconds: 1),
+    );
+    // Heard far faster than one slow request at a time can carry singly.
+    final futures = <Future<String>>[];
+    for (var i = 0; i < 60; i++) {
+      futures.add(t.translate('câu $i', 'ja'));
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    final out = await Future.wait(futures);
+    expect(out.first, 'VI:câu 0');
+    expect(out.last, 'VI:câu 59');
+    expect(seen.length, lessThanOrEqualTo(4));
+    await t.dispose();
+  });
 }

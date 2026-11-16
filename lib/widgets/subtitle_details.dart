@@ -11,9 +11,13 @@ class CueList extends StatelessWidget {
     required this.cues,
     this.controller,
     this.shrinkWrap = false,
+    this.onTap,
   });
 
   final List<Cue> cues;
+
+  /// Called with the index of a tapped line (for editing).
+  final void Function(int index)? onTap;
   final ScrollController? controller;
   final bool shrinkWrap;
 
@@ -34,7 +38,8 @@ class CueList extends StatelessWidget {
       itemBuilder: (context, i) {
         final c = cues[i];
         final showSource = c.source.isNotEmpty && c.source != c.text;
-        return Padding(
+        final tap = onTap;
+        final row = Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -66,6 +71,8 @@ class CueList extends StatelessWidget {
             ],
           ),
         );
+        if (tap == null) return row;
+        return InkWell(onTap: () => tap(i), child: row);
       },
     );
   }
