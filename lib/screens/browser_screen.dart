@@ -20,6 +20,8 @@ import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import 'player_screen.dart';
 
+const kHomePage = 'https://www.google.com/';
+
 /// A browser that adds live Vietnamese subtitles to whatever video the page
 /// is playing.
 class BrowserScreen extends StatefulWidget {
@@ -34,7 +36,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
   final _addressFocus = FocusNode();
   InAppWebViewController? _web;
   double _loading = 0;
-  bool _started = false;
 
   WebVideo? _video;
   DateTime _lastReport = DateTime(0);
@@ -138,7 +139,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       // defaults (inline playback off, for one).
       _settings.contentBlockers = on ? adBlockRules() : [];
       await web.setSettings(settings: _settings);
-      if (_started) await web.reload();
+      await web.reload();
     }
     if (mounted) {
       toast(context, on ? 'Đã bật chặn quảng cáo' : 'Đã tắt chặn quảng cáo');
@@ -197,7 +198,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
           : 'https://www.google.com/search?q=${Uri.encodeQueryComponent(text)}';
     }
     FocusScope.of(context).unfocus();
-    setState(() => _started = true);
     _web?.loadUrl(urlRequest: URLRequest(url: WebUri(text)));
   }
 
@@ -448,6 +448,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
             child: Stack(
               children: [
                 InAppWebView(
+                  // Google as the home page, so searching works at once.
+                  initialUrlRequest: URLRequest(url: WebUri(kHomePage)),
                   initialSettings: _settings,
                   initialUserScripts: _scripts,
                   // Without this the web view loads every pop-up over the
@@ -515,7 +517,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     }
                   },
                 ),
-                if (!_started) const _StartHint(),
                 if (_videoVisible)
                   Positioned(
                     left: 8,
@@ -777,47 +778,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onPressed: active ? _stopSubtitles : _startSubtitles,
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StartHint extends StatelessWidget {
-  const _StartHint();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ColoredBox(
-      color: theme.colorScheme.surface,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.closed_caption,
-                size: 56,
-                color: theme.colorScheme.primary,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Xem phim trên web có phụ đề Việt',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Mở trang phim ở ô địa chỉ phía trên, bấm phát video, '
-                'rồi bấm nút CC ở thanh hiện ra phía dưới. Phụ đề hiện '
-                'ngay trên khung video của trang.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium,
-              ),
-            ],
-          ),
         ),
       ),
     );
