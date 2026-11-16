@@ -43,6 +43,9 @@ class AudioFeed {
 
     /// Seconds of audio to take; null for everything to the end.
     double? lengthSec,
+
+    /// The input is an HLS playlist (options below exist only for HLS).
+    bool hls = false,
   }) async {
     final isUrl = input.startsWith('http');
     final other = headers.entries
@@ -68,6 +71,11 @@ class AudioFeed {
         '-reconnect_on_network_error', '1',
         '-reconnect_delay_max', '8',
         '-rw_timeout', '20000000',
+      ],
+      if (hls) ...[
+        // Pieces hosted as pictures, without a video extension.
+        '-allowed_segment_extensions', 'ALL',
+        '-extension_picky', '0',
       ],
       if (startSec > 0) ...['-ss', startSec.toStringAsFixed(3)],
       '-i',

@@ -69,11 +69,15 @@ class WebVideo {
 
   /// Headers a server expects when the stream is fetched outside the page.
   Map<String, String> headers(String cookies) {
+    // Frames written by script report "about:blank": no referer then.
     final origin = Uri.tryParse(page);
+    final web =
+        origin != null && origin.isScheme('http') ||
+        origin != null && origin.isScheme('https');
     return {
       if (userAgent.isNotEmpty) 'User-Agent': userAgent,
-      if (page.isNotEmpty) 'Referer': page,
-      if (origin != null && origin.hasScheme) 'Origin': origin.origin,
+      if (web) 'Referer': page,
+      if (web) 'Origin': origin.origin,
       if (cookies.isNotEmpty) 'Cookie': cookies,
     };
   }

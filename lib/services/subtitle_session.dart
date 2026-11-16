@@ -10,6 +10,7 @@ import 'app_log.dart';
 import 'asr_worker.dart';
 import 'audio_feed.dart';
 import 'hls.dart';
+import 'hls_proxy.dart';
 import 'model_store.dart';
 import 'subtitle_store.dart';
 import 'translator.dart';
@@ -314,13 +315,25 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   /// Where ffmpeg reads audio from; resolved once per session.
-  Future<String> _audioSource() async => _source ??= input.startsWith('http')
-      ? await resolveAudioSource(
-          input,
-          headers,
-          language: language == 'auto' ? '' : language,
-        )
-      : input;
+  Future<String> _audioSource() async {
+    final cached = _source;
+    if (cached != null) return cached;
+    if (!input.startsWith('http')) return _source = input;
+    final resolved = await resolveAudioSource(
+      input,
+      headers,
+      language: language == 'auto' ? '' : language,
+    );
+    _hls = '$resolved $input'.contains('m3u8');
+    if (!_hls) return _source = resolved;
+    // HLS goes through the relay, which strips fake picture headers.
+    final proxy = _proxy ??= await HlsProxy.start(headers);
+    AppLog.i('phụ đề', 'Lấy HLS qua bộ chuyển tiếp: ${AppLog.url(resolved)}');
+    return _source = proxy.urlFor(resolved);
+  }
+
+  HlsProxy? _proxy;
+  bool _hls = false;
 
   Future<void> _restart(double at) async {
     try {
@@ -363,10 +376,13 @@ class SubtitleSession extends ChangeNotifier {
             '${end == null ? ' tới hết' : ' tới giây ${end.toStringAsFixed(1)}'}',
       );
       final feed = _feed = AudioFeed();
+      final source = await _audioSource();
       await feed.start(
-        input: await _audioSource(),
+        input: source,
         outDir: _dir!.path,
-        headers: headers,
+        // The relay sends the page's headers itself.
+        headers: _hls ? const {} : headers,
+        hls: _hls,
         startSec: _base,
         lengthSec: end == null ? null : end - _base,
       );
@@ -727,6 +743,7 @@ class SubtitleSession extends ChangeNotifier {
     _feed?.stop();
     _worker?.dispose();
     _translator.dispose();
+    _proxy?.close();
     final root = _root;
     if (root != null) {
       // Give ffmpeg a moment to let go of its output file.
