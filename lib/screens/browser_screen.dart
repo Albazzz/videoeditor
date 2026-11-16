@@ -10,11 +10,11 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/ad_block.dart';
+import '../services/active_work.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
-import '../services/model_store.dart';
 import '../services/subtitle_store.dart';
 import '../services/watch_position.dart';
 import '../services/web_video.dart';
@@ -63,6 +63,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   /// The lines on show came from a file (not made earlier by the app).
   bool _fileImported = false;
+
+  /// Lines on show were made earlier but do not cover the whole film.
+  bool _canCarryOn = false;
 
   /// Top-level page address, kept in step with navigation.
   String _pageUrl = '';
@@ -339,19 +342,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
         _showFileCues(saved.cues, page, saved.language);
         toast(context, 'Đã bật phụ đề đã nhập cho phim này');
       } else if (saved.language == appSettings.language) {
-        // Unfinished ones carry on being made, if the app can.
-        if (!saved.isWholeVideo &&
-            video.playable &&
-            await ModelStore.isReady()) {
-          if (!mounted) return;
-          AppLog.i('web', 'Tự làm tiếp phụ đề (${saved.cues.length} dòng)');
-          await _startSubtitles();
-        } else {
-          if (!mounted) return;
-          AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã làm');
-          _showFileCues(saved.cues, page, saved.language, imported: false);
-          toast(context, 'Đã bật phụ đề đã làm trước cho phim này');
-        }
+        // Shown as they are; making more waits for the user ("Làm tiếp").
+        if (!mounted) return;
+        AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã làm');
+        _showFileCues(saved.cues, page, saved.language, imported: false);
+        _canCarryOn = !saved.isWholeVideo && video.playable;
+        toast(
+          context,
+          _canCarryOn
+              ? 'Đã hiện phụ đề làm dở (${subtitleProgressLabel(covered: saved.covered, duration: saved.duration).toLowerCase()}). Bấm "Làm tiếp" để làm nốt'
+              : 'Đã bật phụ đề đã làm trước cho phim này',
+        );
       }
     } catch (e) {
       AppLog.e('web', 'Tự bật phụ đề lỗi: $e');
@@ -460,6 +461,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       await _startSubtitles();
     } else {
       _showFileCues(src.cues, page, src.language, imported: src.imported);
+      _canCarryOn =
+          !src.imported && !src.isWholeVideo && video?.playable == true;
       toast(
         context,
         'Đã dùng ${src.cues.length} dòng. Lệch giờ thì chỉnh ở ⋮ '
@@ -506,6 +509,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }) {
     if (_session != null) _stopSubtitles();
     setState(() {
+      _canCarryOn = false;
       _fileImported = imported;
       _fileCues = cues;
       _filePage = page;
@@ -580,7 +584,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _session = session;
       _sessionSrc = video.src;
       _otherVideo = false;
+      // The session shows these lines (and more) from now on.
+      _fileCues = null;
+      _canCarryOn = false;
     });
+    ActiveWork.begin(
+      SubtitleStore.idFor(page),
+      title.isEmpty ? (Uri.tryParse(page)?.host ?? page) : title,
+      session,
+    );
     if (reuse) {
       toast(context, 'Dùng lại ${saved.cues.length} dòng phụ đề đã lưu');
     }
@@ -594,6 +606,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _stopSubtitles() {
     KeepAwake.set(false);
+    ActiveWork.end(_session);
+    _canCarryOn = false;
     _session?.removeListener(_onSession);
     // Takes its copy of the lines before the session is disposed.
     _saver?.close();
@@ -650,12 +664,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Turned sideways: the page gets the whole screen to show the film
+    // big, with only a small subtitle control in the corner.
+    final landscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    if (landscape != _landscape) {
+      _landscape = landscape;
+      SystemChrome.setEnabledSystemUIMode(
+        landscape ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
+    }
     return SafeArea(
       bottom: false,
+      top: !landscape,
       child: Column(
         children: [
-          _addressBar(),
-          if (_loading > 0 && _loading < 1)
+          if (!landscape) _addressBar(),
+          if (!landscape && _loading > 0 && _loading < 1)
             LinearProgressIndicator(value: _loading, minHeight: 2),
           Expanded(
             child: Stack(
@@ -731,17 +756,59 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     }
                   },
                 ),
-                if (_videoVisible)
+                if (_videoVisible && !landscape)
                   Positioned(
                     left: 8,
                     right: 8,
                     bottom: 8,
                     child: _videoPanel(),
                   ),
+                if (_videoVisible && landscape)
+                  Positioned(top: 8, right: 8, child: _compactPanel()),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  bool _landscape = false;
+
+  /// The CC control alone, for watching sideways.
+  Widget _compactPanel() {
+    final session = _session;
+    final active = session != null || _fileCues != null;
+    return Material(
+      color: Colors.black.withValues(alpha: 0.45),
+      borderRadius: BorderRadius.circular(24),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (session != null)
+              ActivityIcon(
+                session: session,
+                title: ActiveWork.current.value?.title ?? '',
+              ),
+            if (active)
+              IconButton(
+                tooltip: 'Kiểu phụ đề',
+                color: Colors.white,
+                icon: const Icon(Icons.text_fields, size: 20),
+                onPressed: () => showSubtitleStyle(context),
+              ),
+            IconButton(
+              tooltip: 'Phụ đề',
+              color: active ? Colors.lightBlueAccent : Colors.white,
+              icon: Icon(
+                active ? Icons.closed_caption : Icons.closed_caption_outlined,
+              ),
+              onPressed: active ? _stopSubtitles : _startSubtitles,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -999,7 +1066,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
         child: Row(
           children: [
             if (session != null) ...[
-              ActivityIcon(session: session),
+              ActivityIcon(
+                session: session,
+                title: ActiveWork.current.value?.title ?? '',
+              ),
               const SizedBox(width: 8),
             ],
             Expanded(
@@ -1099,6 +1169,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
               icon: const Icon(Icons.open_in_full, size: 20),
               onPressed: video.playable ? _openInPlayer : null,
             ),
+            if (_canCarryOn && fileCues != null && session == null)
+              TextButton.icon(
+                onPressed: _startSubtitles,
+                icon: const Icon(Icons.play_arrow, size: 18),
+                label: const Text('Làm tiếp'),
+              ),
             IconButton.filledTonal(
               tooltip: 'Phụ đề',
               isSelected: active,

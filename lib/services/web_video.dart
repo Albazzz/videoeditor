@@ -323,7 +323,23 @@ const String kPageScript = r'''
     if (ev.data && ev.data.__vsub) handle(ev.data);
   });
 
+  // On iPhone a video without "playsinline" jumps to the system's full
+  // screen when it starts, where the page cannot draw subtitles. Keep it in
+  // the page; turning the phone gives the big picture instead.
+  function inline() {
+    var all = document.getElementsByTagName('video');
+    for (var k = 0; k < all.length; k++) {
+      if (!all[k].hasAttribute('playsinline')) {
+        all[k].setAttribute('playsinline', '');
+        all[k].setAttribute('webkit-playsinline', '');
+        all[k].playsInline = true;
+      }
+    }
+  }
+  document.addEventListener('DOMContentLoaded', inline);
+
   setInterval(function () {
+    inline();
     var v = pick();
     if (!v || !window.flutter_inappwebview) return;
     var src = srcOf(v);

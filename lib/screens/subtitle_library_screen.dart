@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../services/active_work.dart';
+import '../widgets/activity_icon.dart';
+import '../widgets/session_progress.dart';
+
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/app_settings.dart';
@@ -113,7 +117,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       ),
       body: web == null
           ? const Center(child: CircularProgressIndicator())
-          : web.isEmpty && _videos.isEmpty
+          : web.isEmpty && _videos.isEmpty && ActiveWork.current.value == null
           ? const Center(
               child: Padding(
                 padding: EdgeInsets.all(32),
@@ -129,6 +133,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
               onRefresh: _reload,
               child: ListView(
                 children: [
+                  const _ActiveCard(),
                   if (web.isNotEmpty) const _Section('Từ web'),
                   for (final s in web)
                     ListTile(
@@ -300,6 +305,74 @@ class _SubtitleView extends StatelessWidget {
           Expanded(child: CueList(cues: cues)),
         ],
       ),
+    );
+  }
+}
+
+/// The subtitles being made right now, with their live progress.
+class _ActiveCard extends StatelessWidget {
+  const _ActiveCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(
+      valueListenable: ActiveWork.current,
+      builder: (context, work, _) {
+        if (work == null) return const SizedBox.shrink();
+        final s = work.session;
+        return ListenableBuilder(
+          listenable: s,
+          builder: (context, _) => Card(
+            margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => showSessionProgress(context, s, title: work.title),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        ActivityIcon(session: s, title: work.title),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Đang làm: ${work.title}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ),
+                        const Icon(Icons.chevron_right),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    if (s.duration > 0)
+                      CoverageBar(
+                        covered: s.covered,
+                        duration: s.duration,
+                        done: coversWholeVideo(
+                          s.covered,
+                          s.duration,
+                          reachedEnd: s.reachedEnd,
+                        ),
+                      ),
+                    Text(
+                      '${s.stage} · ${s.cues.length} dòng',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      'Chạm để xem từng bước',
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

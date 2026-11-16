@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/cue.dart';
+import '../services/active_work.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/crash_trail.dart';
@@ -203,6 +204,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _saved = false;
       _showSubs = true;
     });
+    ActiveWork.begin(_positionKey ?? _input, widget.title, session);
     // A saved file should cover the whole video, so start from the top.
     session.start(widget.item != null ? 0 : _position);
   }
@@ -258,6 +260,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _session?.removeListener(_onSession);
     _saver?.close();
     _saver = null;
+    ActiveWork.end(_session);
     _session?.dispose();
     setState(() {
       _session = null;
@@ -340,6 +343,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.dispose();
     _session?.removeListener(_onSession);
     _saver?.close();
+    ActiveWork.end(_session);
     _session?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -418,7 +422,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               onPressed: () => Navigator.pop(context),
             ),
             if (session != null) ...[
-              ActivityIcon(session: session),
+              ActivityIcon(session: session, title: widget.title),
               const SizedBox(width: 6),
             ],
             Expanded(

@@ -180,29 +180,37 @@ class _HomeScreenState extends State<HomeScreen> {
           const SettingsScreen(),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        height: 60,
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() {
-          if (i == 2 && _tab != 2) _subsVisit++;
-          _tab = i;
-        }),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.public), label: 'Xem web'),
-          NavigationDestination(
-            icon: Icon(Icons.video_library_outlined),
-            label: 'Thư viện',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.subtitles_outlined),
-            label: 'Phụ đề',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            label: 'Cài đặt',
-          ),
-        ],
-      ),
+      // Watching sideways in the browser: no tab bar over the film.
+      bottomNavigationBar:
+          _tab == 0 &&
+              MediaQuery.orientationOf(context) == Orientation.landscape
+          ? null
+          : NavigationBar(
+              height: 60,
+              selectedIndex: _tab,
+              onDestinationSelected: (i) => setState(() {
+                if (i == 2 && _tab != 2) _subsVisit++;
+                _tab = i;
+              }),
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.public),
+                  label: 'Xem web',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.video_library_outlined),
+                  label: 'Thư viện',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.subtitles_outlined),
+                  label: 'Phụ đề',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  label: 'Cài đặt',
+                ),
+              ],
+            ),
     );
   }
 }

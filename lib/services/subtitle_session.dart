@@ -80,6 +80,16 @@ bool isFiller(String text) {
   return core.runes.every((r) => _fillerChars.contains(String.fromCharCode(r)));
 }
 
+enum StageState { waiting, active, done, failed, skipped }
+
+/// One stage of making subtitles, as shown in the progress sheet.
+class SessionStep {
+  const SessionStep(this.title, this.state, [this.detail = '']);
+  final String title;
+  final StageState state;
+  final String detail;
+}
+
 /// What a session is doing, for the icon on the CC bar.
 enum SessionActivity { working, stuck, paused, done, failed }
 
@@ -728,6 +738,100 @@ class SubtitleSession extends ChangeNotifier {
   double leadOver(double t) => processedUntil - t;
 
   /// Plain-text account of every stage, for working out why nothing shows.
+  /// Every stage from pressing CC to translated lines, and where each is.
+  List<SessionStep> get steps {
+    final failed = error != null;
+    final feed = _feed;
+    final running = feed != null && !feed.done && !paused;
+    StageState after(bool done, {bool started = true}) => done
+        ? StageState.done
+        : failed
+        ? StageState.failed
+        : started
+        ? StageState.active
+        : StageState.waiting;
+    final translated = cues
+        .where((c) => c.source.isNotEmpty && c.text != c.source)
+        .length;
+    final host = Uri.tryParse(input)?.host ?? '';
+    return [
+      SessionStep(
+        'Tìm video trên trang',
+        StageState.done,
+        host.isEmpty ? 'file trong máy' : host,
+      ),
+      SessionStep(
+        'Nạp bộ nhận dạng giọng nói',
+        after(_worker != null),
+        _worker != null ? 'SenseVoice, chạy trên máy' : 'Đang nạp mô hình…',
+      ),
+      SessionStep(
+        'Chuẩn bị bộ dịch',
+        language == 'auto' || _translator is PassthroughTranslator
+            ? StageState.skipped
+            : _translatorReady
+            ? StageState.done
+            : _lastTranslateError.isNotEmpty
+            ? StageState.failed
+            : StageState.active,
+        _translator is PassthroughTranslator
+            ? 'Tắt dịch: hiện câu gốc'
+            : _translatorReady
+            ? Translator.label
+            : _lastTranslateError.isNotEmpty
+            ? _lastTranslateError
+            : translatorNote,
+      ),
+      SessionStep(
+        'Kết nối luồng âm thanh',
+        after(_source != null, started: _worker != null),
+        _source == null
+            ? ''
+            : _hls
+            ? 'HLS, qua bộ chuyển tiếp${(_proxy?.stripped ?? 0) > 0 ? ' (đã gỡ ${_proxy!.stripped} ảnh giả)' : ''}'
+            : 'Tải trực tiếp',
+      ),
+      SessionStep(
+        'Lấy âm thanh (ffmpeg)',
+        paused
+            ? StageState.done
+            : finished
+            ? StageState.done
+            : _feedError.isNotEmpty && failed
+            ? StageState.failed
+            : running || _chunksFed > 0
+            ? StageState.active
+            : after(false, started: _source != null),
+        '$_chunksFed đoạn'
+            '${_feedRetries > 0 ? ' · nối lại $_feedRetries lần' : ''}'
+            '${paused ? ' · tạm nghỉ' : ''}',
+      ),
+      SessionStep(
+        'Nhận dạng giọng nói',
+        finished
+            ? StageState.done
+            : _chunksFed > 0
+            ? (failed ? StageState.failed : StageState.active)
+            : StageState.waiting,
+        'Nghe tới ${_clock(processedUntil)}'
+            '${duration > 0 ? ' / ${_clock(duration)}' : ''} · $_linesHeard câu'
+            '${_fillers > 0 ? ' · bỏ $_fillers tiếng đệm' : ''}',
+      ),
+      SessionStep(
+        'Dịch sang tiếng Việt',
+        _translator is PassthroughTranslator
+            ? StageState.skipped
+            : finished && waitingTranslation == 0
+            ? StageState.done
+            : _linesHeard > 0
+            ? StageState.active
+            : StageState.waiting,
+        'Đã dịch $translated · chờ $waitingTranslation'
+            '${_translateFailures > 0 ? ' · lỗi $_translateFailures' : ''}',
+      ),
+    ];
+  }
+
   String get details {
     String clip(String s, [int n = 300]) =>
         s.length > n ? '${s.substring(0, n)}…' : s;
