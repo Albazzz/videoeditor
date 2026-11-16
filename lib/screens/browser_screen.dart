@@ -18,6 +18,7 @@ import '../services/model_store.dart';
 import '../services/subtitle_store.dart';
 import '../services/watch_position.dart';
 import '../services/web_video.dart';
+import '../widgets/activity_icon.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
@@ -70,6 +71,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   String _autoPage = '';
   bool _autoBusy = false;
   DateTime _lastPositionSave = DateTime(0);
+
+  /// Latest report of every video on the page (adverts included).
+  final _seen = <String, (WebVideo, DateTime)>{};
+
+  /// Videos already written to the log for this page.
+  final _logged = <String>{};
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
@@ -102,6 +109,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Timer? _slowLoad;
 
   void _onLoadStart(String url) {
+    _seen.clear();
+    _logged.clear();
     _loadStarted = DateTime.now();
     if (url.isNotEmpty && url != 'about:blank') _pageUrl = url;
     AppLog.i('web', 'Mở ${AppLog.url(url)}');
@@ -238,23 +247,42 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _web?.loadUrl(urlRequest: URLRequest(url: WebUri(text)));
   }
 
+  /// Sends a command to the page. Only the frame holding the chosen video
+  /// acts on it (clearing goes to all), so adverts get no subtitles.
   void _send(Map<String, Object?> message) {
+    final target = _session != null ? _sessionSrc : _video?.src;
+    final full = message['__vsub'] == 'clear' || target == null
+        ? message
+        : {...message, 'target': target};
     _web?.evaluateJavascript(
-      source: 'window.__vsubSend && window.__vsubSend(${jsonEncode(message)});',
+      source: 'window.__vsubSend && window.__vsubSend(${jsonEncode(full)});',
     );
   }
 
   void _onReport(Object? message) {
-    final video = WebVideo.fromMessage(message);
-    if (video == null || !mounted) return;
-    _lastReport = DateTime.now();
+    final report = WebVideo.fromMessage(message);
+    if (report == null || !mounted) return;
+    // Every frame with a video reports; adverts too. Keep the latest of
+    // each and follow only the one that looks like the film.
+    final now = DateTime.now();
+    _seen[report.src] = (report, now);
+    _seen.removeWhere(
+      (_, e) => now.difference(e.$2) > const Duration(milliseconds: 2500),
+    );
+    final video = WebVideo.main(
+      _seen.values.map((e) => e.$1),
+      keep: _session != null ? _sessionSrc : '',
+    );
+    if (video == null || video.src != report.src) return;
+    _lastReport = now;
     final changed = _video?.src != video.src;
-    if (changed) {
+    if (changed && _logged.add(video.src)) {
       AppLog.i(
         'web',
-        'Thấy video ${AppLog.url(video.src)} '
-            '(${video.playable ? 'lấy được luồng' : 'luồng bị giấu'}) '
-            'trên ${AppLog.url(video.page)}',
+        'Chọn video ${AppLog.url(video.src)} '
+            '(${video.playable ? 'lấy được luồng' : 'luồng bị giấu'}, '
+            'dài ${formatTime(video.duration)}, ${_seen.length} video trên '
+            'trang) trên ${AppLog.url(video.page)}',
       );
     }
     _video = video;
@@ -970,6 +998,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
         padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
         child: Row(
           children: [
+            if (session != null) ...[
+              ActivityIcon(session: session),
+              const SizedBox(width: 8),
+            ],
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,

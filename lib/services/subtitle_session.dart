@@ -79,6 +79,9 @@ bool isFiller(String text) {
   return core.runes.every((r) => _fillerChars.contains(String.fromCharCode(r)));
 }
 
+/// What a session is doing, for the icon on the CC bar.
+enum SessionActivity { working, stuck, paused, done, failed }
+
 /// Generates Vietnamese subtitles for one video while it plays.
 ///
 /// Audio is decoded ahead of the playback position, recognised, translated
@@ -132,6 +135,18 @@ class SubtitleSession extends ChangeNotifier {
   int _autoRuns = 0;
   double? _lastAutoStart;
   int _fillers = 0;
+
+  /// Last time audio was heard, a line came in or work restarted.
+  DateTime lastActivity = DateTime.now();
+
+  SessionActivity get activity {
+    if (error != null) return SessionActivity.failed;
+    if (finished) return SessionActivity.done;
+    if (paused) return SessionActivity.paused;
+    return DateTime.now().difference(lastActivity) > const Duration(seconds: 20)
+        ? SessionActivity.stuck
+        : SessionActivity.working;
+  }
 
   /// Lines heard whose translation has not arrived yet.
   int waitingTranslation = 0;
@@ -334,6 +349,7 @@ class SubtitleSession extends ChangeNotifier {
       _pending = 0;
       _lastSent = false;
       _lastChunkAt = DateTime.now();
+      lastActivity = DateTime.now();
       finished = false;
       error = null;
       _feedError = '';
@@ -563,6 +579,7 @@ class SubtitleSession extends ChangeNotifier {
           );
         });
       case AsrProgress():
+        lastActivity = DateTime.now();
         _pending--;
         if (event.until > processedUntil + 30) _feedRetries = 0;
         processedUntil = event.until;
@@ -624,6 +641,7 @@ class SubtitleSession extends ChangeNotifier {
       );
     }
     cues.insert(i, cue);
+    lastActivity = DateTime.now();
     onCue?.call(cue);
     notifyListeners();
   }

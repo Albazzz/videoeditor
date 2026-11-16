@@ -14,6 +14,7 @@ import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
 import '../services/watch_position.dart';
+import '../widgets/activity_icon.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
@@ -416,6 +417,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
               icon: const Icon(Icons.arrow_back, color: Colors.white),
               onPressed: () => Navigator.pop(context),
             ),
+            if (session != null) ...[
+              ActivityIcon(session: session),
+              const SizedBox(width: 6),
+            ],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

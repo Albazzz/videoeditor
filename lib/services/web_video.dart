@@ -8,6 +8,8 @@ class WebVideo {
     required this.page,
     required this.userAgent,
     this.cueCount = 0,
+    this.area = 0,
+    this.muted = false,
   });
 
   /// Stream URL (mp4 / m3u8). Empty or `blob:` when the site hides it.
@@ -24,7 +26,30 @@ class WebVideo {
   /// the frame was reloaded and needs them again.
   final int cueCount;
 
+  /// On-screen size in square pixels; adverts in hidden frames show 0.
+  final int area;
+  final bool muted;
+
+  /// How likely this is the film rather than an advert or a preview:
+  /// big on screen, playing, with sound and longer than two minutes.
+  double get score =>
+      (area + 1) *
+      (paused ? 1 : 3) *
+      (duration >= 120 ? 5 : 1) *
+      (muted ? 0.3 : 1);
+
   bool get playable => src.startsWith('http');
+
+  /// The film among several videos reporting at once. [keep] (the one
+  /// subtitles are being made for) stays chosen while it is on the page.
+  static WebVideo? main(Iterable<WebVideo> videos, {String keep = ''}) {
+    WebVideo? best;
+    for (final v in videos) {
+      if (keep.isNotEmpty && v.src == keep) return v;
+      if (best == null || v.score > best.score) best = v;
+    }
+    return best;
+  }
 
   static WebVideo? fromMessage(Object? message) {
     if (message is! Map) return null;
@@ -37,6 +62,8 @@ class WebVideo {
       page: '${message['page'] ?? ''}',
       userAgent: '${message['ua'] ?? ''}',
       cueCount: num0(message['n']).toInt(),
+      area: num0(message['area']).toInt(),
+      muted: message['muted'] == true,
     );
   }
 
@@ -228,10 +255,26 @@ const String kPageScript = r'''
 
   function toCue(a) { return { s: a[0], e: a[1], text: a[2], src: a[3] || '' }; }
 
+  // The address the app knows this frame's video by.
+  function srcOf(v) {
+    var src = v.currentSrc || v.src || '';
+    if (!src) {
+      var s = v.querySelector('source');
+      if (s) src = s.src;
+    }
+    if (!src || /^blob:/.test(src)) src = playlist || src;
+    return src;
+  }
+
   function handle(d) {
     var v = pick();
+    // Pages often hold adverts in other frames: commands are for the one
+    // video the app chose ("target"), except clearing, which is for all.
+    var mine = !d.target || (v && srcOf(v) === d.target);
     try {
-      if (d.__vsub === 'rate') { if (v) v.playbackRate = d.v; }
+      if (!mine && d.__vsub !== 'clear' && d.__vsub !== 'opts') {
+        // not ours
+      } else if (d.__vsub === 'rate') { if (v) v.playbackRate = d.v; }
       else if (d.__vsub === 'pause') { if (v) v.pause(); }
       else if (d.__vsub === 'seek') { if (v && isFinite(d.t)) v.currentTime = d.t; }
       else if (d.__vsub === 'opts') {
@@ -275,13 +318,13 @@ const String kPageScript = r'''
   setInterval(function () {
     var v = pick();
     if (!v || !window.flutter_inappwebview) return;
-    var src = v.currentSrc || v.src || '';
-    if (!src) {
-      var s = v.querySelector('source');
-      if (s) src = s.src;
-    }
-    if (!src || /^blob:/.test(src)) src = playlist || src;
+    var src = srcOf(v);
     if (!src) return;
+    // How much of the video can be seen: a hidden or tiny frame (adverts)
+    // shows little or nothing.
+    var r = v.getBoundingClientRect();
+    var w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
+    var h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
     try {
       window.flutter_inappwebview.callHandler('vsub', {
         src: src,
@@ -290,7 +333,9 @@ const String kPageScript = r'''
         dur: isFinite(v.duration) ? v.duration : 0,
         page: location.href,
         ua: navigator.userAgent,
-        n: cues.length
+        n: cues.length,
+        area: Math.round(w * h),
+        muted: !!v.muted
       });
     } catch (e) {}
   }, 250);
