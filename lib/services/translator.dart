@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:google_mlkit_translation/google_mlkit_translation.dart';
 
+import 'app_log.dart';
 import 'app_settings.dart';
 import 'crash_trail.dart';
 
@@ -59,7 +60,11 @@ class MlKitTranslator implements Translator {
         () => _manager.isModelDownloaded(l.bcpCode),
       );
       if (!have) {
-        await _manager.downloadModel(l.bcpCode, isWifiRequired: false);
+        final ok = await CrashTrail.guard(
+          'Tải gói dịch ${l.bcpCode} (Google ML Kit)',
+          () => _manager.downloadModel(l.bcpCode, isWifiRequired: false),
+        );
+        AppLog.i('dịch', 'Tải gói ${l.bcpCode}: ${ok ? 'xong' : 'thất bại'}');
       }
     }
     _prepared.add(language);

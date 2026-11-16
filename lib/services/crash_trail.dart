@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'app_log.dart';
+
 /// Records which risky native step is running, written synchronously and
 /// flushed, so that after the app is killed by a native crash the next
 /// launch can say which step it was in.
@@ -50,8 +52,14 @@ class CrashTrail {
 
   static Future<T> guard<T>(String label, Future<T> Function() body) async {
     final id = begin(label);
+    AppLog.i('bước', '▶ $label');
     try {
-      return await body();
+      final result = await body();
+      AppLog.i('bước', '✓ $label');
+      return result;
+    } catch (e, st) {
+      AppLog.e('bước', '$label: $e', st);
+      rethrow;
     } finally {
       end(id);
     }

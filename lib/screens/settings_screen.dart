@@ -4,6 +4,7 @@ import '../services/app_settings.dart';
 import '../services/model_store.dart';
 import '../widgets/common.dart';
 import 'downloads_screen.dart';
+import 'log_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -158,6 +159,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
               );
               await _load();
             },
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report_outlined),
+            title: const Text('Nhật ký lỗi (log)'),
+            subtitle: const Text('Sao chép gửi người làm app khi có sự cố'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const LogScreen()),
+            ),
           ),
           ListTile(
             title: const Text('Bộ nhận dạng giọng nói'),

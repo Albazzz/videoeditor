@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/cue.dart';
+import 'app_log.dart';
 import 'asr_worker.dart';
 import 'audio_feed.dart';
 import 'hls.dart';
@@ -99,9 +100,16 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   Future<void> start(double at) async {
+    AppLog.i(
+      'phụ đề',
+      'Bắt đầu: ${AppLog.url(input)} · tiếng $language · từ giây '
+          '${at.toStringAsFixed(1)} · ${cues.length} dòng có sẵn · '
+          'dịch: ${_translator.runtimeType}',
+    );
     try {
       _set('Đang nạp mô hình nhận dạng…');
       _worker ??= await AsrWorker.spawn(await ModelStore.config(language));
+      AppLog.i('phụ đề', 'Đã nạp bộ nhận dạng');
       if (_disposed) return;
       _sub ??= _worker!.events.listen(_onEvent);
       _prepareTranslator();
@@ -110,7 +118,8 @@ class SubtitleSession extends ChangeNotifier {
         p.join(tmp.path, 'vsub'),
       ).create(recursive: true).then((d) => d.createTemp('s'));
       await _restart(at);
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.e('phụ đề', 'Không khởi động được: $e', st);
       error = '$e';
       _set('Lỗi: $e');
     }
@@ -132,10 +141,12 @@ class SubtitleSession extends ChangeNotifier {
           if (_disposed) return;
           _translatorReady = true;
           translatorNote = '';
+          AppLog.i('dịch', 'Bộ dịch $language → vi sẵn sàng');
           _retranslate();
           notifyListeners();
         })
         .catchError((Object e) {
+          AppLog.e('dịch', 'Không chuẩn bị được bộ dịch $language: $e');
           if (_disposed) return;
           translatorNote = 'Bộ dịch chưa dùng được, đang hiện câu gốc';
           _lastTranslateError = '$e';
@@ -151,6 +162,10 @@ class SubtitleSession extends ChangeNotifier {
     } catch (e) {
       _translateFailures++;
       _lastTranslateError = '$e';
+      // The first few say what is wrong; after that only now and then.
+      if (_translateFailures <= 3 || _translateFailures % 25 == 0) {
+        AppLog.e('dịch', 'Lần lỗi thứ $_translateFailures ($lang): $e');
+      }
       return null;
     }
   }
@@ -216,6 +231,7 @@ class SubtitleSession extends ChangeNotifier {
       error = null;
       _feedError = '';
       _dir = await Directory(p.join(_root!.path, 'g$gen')).create();
+      AppLog.i('phụ đề', 'Lấy âm thanh từ giây ${_base.toStringAsFixed(1)}');
       _worker!.reset(gen, _base);
       final feed = _feed = AudioFeed();
       await feed.start(
@@ -226,7 +242,8 @@ class SubtitleSession extends ChangeNotifier {
       );
       _set('Đang nghe và dịch…');
       _poll = Timer.periodic(const Duration(milliseconds: 400), (_) => _pump());
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.e('phụ đề', 'Không lấy được âm thanh: $e', st);
       error = '$e';
       _set('Lỗi: $e');
     }
@@ -264,6 +281,17 @@ class SubtitleSession extends ChangeNotifier {
   /// The audio ran out. That is only good news if some of it was heard.
   void _finish() {
     final heardNothing = processedUntil - _base < 1 && cues.isEmpty;
+    AppLog.i(
+      'phụ đề',
+      'Hết âm thanh: nghe tới giây ${processedUntil.toStringAsFixed(1)}, '
+          '$_chunksFed đoạn, $_linesHeard câu, ${cues.length} dòng',
+    );
+    if (_feedError.isNotEmpty) {
+      final tail = _feedError.length > 1500
+          ? _feedError.substring(_feedError.length - 1500)
+          : _feedError;
+      AppLog.e('ffmpeg', tail);
+    }
     if (_feedError.isNotEmpty && heardNothing) {
       error = _feedError;
       _set('Không tải được âm thanh của video này');
@@ -310,6 +338,7 @@ class SubtitleSession extends ChangeNotifier {
           notifyListeners();
         }
       case AsrError():
+        AppLog.e('nhận dạng', event.message);
         error = event.message;
         _set('Lỗi nhận dạng: ${event.message}');
     }
@@ -398,6 +427,7 @@ class SubtitleSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    AppLog.i('phụ đề', 'Dừng (${cues.length} dòng)');
     _disposed = true;
     _poll?.cancel();
     _sub?.cancel();

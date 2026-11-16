@@ -51,6 +51,8 @@ workflows:
             --build-name=1.0.0 \
             --build-number="$BUILD_NUMBER"
           test -d build/ios/iphoneos/Runner.app
+          # ML Kit translation crashes without its resource bundle.
+          test -d build/ios/iphoneos/Runner.app/MLKitTranslate_resource.bundle
           file build/ios/iphoneos/Runner.app/Runner | grep -q arm64
 
       - name: Create unsigned IPA

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/cue.dart';
+import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/crash_trail.dart';
 import '../services/subtitle_session.dart';
@@ -113,7 +114,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (widget.autoSubtitles && _cues.isEmpty) _startSubtitles();
       if (!mounted) return;
       _scheduleHide();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.e('trình phát', 'Không phát được: $e', st);
       if (mounted) setState(() => _error = 'Không phát được video này.\n$e');
     }
   }

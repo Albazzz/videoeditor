@@ -5,13 +5,22 @@ import 'screens/library_screen.dart';
 import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/subtitle_library_screen.dart';
+import 'screens/log_screen.dart';
+import 'services/app_log.dart';
 import 'services/app_settings.dart';
 import 'services/crash_trail.dart';
 import 'services/subtitle_session.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppLog.init();
   final crash = await CrashTrail.init();
+  if (crash != null) {
+    AppLog.e(
+      'văng',
+      'Lần trước app tắt giữa chừng khi đang: ${crash.steps.join(' / ')}',
+    );
+  }
   runApp(VideoSubApp(crash: crash));
 }
 
@@ -108,14 +117,18 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     final crash = widget.crash;
-    if (crash != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _showCrash(crash));
+    if (crash != null || AppLog.previousNativeCrash != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _showCrash(crash ?? const CrashReport([])),
+      );
     }
   }
 
   Future<void> _showCrash(CrashReport crash) async {
     // Lists, oldest first, the steps that never finished.
-    final steps = crash.steps.map((s) => '• $s').join('\n');
+    final steps = crash.steps.isEmpty
+        ? '• (không rõ)'
+        : crash.steps.map((s) => '• $s').join('\n');
     final hint = crash.inTranslator
         ? '\n\nCó vẻ do bộ dịch. Tắt dịch để xem phụ đề tiếng gốc '
               'trong lúc chờ sửa?'
@@ -126,13 +139,23 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Lần trước app bị văng'),
         content: Text(
           'Lúc đó app đang:\n$steps\n\n'
-          'Nếu là bạn tự tắt app thì bỏ qua. Nếu không, chụp màn hình '
-          'này gửi người làm app.$hint',
+          'Nếu là bạn tự tắt app thì bỏ qua. Nếu không, bấm "Xem nhật ký" '
+          'rồi "Sao chép để gửi" và gửi cho người làm app.$hint',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Đóng'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context, false);
+              Navigator.push(
+                this.context,
+                MaterialPageRoute(builder: (_) => const LogScreen()),
+              );
+            },
+            child: const Text('Xem nhật ký'),
           ),
           if (crash.inTranslator && appSettings.translate)
             FilledButton(

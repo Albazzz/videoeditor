@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
+import 'app_log.dart';
 import 'crash_trail.dart';
 
 bool get _hasFfmpegKit => Platform.isIOS || Platform.isAndroid;
@@ -76,6 +77,7 @@ class AudioFeed {
         () => FFmpegKit.executeWithArgumentsAsync(args, (s) async {
           if (_stopped) return;
           final rc = await s.getReturnCode();
+          AppLog.i('ffmpeg', 'Lấy âm thanh kết thúc, mã $rc');
           if (!ReturnCode.isSuccess(rc)) {
             final logs = await s.getAllLogsAsString();
             error = (logs ?? '').trim().isEmpty
@@ -127,6 +129,10 @@ Future<String?> runFfmpeg(
           completer.complete(null);
         } else {
           final logs = (await s.getAllLogsAsString() ?? '').trim();
+          AppLog.e(
+            'xuất video',
+            logs.length > 1500 ? logs.substring(logs.length - 1500) : logs,
+          );
           final tail = logs.length > 600
               ? logs.substring(logs.length - 600)
               : logs;

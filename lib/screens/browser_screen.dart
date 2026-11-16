@@ -7,6 +7,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/ad_block.dart';
+import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
@@ -150,6 +151,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (video == null || !mounted) return;
     _lastReport = DateTime.now();
     final changed = _video?.src != video.src;
+    if (changed) {
+      AppLog.i(
+        'web',
+        'Thấy video ${AppLog.url(video.src)} '
+            '(${video.playable ? 'lấy được luồng' : 'luồng bị giấu'}) '
+            'trên ${AppLog.url(video.page)}',
+      );
+    }
     _video = video;
     final fileCues = _fileCues;
     if (fileCues != null &&
@@ -216,6 +225,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       ),
     );
     if (!mounted) return;
+    AppLog.i(
+      'web',
+      'Nhập ${imported.fileName}: ${imported.cues.length} dòng, '
+          'tiếng ${imported.language}',
+    );
     _showFileCues(imported.cues, page, imported.language);
     toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
   }
@@ -248,6 +262,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Future<void> _startSubtitles() async {
     final video = _video;
+    AppLog.i('web', 'Bấm CC${video == null ? ' (chưa thấy video)' : ''}');
     if (video == null) return;
     final (page, title) = await _pageInfo();
     final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
