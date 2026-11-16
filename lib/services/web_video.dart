@@ -225,7 +225,6 @@ const String kPageScript = r'''
   }
   function hide() { if (box) box.style.display = 'none'; }
   function draw() {
-    requestAnimationFrame(draw);
     if (!cues.length) return hide();
     var v = pick();
     var c = v ? cueAt(v.currentTime || 0) : null;
@@ -255,7 +254,12 @@ const String kPageScript = r'''
     b.style.bottom = Math.max(0, bottom) + 'px';
     b.style.display = 'block';
   }
-  requestAnimationFrame(draw);
+  // Ten times a second is plenty for subtitles and spares busy pages the
+  // layout work of every animation frame; without lines it barely runs.
+  (function loop() {
+    try { draw(); } catch (e) {}
+    setTimeout(loop, cues.length ? 100 : 500);
+  })();
 
   function toCue(a) { return { s: a[0], e: a[1], text: a[2], src: a[3] || '' }; }
 

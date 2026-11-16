@@ -436,7 +436,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     Text(
                       session.error != null
                           ? session.status
-                          : '${subtitleProgressLabel(covered: session.covered, duration: _duration, reachedEnd: session.finished)}'
+                          : '${subtitleProgressLabel(covered: session.covered, duration: _duration, reachedEnd: session.reachedEnd)}'
                                 ' · ${session.cues.length} dòng'
                                 '${session.finished ? '' : ' · ${session.status} · ${session.stage}'}'
                                 '${session.translatorNote.isEmpty ? '' : ' · ${session.translatorNote}'}',
@@ -454,7 +454,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         covered: session.covered,
                         duration: _duration,
                         position: _position,
-                        done: session.finished,
+                        done: coversWholeVideo(
+                          session.covered,
+                          _duration,
+                          reachedEnd: session.reachedEnd,
+                        ),
                         height: 4,
                       ),
                     ),

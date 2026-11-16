@@ -83,7 +83,9 @@ Cue? cueAt(List<Cue> cues, double t) {
       hi = mid - 1;
     }
   }
-  for (var i = found; i >= 0 && i >= found - 2; i--) {
+  // Lines that started up to a minute earlier may still be on (a long
+  // line from a file with short ones inside it); the latest one wins.
+  for (var i = found; i >= 0 && cues[i].start > t - 60; i--) {
     if (t < cues[i].end) return cues[i];
   }
   return null;

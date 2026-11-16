@@ -129,6 +129,11 @@ class SubtitleSession extends ChangeNotifier {
   /// Length of the video, once the player knows it.
   double duration = 0;
 
+  /// The audio was followed to its real end, without errors. With an
+  /// unknown [duration] this is the only proof the whole film was done.
+  bool reachedEnd = false;
+  double? _runEnd;
+
   /// Work is resting ([SubtitleMode.follow], far enough ahead).
   bool paused = false;
   double? _resumeAt;
@@ -153,6 +158,8 @@ class SubtitleSession extends ChangeNotifier {
   int waitingTranslation = 0;
   int _lateTranslations = 0;
   int _feedRetries = 0;
+  double _seekTarget = -100;
+  DateTime _lastSeekRestart = DateTime(0);
   DateTime _lastChunkAt = DateTime.now();
 
   SubtitleMode _mode;
@@ -369,7 +376,7 @@ class SubtitleSession extends ChangeNotifier {
       _dir = await Directory(p.join(_root!.path, 'g$gen')).create();
       _worker!.reset(gen, _base);
       // Stop where subtitles already exist, so nothing is made twice.
-      final end = runEnd(_covered, _base);
+      final end = _runEnd = runEnd(_covered, _base);
       AppLog.i(
         'phụ đề',
         'Làm từ giây ${_base.toStringAsFixed(1)}'
@@ -460,7 +467,15 @@ class SubtitleSession extends ChangeNotifier {
       _set('Không tải được âm thanh của video này');
     } else if (_feedError.isEmpty && _carryOn()) {
       return;
+    } else if (_feedError.isNotEmpty) {
+      // Gave up part way: this is not the end of the film.
+      error = _feedError;
+      _set(
+        'Mất kết nối tới video ở ${_clock(processedUntil)}, bấm CC lại để thử tiếp',
+      );
     } else {
+      // The audio really ran out (not a stop at existing subtitles).
+      if (_runEnd == null) reachedEnd = true;
       finished = true;
       _set(
         cues.isEmpty
@@ -563,6 +578,11 @@ class SubtitleSession extends ChangeNotifier {
             : Future<String?>.value();
         waitingTranslation++;
         _translating = _translating.then((_) async {
+          if (_disposed || gen != _gen) {
+            // A seek made this line stale: do not wait for it.
+            waitingTranslation--;
+            return;
+          }
           // A slow translation must not hold up the lines after it: show
           // the original for now and swap the translation in later.
           final quick = await Future.any<Object?>([
@@ -684,10 +704,20 @@ class SubtitleSession extends ChangeNotifier {
         return;
       }
     }
-    // A seek to a place without subtitles: work there. Two reports in a
-    // row, so scrubbing does not restart for every frame.
+    // A seek to a place without subtitles: work there, once the position
+    // has settled (two reports close together) and not more often than
+    // every 3 s, so dragging the slider does not restart ffmpeg each time.
+    final settled = (t - _seekTarget).abs() < 2;
+    _seekTarget = t;
+    if (!settled) {
+      _outOfRange = 0;
+      return;
+    }
     if (++_outOfRange < 2) return;
+    final now = DateTime.now();
+    if (now.difference(_lastSeekRestart) < const Duration(seconds: 3)) return;
     _outOfRange = 0;
+    _lastSeekRestart = now;
     AppLog.i('phụ đề', 'Tua tới ${_clock(t)}, làm từ đó');
     unawaited(_restart(t));
   }

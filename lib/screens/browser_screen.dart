@@ -927,7 +927,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final whole = coversWholeVideo(
       session.covered,
       video.duration,
-      reachedEnd: session.finished && session.covered.isNotEmpty,
+      reachedEnd: session.reachedEnd,
     );
     final style = theme.textTheme.labelSmall;
     return [

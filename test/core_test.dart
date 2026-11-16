@@ -44,6 +44,18 @@ void main() {
     expect(cueAt(const [], 3), isNull);
   });
 
+  test('a long line stays on screen with short ones inside it', () {
+    const lines = [
+      Cue(start: 0, end: 20, text: 'Bài hát dài'),
+      Cue(start: 2, end: 3, text: 'a'),
+      Cue(start: 4, end: 5, text: 'b'),
+      Cue(start: 6, end: 7, text: 'c'),
+      Cue(start: 8, end: 9, text: 'd'),
+    ];
+    expect(cueAt(lines, 8.5)!.text, 'd');
+    expect(cueAt(lines, 15)!.text, 'Bài hát dài');
+  });
+
   test('PBKDF2 matches the RFC 7914 test vector', () {
     final out = pbkdf2('passwd', Uint8List.fromList(utf8.encode('salt')), 1);
     final hex = out.map((b) => b.toRadixString(16).padLeft(2, '0')).join();

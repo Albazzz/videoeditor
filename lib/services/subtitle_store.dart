@@ -305,6 +305,7 @@ class SessionSaver {
     final cues = List.of(session.cues);
     final covered = session.covered;
     final finished = session.finished;
+    final reachedEnd = session.reachedEnd;
     final length = duration?.call() ?? 0;
     _savedCount = cues.length;
     _savedFinished = finished;
@@ -324,7 +325,7 @@ class SessionSaver {
           // "Finished" in follow mode only means nothing is left ahead of
           // the viewer, so it counts only when the whole film is covered.
           complete:
-              coversWholeVideo(covered, length, reachedEnd: finished) ||
+              coversWholeVideo(covered, length, reachedEnd: reachedEnd) ||
               (previous?.complete ?? false),
         ),
       );
