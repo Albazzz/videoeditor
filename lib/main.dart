@@ -8,6 +8,7 @@ import 'screens/subtitle_library_screen.dart';
 import 'screens/log_screen.dart';
 import 'services/app_log.dart';
 import 'services/app_settings.dart';
+import 'services/open_page.dart';
 import 'services/crash_trail.dart';
 import 'services/subtitle_session.dart';
 
@@ -110,12 +111,24 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tab = 0;
 
+  /// A page asked for elsewhere opens in the browser tab.
+  void _toBrowser() {
+    if (openPageRequest.value != null && mounted) setState(() => _tab = 0);
+  }
+
+  @override
+  void dispose() {
+    openPageRequest.removeListener(_toBrowser);
+    super.dispose();
+  }
+
   /// Bumped on every visit so the subtitle list reloads.
   int _subsVisit = 0;
 
   @override
   void initState() {
     super.initState();
+    openPageRequest.addListener(_toBrowser);
     final crash = widget.crash;
     if (crash != null || AppLog.previousNativeCrash != null) {
       WidgetsBinding.instance.addPostFrameCallback(

@@ -21,6 +21,9 @@ class HlsProxy {
   final http.Client _client;
   int stripped = 0;
 
+  /// What went wrong last, for the details panel.
+  String lastError = '';
+
   static Future<HlsProxy> start(Map<String, String> headers) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final proxy = HlsProxy._(server, headers, http.Client());
@@ -44,6 +47,7 @@ class HlsProxy {
           .timeout(const Duration(seconds: 30));
       req.response.statusCode = res.statusCode;
       if (res.statusCode != 200) {
+        lastError = 'máy chủ trả ${res.statusCode}';
         AppLog.e(
           'relay',
           'Máy chủ trả ${res.statusCode} cho ${AppLog.url(target)}',
@@ -72,6 +76,7 @@ class HlsProxy {
       }
       await req.response.close();
     } catch (e) {
+      lastError = '$e';
       AppLog.e('relay', 'Lỗi khi lấy ${AppLog.url(target ?? '')}: $e');
       try {
         req.response.statusCode = 502;

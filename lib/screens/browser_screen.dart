@@ -13,6 +13,7 @@ import '../services/ad_block.dart';
 import '../services/active_work.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
+import '../services/open_page.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
 import '../services/subtitle_store.dart';
@@ -218,6 +219,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void initState() {
     super.initState();
     appSettings.addListener(_onSettings);
+    openPageRequest.addListener(_openRequested);
+  }
+
+  void _openRequested() {
+    final url = openPageRequest.value;
+    if (url == null || url.isEmpty) return;
+    AppLog.i('web', 'Mở lại trang từ kho phụ đề: ${AppLog.url(url)}');
+    _address.text = url;
+    _go(url);
   }
 
   SubtitleMode get _mode =>
@@ -236,6 +246,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void dispose() {
     KeepAwake.set(false);
     appSettings.removeListener(_onSettings);
+    openPageRequest.removeListener(_openRequested);
     _slowLoad?.cancel();
     _saver?.close();
     _session?.dispose();

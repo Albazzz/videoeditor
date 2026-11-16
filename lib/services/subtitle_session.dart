@@ -342,7 +342,7 @@ class SubtitleSession extends ChangeNotifier {
       language: language == 'auto' ? '' : language,
     );
     _hls = '$resolved $input'.contains('m3u8');
-    if (!_hls) return _source = resolved;
+    if (!_hls || _noRelay) return _source = resolved;
     // HLS goes through the relay, which strips fake picture headers.
     final proxy = _proxy ??= await HlsProxy.start(headers);
     AppLog.i('phụ đề', 'Lấy HLS qua bộ chuyển tiếp: ${AppLog.url(resolved)}');
@@ -351,6 +351,9 @@ class SubtitleSession extends ChangeNotifier {
 
   HlsProxy? _proxy;
   bool _hls = false;
+
+  /// The relay could not fetch this stream; ffmpeg fetches it itself.
+  bool _noRelay = false;
 
   Future<void> _restart(double at) async {
     try {
@@ -398,7 +401,7 @@ class SubtitleSession extends ChangeNotifier {
         input: source,
         outDir: _dir!.path,
         // The relay sends the page's headers itself.
-        headers: _hls ? const {} : headers,
+        headers: _hls && !_noRelay ? const {} : headers,
         hls: _hls,
         startSec: _base,
         lengthSec: end == null ? null : end - _base,
@@ -465,6 +468,21 @@ class SubtitleSession extends ChangeNotifier {
           ? _feedError.substring(_feedError.length - 1500)
           : _feedError;
       AppLog.e('ffmpeg', tail);
+    }
+    // Some servers refuse the relay (a link tied to how the browser
+    // connected, for one) but not ffmpeg: let ffmpeg fetch it directly.
+    if (_feedError.contains('127.0.0.1') && _hls && !_noRelay) {
+      _noRelay = true;
+      _source = null;
+      AppLog.e(
+        'phụ đề',
+        'Bộ chuyển tiếp không lấy được luồng (${_proxy?.lastError ?? ''}), '
+            'để ffmpeg tự tải',
+      );
+      _set('Thử cách tải khác…');
+      final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
+      unawaited(_restart(at));
+      return;
     }
     // Links often expire near the end of a long film; a few seconds
     // short of the known length is the end.
@@ -872,6 +890,9 @@ class SubtitleSession extends ChangeNotifier {
       'Dịch lỗi: $_translateFailures lần'
           '${_lastTranslateError.isEmpty ? '' : ' · ${clip(_lastTranslateError)}'}',
       if (_feedError.isNotEmpty) 'Lỗi tải âm thanh: ${clip(_feedError, 600)}',
+      if ((_proxy?.lastError ?? '').isNotEmpty)
+        'Bộ chuyển tiếp: ${clip(_proxy!.lastError)}'
+            '${_noRelay ? ' (đã chuyển sang để ffmpeg tự tải)' : ''}',
       if (error != null) 'Lỗi: ${clip(error!, 600)}',
     ].join('\n');
   }

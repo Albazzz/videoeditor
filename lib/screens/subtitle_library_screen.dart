@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/active_work.dart';
+import '../services/open_page.dart';
 import '../widgets/activity_icon.dart';
 import '../widgets/session_progress.dart';
 
@@ -175,6 +176,13 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                         ],
                       ),
                       isThreeLine: true,
+                      trailing: s.page.startsWith('http')
+                          ? IconButton(
+                              tooltip: 'Mở trang này để xem',
+                              icon: const Icon(Icons.open_in_browser),
+                              onPressed: () => requestOpenPage(s.page),
+                            )
+                          : null,
                       onTap: () => _open(
                         title: s.title.isEmpty ? _host(s.page) : s.title,
                         subtitle:
@@ -444,6 +452,15 @@ class _SubtitleViewState extends State<_SubtitleView> {
           child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
         actions: [
+          if (saved?.page.startsWith('http') ?? false)
+            IconButton(
+              tooltip: 'Mở trang này để xem',
+              icon: const Icon(Icons.open_in_browser),
+              onPressed: () {
+                requestOpenPage(saved!.page);
+                Navigator.popUntil(context, (r) => r.isFirst);
+              },
+            ),
           if (saved != null)
             IconButton(
               tooltip: 'Đổi tên',
