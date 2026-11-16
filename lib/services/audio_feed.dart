@@ -60,6 +60,15 @@ class AudioFeed {
         headers['User-Agent']!,
       ],
       if (isUrl && other.isNotEmpty) ...['-headers', other],
+      if (isUrl) ...[
+        // Ride out short network drops instead of ending early, and give
+        // up on a dead connection after 20 s instead of hanging for ever.
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_on_network_error', '1',
+        '-reconnect_delay_max', '8',
+        '-rw_timeout', '20000000',
+      ],
       if (startSec > 0) ...['-ss', startSec.toStringAsFixed(3)],
       '-i',
       input,

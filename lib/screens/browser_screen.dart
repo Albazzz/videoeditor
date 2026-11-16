@@ -13,6 +13,7 @@ import '../services/ad_block.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
+import '../services/keep_awake.dart';
 import '../services/model_store.dart';
 import '../services/subtitle_store.dart';
 import '../services/watch_position.dart';
@@ -20,6 +21,7 @@ import '../services/web_video.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
+import '../widgets/subtitle_picker.dart';
 import '../widgets/subtitle_style.dart';
 import 'player_screen.dart';
 
@@ -214,6 +216,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
+    KeepAwake.set(false);
     appSettings.removeListener(_onSettings);
     _slowLoad?.cancel();
     _saver?.close();
@@ -375,6 +378,68 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return (page, title);
   }
 
+  /// The same film on another site: takes subtitles saved for another
+  /// page, keeps a copy for this one, and shows them or carries on.
+  Future<void> _useFromLibrary() async {
+    final video = _video;
+    final (page, title) = await _pageInfo();
+    if (!mounted || page.isEmpty) return;
+    final id = SubtitleStore.idFor(page);
+    final choice = await pickSavedSubtitles(
+      context,
+      excludeId: id,
+      pageTitle: title,
+      duration: video?.duration ?? 0,
+      canCarryOn: video?.playable == true,
+    );
+    if (choice == null || !mounted) return;
+    final (src, use) = choice;
+    if (_session != null || _fileCues != null) {
+      // Let the current lines be written before the copy replaces them.
+      final saver = _saver;
+      _saver = null;
+      final closing = saver?.close();
+      _stopSubtitles();
+      await closing;
+    }
+    await SubtitleStore.save(
+      SavedSubs(
+        id: id,
+        title: title.isEmpty ? src.title : title,
+        page: page,
+        language: src.language,
+        updated: DateTime.now(),
+        cues: src.cues,
+        covered: src.covered,
+        duration: src.duration,
+        complete: src.complete,
+        imported: src.imported,
+      ),
+    );
+    AppLog.i(
+      'web',
+      'Dùng ${src.cues.length} dòng của ${AppLog.url(src.page)} '
+          '(${use.name})',
+    );
+    _autoPage = _pageUrl;
+    if (!mounted) return;
+    if (use == PickedUse.carryOn) {
+      // The saved lines are reused only for the same spoken language.
+      if (src.language != appSettings.language &&
+          kLanguages.containsKey(src.language)) {
+        appSettings.setLanguage(src.language);
+      }
+      await _startSubtitles();
+    } else {
+      _showFileCues(src.cues, page, src.language, imported: src.imported);
+      toast(
+        context,
+        'Đã dùng ${src.cues.length} dòng. Lệch giờ thì chỉnh ở ⋮ '
+        '(sớm/muộn 0,5 giây)',
+      );
+    }
+  }
+
   /// Reads a subtitle file for the page being watched.
   Future<void> _importForPage() async {
     final (page, title) = await _pageInfo();
@@ -495,10 +560,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _onSession() {
+    KeepAwake.update(_session);
     if (mounted) setState(() {});
   }
 
   void _stopSubtitles() {
+    KeepAwake.set(false);
     _session?.removeListener(_onSession);
     // Takes its copy of the lines before the session is disposed.
     _saver?.close();
@@ -855,6 +922,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           height: 5,
         ),
       ],
+      Text(session.stage, style: style),
       if (session.translatorNote.isNotEmpty) ...[
         const SizedBox(height: 3),
         Text(session.translatorNote, style: style),
@@ -938,6 +1006,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               icon: const Icon(Icons.more_vert, size: 20),
               onSelected: (v) => switch (v) {
                 'import' => _importForPage(),
+                'library' => _useFromLibrary(),
                 'details' when session != null => showSessionDetails(
                   context,
                   session,
@@ -952,6 +1021,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 const PopupMenuItem(
                   value: 'import',
                   child: Text('Nhập phụ đề từ file…'),
+                ),
+                const PopupMenuItem(
+                  value: 'library',
+                  child: Text('Dùng phụ đề từ kho…'),
                 ),
                 if (fileCues != null) ...[
                   const PopupMenuItem(

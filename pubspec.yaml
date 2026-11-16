@@ -46,6 +46,7 @@ dependencies:
   video_player: ^2.14.1
   crypto: ^3.0.8
   http: ^1.6.0
+  wakelock_plus: ^1.8.2
 
 dev_dependencies:
   flutter_test:

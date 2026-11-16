@@ -9,6 +9,7 @@ import '../models/cue.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/crash_trail.dart';
+import '../services/keep_awake.dart';
 import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
@@ -207,6 +208,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _onSession() {
     final session = _session;
+    KeepAwake.update(session);
     if (session == null || !mounted) return;
     final item = widget.item;
     if (session.finished &&
@@ -330,6 +332,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hide?.cancel();
+    KeepAwake.set(false);
     appSettings.removeListener(_onSettings);
     _savePosition(now: true);
     _player.removeListener(_onTick);
@@ -430,7 +433,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           ? session.status
                           : '${subtitleProgressLabel(covered: session.covered, duration: _duration, reachedEnd: session.finished)}'
                                 ' · ${session.cues.length} dòng'
-                                '${session.finished ? '' : ' · ${session.status}'}'
+                                '${session.finished ? '' : ' · ${session.status} · ${session.stage}'}'
                                 '${session.translatorNote.isEmpty ? '' : ' · ${session.translatorNote}'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,

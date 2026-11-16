@@ -133,6 +133,12 @@ class SubtitleSession extends ChangeNotifier {
   double? _lastAutoStart;
   int _fillers = 0;
 
+  /// Lines heard whose translation has not arrived yet.
+  int waitingTranslation = 0;
+  int _lateTranslations = 0;
+  int _feedRetries = 0;
+  DateTime _lastChunkAt = DateTime.now();
+
   SubtitleMode _mode;
   SubtitleMode get mode => _mode;
   set mode(SubtitleMode value) {
@@ -327,6 +333,7 @@ class SubtitleSession extends ChangeNotifier {
       _nextChunk = 0;
       _pending = 0;
       _lastSent = false;
+      _lastChunkAt = DateTime.now();
       finished = false;
       error = null;
       _feedError = '';
@@ -360,6 +367,16 @@ class SubtitleSession extends ChangeNotifier {
     final feed = _feed;
     final dir = _dir;
     if (feed == null || dir == null || _lastSent) return;
+    // No new audio for a minute while the worker sits idle: the stream
+    // has stalled without ffmpeg noticing.
+    if (!feed.done &&
+        _pending == 0 &&
+        DateTime.now().difference(_lastChunkAt) > const Duration(seconds: 60)) {
+      _poll?.cancel();
+      unawaited(feed.stop());
+      _retryFeed('Không nhận thêm âm thanh trong 60 giây');
+      return;
+    }
     // Keep the worker's queue short so a seek takes effect quickly.
     while (_pending < 3) {
       final current = File(p.join(dir.path, chunkName(_nextChunk)));
@@ -381,6 +398,7 @@ class SubtitleSession extends ChangeNotifier {
       _pending++;
       _nextChunk++;
       _chunksFed++;
+      _lastChunkAt = DateTime.now();
       if (_lastSent) return;
     }
   }
@@ -399,6 +417,12 @@ class SubtitleSession extends ChangeNotifier {
           : _feedError;
       AppLog.e('ffmpeg', tail);
     }
+    if (_feedError.isNotEmpty && !heardNothing && _feedRetries < 6) {
+      // Part way through: links often carry a token that expires. Fetch
+      // the playlist again and carry on from where it stopped.
+      _retryFeed(_feedError);
+      return;
+    }
     if (_feedError.isNotEmpty && heardNothing) {
       error = _feedError;
       _set('Không tải được âm thanh của video này');
@@ -412,6 +436,35 @@ class SubtitleSession extends ChangeNotifier {
             : 'Đã xong phụ đề',
       );
     }
+  }
+
+  void _retryFeed(String why) {
+    _feedRetries++;
+    final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
+    final short = why.length > 300 ? why.substring(why.length - 300) : why;
+    AppLog.e(
+      'phụ đề',
+      'Âm thanh ngắt ở ${_clock(processedUntil)} (lần $_feedRetries): $short',
+    );
+    if (_feedRetries > 6) {
+      error = why;
+      _set('Mất kết nối tới video, bấm CC lại để thử tiếp');
+      return;
+    }
+    _source = null;
+    _set('Mất kết nối, đang nối lại (lần $_feedRetries)…');
+    final gen = _gen;
+    Future.delayed(Duration(seconds: 2 * _feedRetries), () {
+      if (!_disposed && gen == _gen) unawaited(_restart(at));
+    });
+  }
+
+  /// Plain-language summary of where the work is, for the CC bar.
+  String get stage {
+    final parts = <String>['Đã nghe tới ${_clock(processedUntil)}'];
+    if (duration > 0) parts.last += ' / ${_clock(duration)}';
+    if (waitingTranslation > 0) parts.add('chờ dịch $waitingTranslation câu');
+    return parts.join(' · ');
   }
 
   /// Starts on the next missing stretch, or rests until the viewer gets
@@ -476,8 +529,29 @@ class SubtitleSession extends ChangeNotifier {
         final pending = _translatorReady
             ? _translate(event.text, _langOf(event))
             : Future<String?>.value();
+        waitingTranslation++;
         _translating = _translating.then((_) async {
-          final translated = await pending;
+          // A slow translation must not hold up the lines after it: show
+          // the original for now and swap the translation in later.
+          final quick = await Future.any<Object?>([
+            pending,
+            Future<Object?>.delayed(const Duration(seconds: 8), () => _late),
+          ]);
+          if (identical(quick, _late)) {
+            _lateTranslations++;
+            unawaited(
+              pending.then((text) {
+                waitingTranslation--;
+                if (text != null && !_disposed) {
+                  _replaceText(event.start, event.text, text);
+                }
+                if (!_disposed) notifyListeners();
+              }),
+            );
+          } else {
+            waitingTranslation--;
+          }
+          final translated = quick is String ? quick : null;
           if (_disposed || gen != _gen) return;
           _addCue(
             Cue(
@@ -490,6 +564,7 @@ class SubtitleSession extends ChangeNotifier {
         });
       case AsrProgress():
         _pending--;
+        if (event.until > processedUntil + 30) _feedRetries = 0;
         processedUntil = event.until;
         if (event.last || (_lastSent && _pending <= 0)) {
           // Let queued translations land before judging the result.
@@ -504,6 +579,23 @@ class SubtitleSession extends ChangeNotifier {
         error = event.message;
         _set('Lỗi nhận dạng: ${event.message}');
     }
+  }
+
+  static final _late = Object();
+
+  /// Puts a translation that arrived late into the line already shown.
+  void _replaceText(double start, String source, String text) {
+    final i = cues.indexWhere(
+      (x) => (x.start - start).abs() < 0.01 && x.source == source,
+    );
+    if (i < 0) return;
+    cues[i] = Cue(
+      start: cues[i].start,
+      end: cues[i].end,
+      text: text,
+      source: source,
+    );
+    onCue?.call(cues[i]);
   }
 
   String _langOf(AsrSegment s) =>
@@ -588,6 +680,9 @@ class SubtitleSession extends ChangeNotifier {
       'Số đoạn âm thanh đã nhận: $_chunksFed',
       'Số câu nghe được: $_linesHeard',
       'Bỏ qua tiếng đệm (嗯, あ…): $_fillers câu',
+      'Đang chờ dịch: $waitingTranslation câu · dịch chậm (hiện câu gốc '
+          'trước): $_lateTranslations câu',
+      'Nối lại âm thanh: $_feedRetries lần',
       'Chế độ: ${_mode == SubtitleMode.whole ? 'làm hết phim' : 'chỉ làm trước chỗ đang xem'}'
           '${paused ? ' (đang nghỉ)' : ''}',
       'Số dòng phụ đề: ${cues.length}',
