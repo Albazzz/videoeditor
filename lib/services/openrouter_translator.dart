@@ -73,18 +73,20 @@ String _languageName(String code) =>
 
 /// Translates subtitles with a language model on OpenRouter.
 ///
-/// Lines are sent in batches with the lines just before them as context,
-/// so pronouns and names stay consistent. Live lines are gathered for a
-/// moment and sent together; a whole file goes in chunks of [chunkSize],
-/// one after another, each retried on its own, so a long film does not
-/// depend on one huge request.
+/// Lines go in requests of about [budget] characters (never cutting a
+/// line), up to [parallel] requests at a time. Each request numbers its
+/// lines and carries the lines just before it as context; a line the
+/// model leaves out is asked for again on its own, instead of throwing
+/// the whole request away.
 class OpenRouterTranslator implements Translator {
   OpenRouterTranslator({
     required this.apiKey,
     required this.model,
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
-    this.chunkSize = 30,
+    this.budget = 1500,
+    this.maxLines = 80,
+    this.parallel = 3,
     this.retryDelay = const Duration(seconds: 2),
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null;
@@ -92,7 +94,14 @@ class OpenRouterTranslator implements Translator {
   final String apiKey;
   final String model;
   final Duration gatherFor;
-  final int chunkSize;
+
+  /// Characters of original text per request: Chinese or Japanese lines
+  /// are short in characters but dense, so this is about 30–80 lines.
+  final int budget;
+  final int maxLines;
+
+  /// Requests in flight at once.
+  final int parallel;
 
   /// First wait before retrying; doubled each time.
   final Duration retryDelay;
@@ -104,10 +113,13 @@ class OpenRouterTranslator implements Translator {
   );
 
   final _waiting = <_Waiting>[];
+  int _waitingChars = 0;
   Timer? _gather;
   bool _disposed = false;
+  int _inFlight = 0;
+  final _slots = <Completer<void>>[];
 
-  /// The last lines translated, as (original, Vietnamese), for context.
+  /// The last lines translated live, as (original, Vietnamese).
   final _recent = <(String, String)>[];
 
   /// Lines already translated ("Hả?", "Cảm ơn"): not sent again.
@@ -126,7 +138,9 @@ class OpenRouterTranslator implements Translator {
     if (known != null) return Future.value(known);
     final w = _Waiting(text, lang);
     _waiting.add(w);
-    if (_waiting.length >= chunkSize) {
+    _waitingChars += text.length;
+    // A full request goes at once; otherwise wait a moment for more.
+    if (_waitingChars >= budget || _waiting.length >= maxLines) {
       _flush();
     } else {
       _gather ??= Timer(gatherFor, _flush);
@@ -140,6 +154,7 @@ class OpenRouterTranslator implements Translator {
     if (_waiting.isEmpty) return;
     final batch = List.of(_waiting);
     _waiting.clear();
+    _waitingChars = 0;
     // Lines heard as different languages ('auto') go separately.
     final byLang = <String, List<_Waiting>>{};
     for (final w in batch) {
@@ -147,7 +162,8 @@ class OpenRouterTranslator implements Translator {
     }
     for (final entry in byLang.entries) {
       final items = entry.value;
-      translateBatch([for (final w in items) w.text], entry.key).then(
+      final context = List.of(_recent);
+      _translateChunk([for (final w in items) w.text], entry.key, context).then(
         (out) {
           for (var i = 0; i < items.length; i++) {
             final t = out[i];
@@ -158,8 +174,12 @@ class OpenRouterTranslator implements Translator {
             } else {
               if (_done.length > 3000) _done.clear();
               _done['${items[i].lang}|${items[i].text}'] = t;
+              _recent.add((items[i].text, t));
               items[i].done.complete(t);
             }
+          }
+          while (_recent.length > 6) {
+            _recent.removeAt(0);
           }
         },
         onError: (Object e) {
@@ -177,49 +197,89 @@ class OpenRouterTranslator implements Translator {
     String lang, {
     void Function(int done)? onProgress,
   }) async {
-    final out = <String?>[];
-    for (var i = 0; i < lines.length; i += chunkSize) {
-      if (_disposed) throw StateError('Đã đóng bộ dịch');
-      final end = i + chunkSize < lines.length ? i + chunkSize : lines.length;
-      final chunk = lines.sublist(i, end);
-      final done = await _translateChunk(chunk, lang);
-      out.addAll(done);
-      onProgress?.call(out.length);
+    final out = List<String?>.filled(lines.length, null);
+    final chunks = chunkByLength(lines, budget: budget, maxLines: maxLines);
+    var done = 0;
+    Object? failure;
+    await Future.wait([
+      for (final c in chunks)
+        () async {
+          // The original lines just before this chunk give it context;
+          // their translations may not exist yet (chunks run together).
+          final from = c.$1 - 6 < 0 ? 0 : c.$1 - 6;
+          final context = [
+            for (var i = from; i < c.$1; i++) (lines[i], out[i] ?? ''),
+          ];
+          try {
+            final res = await _translateChunk(
+              lines.sublist(c.$1, c.$2),
+              lang,
+              context,
+            );
+            out.setRange(c.$1, c.$2, res);
+          } on OpenRouterError catch (e) {
+            // A wrong key or no credit: no point going on.
+            failure ??= e;
+          }
+          done += c.$2 - c.$1;
+          onProgress?.call(done);
+        }(),
+    ]);
+    final f = failure;
+    if (f != null && out.every((t) => t == null)) throw f;
+    return out;
+  }
+
+  /// One request; lines the model leaves out are asked for again on
+  /// their own (a few at a time) so they keep their neighbours' context.
+  Future<List<String?>> _translateChunk(
+    List<String> lines,
+    String lang,
+    List<(String, String)> context,
+  ) async {
+    final out = await _request(lines, lang, context);
+    final missing = [
+      for (var i = 0; i < lines.length; i++)
+        if (out[i] == null) i,
+    ];
+    if (missing.isEmpty || lines.length == 1) return out;
+    AppLog.i('openrouter', 'Hỏi lại ${missing.length} câu bị bỏ sót');
+    for (var k = 0; k < missing.length; k += 5) {
+      final group = missing.sublist(
+        k,
+        k + 5 < missing.length ? k + 5 : missing.length,
+      );
+      final first = group.first;
+      final near = [
+        for (var i = first - 3 < 0 ? 0 : first - 3; i < first; i++)
+          (lines[i], out[i] ?? ''),
+      ];
+      final again = await _request(
+        [for (final i in group) lines[i]],
+        lang,
+        near.isEmpty ? context : near,
+      );
+      for (var j = 0; j < group.length; j++) {
+        out[group[j]] = again[j];
+      }
     }
     return out;
   }
 
-  /// One chunk; if the model returns the wrong number of lines, the chunk
-  /// is halved until the answers line up.
-  Future<List<String?>> _translateChunk(List<String> lines, String lang) async {
-    final result = await _request(lines, lang);
-    if (result != null) {
-      for (var i = 0; i < lines.length; i++) {
-        _recent.add((lines[i], result[i]));
-      }
-      while (_recent.length > 6) {
-        _recent.removeAt(0);
-      }
-      return result;
-    }
-    if (lines.length == 1) return [null];
-    final half = lines.length ~/ 2;
-    return [
-      ...await _translateChunk(lines.sublist(0, half), lang),
-      ...await _translateChunk(lines.sublist(half), lang),
-    ];
-  }
-
   /// The prompt for [lines]; public for tests.
-  List<Map<String, String>> messages(List<String> lines, String lang) {
+  List<Map<String, String>> messages(
+    List<String> lines,
+    String lang, [
+    List<(String, String)> context = const [],
+  ]) {
     final from = lang == 'auto'
         ? 'whatever language each line is in'
         : _languageName(lang);
-    final context = _recent.isEmpty
+    final before = context.isEmpty
         ? ''
-        : 'Lines just before these (for context only, do not translate '
-              'them again):\n${jsonEncode([
-                for (final r in _recent) {'src': r.$1, 'vi': r.$2},
+        : 'Lines just before these, for context only (do not translate '
+              'them):\n${jsonEncode([
+                for (final r in context) {'src': r.$1, if (r.$2.isNotEmpty) 'vi': r.$2},
               ])}\n\n';
     return [
       {
@@ -237,18 +297,53 @@ class OpenRouterTranslator implements Translator {
       {
         'role': 'user',
         'content':
-            '${context}Translate these ${lines.length} subtitle lines from '
-            '$from into Vietnamese.\n'
-            'Answer with JSON only: {"vi": [...]} holding exactly '
-            '${lines.length} strings, in the same order, one per line.\n\n'
-            '${jsonEncode({'lines': lines})}',
+            '${before}Translate the ${lines.length} numbered subtitle lines '
+            'below from $from into Vietnamese. Translate every line on its '
+            'own, even very short ones; never merge or skip lines.\n'
+            'Answer with JSON only, the same numbers as keys: '
+            '{"1": "…", "2": "…"}\n\n'
+            '${jsonEncode({
+              'lines': {for (var i = 0; i < lines.length; i++) '${i + 1}': lines[i]},
+            })}',
       },
     ];
   }
 
-  /// Sends one request, retrying network trouble and rate limits. Returns
-  /// null when the answer does not have one translation per line.
-  Future<List<String>?> _request(List<String> lines, String lang) async {
+  /// Waits for one of the [parallel] request slots.
+  Future<void> _acquire() async {
+    while (_inFlight >= parallel) {
+      final c = Completer<void>();
+      _slots.add(c);
+      await c.future;
+    }
+    _inFlight++;
+  }
+
+  void _release() {
+    _inFlight--;
+    if (_slots.isNotEmpty) _slots.removeAt(0).complete();
+  }
+
+  /// Sends one request, retrying network trouble and rate limits. Lines
+  /// missing from the answer are null.
+  Future<List<String?>> _request(
+    List<String> lines,
+    String lang,
+    List<(String, String)> context,
+  ) async {
+    await _acquire();
+    try {
+      return await _send(lines, lang, context);
+    } finally {
+      _release();
+    }
+  }
+
+  Future<List<String?>> _send(
+    List<String> lines,
+    String lang,
+    List<(String, String)> context,
+  ) async {
     const attempts = 4;
     for (var attempt = 1; ; attempt++) {
       final started = DateTime.now();
@@ -263,7 +358,7 @@ class OpenRouterTranslator implements Translator {
               },
               body: jsonEncode({
                 'model': model,
-                'messages': messages(lines, lang),
+                'messages': messages(lines, lang, context),
                 'temperature': 0.3,
               }),
             )
@@ -294,16 +389,18 @@ class OpenRouterTranslator implements Translator {
         }
         final content = '${body['choices']?[0]?['message']?['content'] ?? ''}';
         final usage = body['usage'];
+        final parsed = parseTranslations(content, lines.length);
+        final got = parsed.where((t) => t != null).length;
         AppLog.i(
           'openrouter',
-          '${lines.length} câu trong ${(ms / 1000).toStringAsFixed(1)} giây'
+          '$got/${lines.length} câu (${lines.fold(0, (n, l) => n + l.length)} '
+              'ký tự) trong ${(ms / 1000).toStringAsFixed(1)} giây'
               '${usage is Map ? ' · ${usage['prompt_tokens']}+${usage['completion_tokens']} token' : ''}',
         );
-        final parsed = parseTranslations(content, lines.length);
-        if (parsed == null) {
+        if (got == 0) {
           AppLog.e(
             'openrouter',
-            'Trả sai số câu (cần ${lines.length}): '
+            'Không đọc được câu trả lời: '
                 '${content.length > 300 ? content.substring(0, 300) : content}',
           );
         }
@@ -347,26 +444,66 @@ class OpenRouterTranslator implements Translator {
   }
 }
 
-/// Reads `{"vi": [...]}` (or a bare array) from a model's answer, which may
-/// be wrapped in a code fence or chatter. Null unless there are exactly
-/// [count] strings.
-List<String>? parseTranslations(String content, int count) {
-  Object? decoded;
+/// Splits [lines] into requests of about [budget] characters and at most
+/// [maxLines] lines, as (start, end) index pairs. A line is never cut,
+/// and a line longer than the budget goes alone.
+List<(int, int)> chunkByLength(
+  List<String> lines, {
+  int budget = 1500,
+  int maxLines = 80,
+}) {
+  final out = <(int, int)>[];
+  var start = 0;
+  var chars = 0;
+  for (var i = 0; i < lines.length; i++) {
+    final len = lines[i].length;
+    if (i > start && (chars + len > budget || i - start >= maxLines)) {
+      out.add((start, i));
+      start = i;
+      chars = 0;
+    }
+    chars += len;
+  }
+  if (start < lines.length) out.add((start, lines.length));
+  return out;
+}
+
+/// Reads a model's answer: `{"1": "…", "2": "…"}` as asked, or the older
+/// `{"vi": [...]}` / bare array with exactly [count] items. The answer may
+/// be wrapped in a code fence or chatter. Lines it does not give are null.
+List<String?> parseTranslations(String content, int count) {
+  final out = List<String?>.filled(count, null);
   final start = content.indexOf(RegExp(r'[\[{]'));
-  if (start < 0) return null;
+  if (start < 0) return out;
   final open = content[start];
   final end = content.lastIndexOf(open == '{' ? '}' : ']');
-  if (end <= start) return null;
+  if (end <= start) return out;
+  Object? decoded;
   try {
     decoded = jsonDecode(content.substring(start, end + 1));
   } catch (_) {
-    return null;
+    return out;
   }
   if (decoded is Map) {
+    var numbered = false;
+    for (final e in decoded.entries) {
+      final i = int.tryParse('${e.key}'.trim());
+      if (i != null && i >= 1 && i <= count && e.value is String) {
+        final t = (e.value as String).trim();
+        if (t.isNotEmpty) out[i - 1] = t;
+        numbered = true;
+      }
+    }
+    if (numbered) return out;
     decoded = decoded['vi'] ?? decoded.values.whereType<List>().firstOrNull;
   }
-  if (decoded is! List || decoded.length != count) return null;
-  return [for (final x in decoded) '$x'.trim()];
+  if (decoded is List && decoded.length == count) {
+    for (var i = 0; i < count; i++) {
+      final t = '${decoded[i]}'.trim();
+      if (t.isNotEmpty) out[i] = t;
+    }
+  }
+  return out;
 }
 
 class _Waiting {
