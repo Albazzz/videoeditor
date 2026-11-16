@@ -13,11 +13,14 @@ import '../services/ad_block.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
+import '../services/model_store.dart';
 import '../services/subtitle_store.dart';
+import '../services/watch_position.dart';
 import '../services/web_video.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
+import '../widgets/subtitle_style.dart';
 import 'player_screen.dart';
 
 const kHomePage = 'https://www.google.com/';
@@ -54,6 +57,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
   String _filePage = '';
   String _fileLanguage = '';
   double _fileOffset = 0;
+
+  /// The lines on show came from a file (not made earlier by the app).
+  bool _fileImported = false;
+
+  /// Top-level page address, kept in step with navigation.
+  String _pageUrl = '';
+
+  /// Page already checked for saved subtitles and a resume point.
+  String _autoPage = '';
+  bool _autoBusy = false;
+  DateTime _lastPositionSave = DateTime(0);
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
@@ -87,6 +101,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _onLoadStart(String url) {
     _loadStarted = DateTime.now();
+    if (url.isNotEmpty && url != 'about:blank') _pageUrl = url;
     AppLog.i('web', 'Mở ${AppLog.url(url)}');
     _slowLoad?.cancel();
     _slowLoad = Timer(const Duration(seconds: 15), () {
@@ -180,7 +195,22 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    appSettings.addListener(_onSettings);
+  }
+
+  /// Style changes show at once on the page.
+  void _onSettings() {
+    if (_session != null || _fileCues != null) {
+      _send(appSettings.subtitleOpts);
+    }
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
+    appSettings.removeListener(_onSettings);
     _slowLoad?.cancel();
     _saver?.close();
     _session?.dispose();
@@ -245,14 +275,90 @@ class _BrowserScreenState extends State<BrowserScreen> {
         }
       }
     }
+    _rememberPosition(video);
+    if (_autoPage != _pageUrl &&
+        !_autoBusy &&
+        video.duration >= WatchPosition.minDuration) {
+      _autoForPage(video);
+    }
     if (changed) setState(() {});
+  }
+
+  /// The film itself, not an advert, is playing on this page: bring
+  /// back its subtitles and offer to carry on where the user stopped.
+  Future<void> _autoForPage(WebVideo video) async {
+    final page = _pageUrl;
+    if (page.isEmpty) return;
+    _autoBusy = true;
+    try {
+      final id = SubtitleStore.idFor(page);
+      final saved = await SubtitleStore.load(id);
+      final resume = await WatchPosition.load(id, duration: video.duration);
+      if (!mounted || page != _pageUrl) return;
+      _autoPage = page;
+      if (resume != null && video.time < 10) _offerResume(resume);
+      if (saved == null || saved.cues.isEmpty) return;
+      if (_session != null || _fileCues != null) return;
+      if (saved.imported) {
+        AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã nhập');
+        _showFileCues(saved.cues, page, saved.language);
+        toast(context, 'Đã bật phụ đề đã nhập cho phim này');
+      } else if (saved.language == appSettings.language) {
+        // Unfinished ones carry on being made, if the app can.
+        if (!saved.isWholeVideo &&
+            video.playable &&
+            await ModelStore.isReady()) {
+          if (!mounted) return;
+          AppLog.i('web', 'Tự làm tiếp phụ đề (${saved.cues.length} dòng)');
+          await _startSubtitles();
+        } else {
+          if (!mounted) return;
+          AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã làm');
+          _showFileCues(saved.cues, page, saved.language, imported: false);
+          toast(context, 'Đã bật phụ đề đã làm trước cho phim này');
+        }
+      }
+    } catch (e) {
+      AppLog.e('web', 'Tự bật phụ đề lỗi: $e');
+    } finally {
+      _autoBusy = false;
+    }
+  }
+
+  void _offerResume(double t) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 8),
+          content: Text('Lần trước bạn xem tới ${formatTime(t)}'),
+          action: SnackBarAction(
+            label: 'Xem tiếp',
+            onPressed: () => _send({'__vsub': 'seek', 't': t}),
+          ),
+        ),
+      );
+  }
+
+  void _rememberPosition(WebVideo video) {
+    if (_pageUrl.isEmpty || _otherVideo) return;
+    final now = DateTime.now();
+    if (now.difference(_lastPositionSave) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastPositionSave = now;
+    WatchPosition.save(
+      SubtitleStore.idFor(_pageUrl),
+      video.time,
+      video.duration,
+    );
   }
 
   static List<Object> _cueData(Cue c) => [c.start, c.end, c.text, c.source];
 
   /// Replaces every line the page holds; the page draws them itself.
   void _sendAllCues(List<Cue> cues) {
-    _send({'__vsub': 'opts', 'showSource': appSettings.showSource});
+    _send(appSettings.subtitleOpts);
     _send({
       '__vsub': 'cues',
       'list': [for (final c in cues) _cueData(c)],
@@ -295,9 +401,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
     toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
   }
 
-  void _showFileCues(List<Cue> cues, String page, String language) {
+  void _showFileCues(
+    List<Cue> cues,
+    String page,
+    String language, {
+    bool imported = true,
+  }) {
     if (_session != null) _stopSubtitles();
     setState(() {
+      _fileImported = imported;
       _fileCues = cues;
       _filePage = page;
       _fileLanguage = language;
@@ -348,7 +460,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final reuse = saved != null && saved.language == appSettings.language;
     if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
-    _send({'__vsub': 'opts', 'showSource': appSettings.showSource});
+    _send(appSettings.subtitleOpts);
     void sendCue(Cue c) => _send({'__vsub': 'cue', 'c': _cueData(c)});
     final session = SubtitleSession(
       input: video.src,
@@ -514,6 +626,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   onUpdateVisitedHistory: (_, url, _) {
                     if (url != null && url.toString() != 'about:blank') {
                       _address.text = url.toString();
+                      _pageUrl = url.toString();
                     }
                   },
                 ),
@@ -548,6 +661,64 @@ class _BrowserScreenState extends State<BrowserScreen> {
         found?.replaceFirst(RegExp(r'''[.,;:!?)\]'"]+$'''), '') ?? text;
     _address.text = link;
     _go(link);
+  }
+
+  /// Clears cache, cookies and site storage: the cure for pages stuck on
+  /// a broken copy or an endless "checking your browser".
+  Future<void> _clearWebData() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Xoá dữ liệu web?'),
+        content: const Text(
+          'Xoá bộ nhớ đệm (cache), cookie và dữ liệu các trang. Dùng khi '
+          'trang bị lỗi hoặc cứ đòi kiểm tra trình duyệt mãi. Các trang đang '
+          'đăng nhập sẽ phải đăng nhập lại.\n\n'
+          'Phụ đề, thư viện video và chỗ xem dở không bị xoá.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Huỷ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Xoá'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final failed = <String>[];
+    Future<void> step(String name, Future<void> Function() body) async {
+      try {
+        await body();
+      } catch (e) {
+        failed.add(name);
+        AppLog.e('web', 'Xoá $name lỗi: $e');
+      }
+    }
+
+    await step('cache', () => InAppWebViewController.clearAllCache());
+    await step('cookie', () => CookieManager.instance().deleteAllCookies());
+    await step(
+      'dữ liệu trang',
+      () => Platform.isIOS
+          ? WebStorageManager.instance().removeDataModifiedSince(
+              dataTypes: WebsiteDataType.ALL.toSet(),
+              date: DateTime.fromMillisecondsSinceEpoch(0),
+            )
+          : WebStorageManager.instance().deleteAllData(),
+    );
+    AppLog.i('web', 'Đã xoá dữ liệu web');
+    if (!mounted) return;
+    toast(
+      context,
+      failed.isEmpty
+          ? 'Đã xoá dữ liệu web'
+          : 'Đã xoá, trừ: ${failed.join(', ')}',
+    );
+    await _web?.reload();
   }
 
   Widget _addressBar() {
@@ -604,19 +775,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
           IconButton(
-            tooltip: 'Chặn quảng cáo',
-            icon: Icon(
-              appSettings.adBlock ? Icons.shield : Icons.shield_outlined,
-              size: 20,
-              color: appSettings.adBlock
-                  ? Theme.of(context).colorScheme.primary
-                  : null,
-            ),
-            onPressed: _toggleAdBlock,
-          ),
-          IconButton(
+            tooltip: 'Tải lại',
             icon: const Icon(Icons.refresh, size: 20),
             onPressed: () => _web?.reload(),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Thêm',
+            icon: Icon(
+              Icons.more_vert,
+              size: 20,
+              // A reminder when ad blocking is off.
+              color: appSettings.adBlock ? null : Colors.orange,
+            ),
+            onSelected: (v) => switch (v) {
+              'adblock' => _toggleAdBlock(),
+              'home' => _go(kHomePage),
+              'clear' => _clearWebData(),
+              _ => null,
+            },
+            itemBuilder: (_) => [
+              CheckedPopupMenuItem(
+                value: 'adblock',
+                checked: appSettings.adBlock,
+                child: const Text('Chặn quảng cáo'),
+              ),
+              const PopupMenuItem(
+                value: 'home',
+                child: ListTile(
+                  leading: Icon(Icons.home_outlined),
+                  title: Text('Về trang Google'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'clear',
+                child: ListTile(
+                  leading: Icon(Icons.cleaning_services_outlined),
+                  title: Text('Xoá dữ liệu web'),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -673,9 +870,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ? ''
           : ' · lệch ${_fileOffset > 0 ? '+' : ''}'
                 '${_fileOffset.toStringAsFixed(1)} giây';
-      status =
-          'Phụ đề từ file · ${kSubtitleLanguages[_fileLanguage] ?? _fileLanguage}'
-          ' · ${fileCues.length} dòng$offset';
+      status = _fileImported
+          ? 'Phụ đề từ file · '
+                '${kSubtitleLanguages[_fileLanguage] ?? _fileLanguage}'
+                ' · ${fileCues.length} dòng$offset'
+          : 'Phụ đề đã làm trước · ${fileCues.length} dòng$offset';
     } else if (!video.playable) {
       status =
           'Trang này giấu luồng video nên không tự tạo được phụ đề. '
@@ -765,6 +964,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
               ],
             ),
+            if (active)
+              IconButton(
+                tooltip: 'Kiểu phụ đề',
+                icon: const Icon(Icons.text_fields, size: 20),
+                onPressed: () => showSubtitleStyle(context),
+              ),
             IconButton(
               tooltip: 'Phát trong app',
               icon: const Icon(Icons.open_in_full, size: 20),

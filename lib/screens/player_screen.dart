@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,9 +12,11 @@ import '../services/crash_trail.dart';
 import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
+import '../services/watch_position.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
+import '../widgets/subtitle_style.dart';
 import 'export_sheet.dart';
 
 /// Plays a library video or a stream found in the browser, with subtitles
@@ -60,6 +63,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _hide;
   Cue? _cue;
   double? _dragging;
+  DateTime _lastPositionSave = DateTime(0);
+
+  /// Where the watch position of this video is kept.
+  String? get _positionKey => widget.item != null
+      ? 'file:${widget.item!.name}'
+      : widget.page == null
+      ? null
+      : SubtitleStore.idFor(widget.page!);
 
   String get _input => widget.item?.file.path ?? widget.url!;
 
@@ -67,6 +78,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void initState() {
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    appSettings.addListener(_onSettings);
     _player = widget.item != null
         ? VideoPlayerController.file(widget.item!.file)
         : VideoPlayerController.networkUrl(
@@ -83,10 +95,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         'Mở video bằng trình phát',
         () => _player.initialize(),
       );
-      if (widget.startAt > 1) {
-        await _player.seekTo(
-          Duration(milliseconds: (widget.startAt * 1000).round()),
-        );
+      final key = _positionKey;
+      final resume = widget.startAt > 1 || key == null
+          ? null
+          : await WatchPosition.load(key, duration: _duration);
+      final start = widget.startAt > 1 ? widget.startAt : resume ?? 0;
+      if (start > 1) {
+        await _player.seekTo(Duration(milliseconds: (start * 1000).round()));
+      }
+      if (resume != null && mounted) {
+        toast(context, 'Xem tiếp từ ${formatTime(resume)}');
       }
       await _player.play();
       final item = widget.item;
@@ -123,9 +141,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   double get _position => _player.value.position.inMilliseconds / 1000;
   double get _duration => _player.value.duration.inMilliseconds / 1000;
 
+  void _onSettings() {
+    if (mounted) setState(() {});
+  }
+
+  void _savePosition({bool now = false}) {
+    final key = _positionKey;
+    if (key == null || !_player.value.isInitialized) return;
+    final time = DateTime.now();
+    if (!now && time.difference(_lastPositionSave).inSeconds < 5) return;
+    _lastPositionSave = time;
+    WatchPosition.save(key, _position, _duration);
+  }
+
   void _onTick() {
     if (!mounted) return;
     final t = _position;
+    _savePosition();
     _session?.updatePosition(t);
     final cue = _showSubs ? cueAt(_cues, t) : null;
     if (!identical(cue, _cue) || _showControls) setState(() => _cue = cue);
@@ -290,6 +322,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hide?.cancel();
+    appSettings.removeListener(_onSettings);
+    _savePosition(now: true);
     _player.removeListener(_onTick);
     _player.dispose();
     _session?.removeListener(_onSession);
@@ -333,7 +367,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             Positioned(
               left: 0,
               right: 0,
-              bottom: _showControls ? 120 : 28,
+              bottom: math.max(
+                _showControls ? 120.0 : 28.0,
+                MediaQuery.sizeOf(context).height * appSettings.subLift,
+              ),
               child: SafeArea(
                 top: false,
                 child: Center(child: SubtitleText(cue: _cue)),
@@ -402,6 +439,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               icon: const Icon(Icons.subtitles_outlined, color: Colors.white),
               onSelected: (v) => switch (v) {
                 'import' => _importFile(),
+                'style' => showSubtitleStyle(context),
                 'earlier' => _shift(-0.5),
                 'later' => _shift(0.5),
                 'details' when session != null => showSessionDetails(
@@ -414,6 +452,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 const PopupMenuItem(
                   value: 'import',
                   child: Text('Nhập phụ đề từ file…'),
+                ),
+                const PopupMenuItem(
+                  value: 'style',
+                  child: Text('Kiểu phụ đề…'),
                 ),
                 if (_fromFile && _cues.isNotEmpty) ...[
                   const PopupMenuItem(

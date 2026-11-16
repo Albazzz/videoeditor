@@ -12,6 +12,17 @@ bool get _hasFfmpegKit => Platform.isIOS || Platform.isAndroid;
 /// Seconds of audio per chunk file.
 const int kChunkSeconds = 10;
 
+/// Where the audio is cut, in seconds from where it starts. The first
+/// chunks are short so the first line shows within a few seconds of
+/// pressing CC; after that [kChunkSeconds] each, for up to [hours].
+String segmentTimes({int hours = 8}) {
+  final points = <int>[3, 8];
+  for (var t = 8 + kChunkSeconds; t <= hours * 3600; t += kChunkSeconds) {
+    points.add(t);
+  }
+  return points.join(',');
+}
+
 String chunkName(int index) => 'c_${index.toString().padLeft(5, '0')}.wav';
 
 /// Decodes the audio of a video file or stream URL into small 16 kHz mono
@@ -62,8 +73,8 @@ class AudioFeed {
       'pcm_s16le',
       '-f',
       'segment',
-      '-segment_time',
-      '$kChunkSeconds',
+      '-segment_times',
+      segmentTimes(),
       '-segment_format',
       'wav',
       '-reset_timestamps',

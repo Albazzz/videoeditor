@@ -101,6 +101,9 @@ const String kPageScript = r'''
 
   // ---- subtitle lines, kept sorted by start time ----
   var cues = [], showSource = false;
+  // Look chosen in the app: text size, height above the bottom of the
+  // video (share of its height) and how dark the box behind is.
+  var scale = 1, lift = 0.07, bg = 0.72;
   function sameStart(a, b) { return Math.abs(a - b) < 0.05; }
   function upsert(c) {
     for (var i = 0; i < cues.length; i++) {
@@ -159,7 +162,7 @@ const String kPageScript = r'''
   }
 
   // ---- box drawn over the video ----
-  var box = null, main = null, orig = null, shown = '';
+  var box = null, inner = null, main = null, orig = null, shown = '';
   function ensureBox() {
     if (box) return box;
     box = document.createElement('div');
@@ -167,12 +170,13 @@ const String kPageScript = r'''
       'position:fixed;left:0;bottom:0;display:none;pointer-events:none;' +
       'z-index:2147483647;text-align:center;box-sizing:border-box;' +
       'padding:0 4%;margin:0;transform:none;');
-    var inner = document.createElement('div');
+    inner = document.createElement('div');
     inner.setAttribute('style',
-      'display:inline-block;max-width:100%;background:rgba(0,0,0,.72);' +
+      'display:inline-block;max-width:100%;' +
       'color:#fff;border-radius:6px;padding:.18em .55em;line-height:1.3;' +
       'font-family:-apple-system,system-ui,sans-serif;font-weight:500;' +
-      'text-shadow:0 1px 2px #000;white-space:pre-wrap;');
+      'white-space:pre-wrap;');
+    style();
     orig = document.createElement('div');
     orig.setAttribute('style', 'font-size:.72em;opacity:.8;display:none;');
     main = document.createElement('div');
@@ -180,6 +184,13 @@ const String kPageScript = r'''
     inner.appendChild(main);
     box.appendChild(inner);
     return box;
+  }
+  function style() {
+    if (!inner) return;
+    inner.style.background = 'rgba(0,0,0,' + bg + ')';
+    // Without a box, an outline keeps the text readable on bright scenes.
+    inner.style.textShadow = bg > 0.05 ? '0 1px 2px #000' :
+        '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 0 4px #000';
   }
   function hide() { if (box) box.style.display = 'none'; }
   function draw() {
@@ -205,9 +216,9 @@ const String kPageScript = r'''
       orig.textContent = extra;
       orig.style.display = extra ? 'block' : 'none';
     }
-    var bottom = innerHeight - Math.min(r.bottom, innerHeight) + r.height * 0.07;
-    var size = Math.min(28, r.width * 0.042, r.height * 0.075);
-    b.style.fontSize = Math.max(12, size) + 'px';
+    var bottom = innerHeight - Math.min(r.bottom, innerHeight) + r.height * lift;
+    var size = Math.min(28, r.width * 0.042, r.height * 0.075) * scale;
+    b.style.fontSize = Math.max(10, size) + 'px';
     b.style.left = r.left + 'px';
     b.style.width = r.width + 'px';
     b.style.bottom = Math.max(0, bottom) + 'px';
@@ -222,7 +233,15 @@ const String kPageScript = r'''
     try {
       if (d.__vsub === 'rate') { if (v) v.playbackRate = d.v; }
       else if (d.__vsub === 'pause') { if (v) v.pause(); }
-      else if (d.__vsub === 'opts') { showSource = !!d.showSource; shown = ''; }
+      else if (d.__vsub === 'seek') { if (v && isFinite(d.t)) v.currentTime = d.t; }
+      else if (d.__vsub === 'opts') {
+        showSource = !!d.showSource;
+        if (typeof d.scale === 'number') scale = d.scale;
+        if (typeof d.lift === 'number') lift = d.lift;
+        if (typeof d.bg === 'number') bg = d.bg;
+        style();
+        shown = '';
+      }
       else if (d.__vsub === 'cue') {
         var c = toCue(d.c);
         upsert(c);

@@ -152,12 +152,22 @@ class SubtitleText extends StatelessWidget {
     if (c == null || c.text.trim().isEmpty) return const SizedBox.shrink();
     final showSource =
         appSettings.showSource && c.source.isNotEmpty && c.source != c.text;
+    final scale = appSettings.subScale;
+    final bg = appSettings.subBg;
+    // Without a box, an outline keeps the text readable.
+    final shadows = bg > 0.05
+        ? null
+        : const [
+            Shadow(blurRadius: 3),
+            Shadow(offset: Offset(1, 1)),
+            Shadow(offset: Offset(-1, -1)),
+          ];
     return IgnorePointer(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.65),
+          color: Colors.black.withValues(alpha: bg),
           borderRadius: BorderRadius.circular(6),
         ),
         child: Column(
@@ -167,16 +177,21 @@ class SubtitleText extends StatelessWidget {
               Text(
                 c.source,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70, fontSize: 13),
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 13 * scale,
+                  shadows: shadows,
+                ),
               ),
             Text(
               c.text,
               textAlign: TextAlign.center,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 18,
+                fontSize: 18 * scale,
                 height: 1.25,
                 fontWeight: FontWeight.w500,
+                shadows: shadows,
               ),
             ),
           ],
