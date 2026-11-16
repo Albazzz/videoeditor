@@ -40,6 +40,9 @@ class AudioFeed {
     required String outDir,
     Map<String, String> headers = const {},
     double startSec = 0,
+
+    /// Seconds of audio to take; null for everything to the end.
+    double? lengthSec,
   }) async {
     final isUrl = input.startsWith('http');
     final other = headers.entries
@@ -60,6 +63,7 @@ class AudioFeed {
       if (startSec > 0) ...['-ss', startSec.toStringAsFixed(3)],
       '-i',
       input,
+      if (lengthSec != null) ...['-t', lengthSec.toStringAsFixed(3)],
       '-vn',
       '-sn',
       '-dn',

@@ -48,6 +48,9 @@ class AppSettings extends ChangeNotifier {
 
   static const _secure = FlutterSecureStorage();
 
+  /// Make subtitles for the whole film, or only just ahead of the viewer.
+  bool subWhole = true;
+
   /// Subtitle text size, 1 = normal.
   double subScale = 1;
 
@@ -67,6 +70,7 @@ class AppSettings extends ChangeNotifier {
     subScale = prefs.getDouble('subScale') ?? 1;
     subLift = prefs.getDouble('subLift') ?? kDefaultSubLift;
     subBg = prefs.getDouble('subBg') ?? 0.72;
+    subWhole = prefs.getBool('subWhole') ?? true;
     translateEngine = prefs.getString('translateEngine') ?? 'device';
     openRouterModel =
         prefs.getString('openRouterModel') ?? kDefaultOpenRouterModel;
@@ -115,6 +119,12 @@ class AppSettings extends ChangeNotifier {
         await _secure.write(key: 'openrouter_key', value: openRouterKey);
       }
     } catch (_) {}
+    notifyListeners();
+  }
+
+  void setSubWhole(bool value) {
+    subWhole = value;
+    _prefs?.setBool('subWhole', value);
     notifyListeners();
   }
 

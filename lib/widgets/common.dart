@@ -141,6 +141,112 @@ class _ModelDialogState extends State<_ModelDialog> {
   }
 }
 
+/// The video's timeline: stretches that have subtitles are filled in,
+/// with a mark where the viewer is.
+class CoverageBar extends StatelessWidget {
+  const CoverageBar({
+    super.key,
+    required this.covered,
+    required this.duration,
+    this.position,
+    this.done = false,
+    this.height = 6,
+  });
+
+  final List<(double, double)> covered;
+  final double duration;
+  final double? position;
+  final bool done;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: height + 4,
+      width: double.infinity,
+      child: CustomPaint(
+        painter: _CoveragePainter(
+          covered: covered,
+          duration: duration,
+          position: position,
+          track: scheme.onSurface.withValues(alpha: 0.15),
+          fill: done ? Colors.green : scheme.primary,
+          mark: scheme.onSurface,
+          height: height,
+        ),
+      ),
+    );
+  }
+}
+
+class _CoveragePainter extends CustomPainter {
+  _CoveragePainter({
+    required this.covered,
+    required this.duration,
+    required this.position,
+    required this.track,
+    required this.fill,
+    required this.mark,
+    required this.height,
+  });
+
+  final List<(double, double)> covered;
+  final double duration;
+  final double? position;
+  final Color track;
+  final Color fill;
+  final Color mark;
+  final double height;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final top = (size.height - height) / 2;
+    final bar = RRect.fromLTRBR(
+      0,
+      top,
+      size.width,
+      top + height,
+      Radius.circular(height / 2),
+    );
+    canvas.drawRRect(bar, Paint()..color = track);
+    if (duration <= 0) return;
+    double x(double t) => (t / duration).clamp(0.0, 1.0) * size.width;
+    canvas
+      ..save()
+      ..clipRRect(bar);
+    final paint = Paint()..color = fill;
+    for (final r in covered) {
+      // At least a sliver, so a short stretch still shows.
+      final left = x(r.$1);
+      final right = x(r.$2) < left + 1.5 ? left + 1.5 : x(r.$2);
+      canvas.drawRect(Rect.fromLTRB(left, top, right, top + height), paint);
+    }
+    canvas.restore();
+    final p = position;
+    if (p != null) {
+      final px = x(p);
+      canvas.drawRRect(
+        RRect.fromLTRBR(
+          px - 1.5,
+          0,
+          px + 1.5,
+          size.height,
+          const Radius.circular(1.5),
+        ),
+        Paint()..color = mark,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CoveragePainter old) =>
+      old.covered != covered ||
+      old.duration != duration ||
+      old.position != position ||
+      old.fill != fill;
+}
+
 /// The subtitle line drawn over a video.
 class SubtitleText extends StatelessWidget {
   const SubtitleText({super.key, required this.cue});

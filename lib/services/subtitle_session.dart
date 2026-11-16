@@ -11,7 +11,73 @@ import 'asr_worker.dart';
 import 'audio_feed.dart';
 import 'hls.dart';
 import 'model_store.dart';
+import 'subtitle_store.dart';
 import 'translator.dart';
+
+/// How far ahead of the viewer subtitles are made.
+enum SubtitleMode {
+  /// The whole film: on from where the viewer is to the end, then any
+  /// stretch still missing.
+  whole,
+
+  /// Only a few minutes ahead of the viewer; rests until they catch up.
+  follow,
+}
+
+/// In [SubtitleMode.follow], work rests once subtitles are this far ahead…
+const kFollowAhead = 240.0;
+
+/// …and starts again when the viewer is this close to where it stopped.
+const kFollowResume = 90.0;
+
+/// A seek further than this past the ready subtitles starts work at the
+/// new place instead of catching up.
+const kSeekJump = 30.0;
+
+/// Where to work next, or null when nothing is missing that the mode
+/// cares about. Missing stretches at or after the viewer come first.
+double? nextStart({
+  required List<(double, double)> covered,
+  required double duration,
+  required double position,
+  required SubtitleMode mode,
+}) {
+  if (duration <= 0) return null;
+  final gaps = <(double, double)>[];
+  var from = 0.0;
+  for (final r in mergeRanges(covered)) {
+    if (r.$1 - from > 3) gaps.add((from, r.$1));
+    if (r.$2 > from) from = r.$2;
+  }
+  if (duration - from > 3) gaps.add((from, duration));
+  for (final g in gaps) {
+    if (g.$2 > position + 1) return g.$1 > position ? g.$1 : position;
+  }
+  if (mode == SubtitleMode.whole && gaps.isNotEmpty) return gaps.first.$1;
+  return null;
+}
+
+/// Where a run starting at [from] should stop: just inside the next
+/// stretch that already has subtitles, or null to run to the end.
+double? runEnd(List<(double, double)> covered, double from) {
+  for (final r in mergeRanges(covered)) {
+    if (r.$1 > from + 1) return r.$1 + 2;
+  }
+  return null;
+}
+
+final _noise = RegExp(r'[\s\p{P}\p{S}]', unicode: true);
+const _fillerChars = '嗯呃啊哦唉哈欸诶呀あぁえぇおぉっー';
+const _fillerWords = {'ah', 'uh', 'um', 'hmm', 'mm', 'oh', 'eh', 'ha', 'haha'};
+
+/// A line that is only a sound ("嗯", "あっ", "Hmm…", a music note):
+/// not worth showing or sending for translation.
+bool isFiller(String text) {
+  final core = text.replaceAll(_noise, '');
+  if (core.isEmpty) return true;
+  if (_fillerWords.contains(core.toLowerCase())) return true;
+  return core.runes.every((r) => _fillerChars.contains(String.fromCharCode(r)));
+}
 
 /// Generates Vietnamese subtitles for one video while it plays.
 ///
@@ -27,6 +93,7 @@ class SubtitleSession extends ChangeNotifier {
     this.onCue,
     List<Cue> initialCues = const [],
     List<(double, double)> initialCovered = const [],
+    this._mode = SubtitleMode.whole,
   }) : _translator = translator ?? Translator.create() {
     cues.addAll(initialCues);
     _covered.addAll(initialCovered);
@@ -54,6 +121,34 @@ class SubtitleSession extends ChangeNotifier {
 
   /// What the translator is doing, empty when it is simply working.
   String translatorNote = '';
+
+  /// Length of the video, once the player knows it.
+  double duration = 0;
+
+  /// Work is resting ([SubtitleMode.follow], far enough ahead).
+  bool paused = false;
+  double? _resumeAt;
+  double _position = 0;
+  int _autoRuns = 0;
+  double? _lastAutoStart;
+  int _fillers = 0;
+
+  SubtitleMode _mode;
+  SubtitleMode get mode => _mode;
+  set mode(SubtitleMode value) {
+    if (value == _mode) return;
+    _mode = value;
+    AppLog.i('phụ đề', 'Chế độ: ${value.name}');
+    if (_disposed) return;
+    if (paused && value == SubtitleMode.whole) {
+      unawaited(_restart(_resumeAt ?? processedUntil));
+    } else if (finished && value == SubtitleMode.whole) {
+      _carryOn();
+    } else {
+      _maybePause();
+    }
+    notifyListeners();
+  }
 
   AsrWorker? _worker;
   StreamSubscription<AsrEvent>? _sub;
@@ -100,6 +195,7 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   Future<void> start(double at) async {
+    _position = at;
     AppLog.i(
       'phụ đề',
       'Bắt đầu: ${AppLog.url(input)} · tiếng $language · từ giây '
@@ -211,6 +307,8 @@ class SubtitleSession extends ChangeNotifier {
         _covered.add((_base, processedUntil));
       }
       final gen = ++_gen;
+      paused = false;
+      _resumeAt = null;
       _poll?.cancel();
       await _feed?.stop();
       final old = _dir;
@@ -233,14 +331,21 @@ class SubtitleSession extends ChangeNotifier {
       error = null;
       _feedError = '';
       _dir = await Directory(p.join(_root!.path, 'g$gen')).create();
-      AppLog.i('phụ đề', 'Lấy âm thanh từ giây ${_base.toStringAsFixed(1)}');
       _worker!.reset(gen, _base);
+      // Stop where subtitles already exist, so nothing is made twice.
+      final end = runEnd(_covered, _base);
+      AppLog.i(
+        'phụ đề',
+        'Làm từ giây ${_base.toStringAsFixed(1)}'
+            '${end == null ? ' tới hết' : ' tới giây ${end.toStringAsFixed(1)}'}',
+      );
       final feed = _feed = AudioFeed();
       await feed.start(
         input: await _audioSource(),
         outDir: _dir!.path,
         headers: headers,
         startSec: _base,
+        lengthSec: end == null ? null : end - _base,
       );
       _set('Đang nghe và dịch…');
       _poll = Timer.periodic(const Duration(milliseconds: 400), (_) => _pump());
@@ -297,6 +402,8 @@ class SubtitleSession extends ChangeNotifier {
     if (_feedError.isNotEmpty && heardNothing) {
       error = _feedError;
       _set('Không tải được âm thanh của video này');
+    } else if (_feedError.isEmpty && _carryOn()) {
+      return;
     } else {
       finished = true;
       _set(
@@ -307,9 +414,60 @@ class SubtitleSession extends ChangeNotifier {
     }
   }
 
+  /// Starts on the next missing stretch, or rests until the viewer gets
+  /// near it. False when there is nothing left to do.
+  bool _carryOn() {
+    final next = nextStart(
+      covered: covered,
+      duration: duration,
+      position: _position,
+      mode: _mode,
+    );
+    if (next == null || _autoRuns >= 80) return false;
+    // A run that got nowhere would otherwise be tried for ever.
+    final last = _lastAutoStart;
+    if (last != null && (next - last).abs() < 1) return false;
+    _lastAutoStart = next;
+    _autoRuns++;
+    finished = false;
+    if (_mode == SubtitleMode.follow && next - _position > kFollowAhead) {
+      paused = true;
+      _resumeAt = next;
+      _set('Đã có phụ đề trước chỗ đang xem, tạm nghỉ');
+      return true;
+    }
+    _set('Làm tiếp đoạn còn thiếu từ ${_clock(next)}');
+    unawaited(_restart(next));
+    return true;
+  }
+
+  static String _clock(double s) {
+    final t = s.round();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return t >= 3600
+        ? '${t ~/ 3600}:${two(t ~/ 60 % 60)}:${two(t % 60)}'
+        : '${t ~/ 60}:${two(t % 60)}';
+  }
+
+  /// In follow mode, stops fetching audio once far enough ahead.
+  void _maybePause() {
+    final feed = _feed;
+    if (_mode != SubtitleMode.follow || paused || feed == null) return;
+    if (feed.done || _lastSent) return;
+    if (processedUntil - _position < kFollowAhead) return;
+    paused = true;
+    _resumeAt = null;
+    _poll?.cancel();
+    unawaited(feed.stop());
+    AppLog.i('phụ đề', 'Tạm nghỉ ở giây ${processedUntil.toStringAsFixed(0)}');
+    _set('Đã có phụ đề trước chỗ đang xem, tạm nghỉ');
+  }
+
   void _onEvent(AsrEvent event) {
     if (_disposed || event.gen != _gen && event.gen != -1) return;
     switch (event) {
+      case AsrSegment() when isFiller(event.text):
+        _fillers++;
       case AsrSegment():
         final gen = _gen;
         _linesHeard++;
@@ -379,17 +537,32 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   /// Tell the session where playback is; restarts the work after a far seek.
-  void updatePosition(double t) {
+  void updatePosition(double t, {double duration = 0}) {
+    if (duration > 0) this.duration = duration;
+    _position = t;
     if (_worker == null || _feed == null || _disposed) return;
-    final inCurrent = t >= _base - 1 && t <= processedUntil + 120;
     final inOld = _covered.any((r) => t >= r.$1 - 1 && t <= r.$2 - 5);
-    if (inCurrent || inOld) {
-      _outOfRange = 0;
-      return;
+    if (paused) {
+      final resumeAt = _resumeAt ?? processedUntil;
+      if (inOld || (t >= _base - 1 && t <= resumeAt + kSeekJump)) {
+        _outOfRange = 0;
+        if (resumeAt - t < kFollowResume) unawaited(_restart(resumeAt));
+        return;
+      }
+    } else {
+      // Close behind the work: it catches up faster than a restart.
+      final inCurrent = t >= _base - 1 && t <= processedUntil + kSeekJump;
+      if (inCurrent || inOld) {
+        _outOfRange = 0;
+        _maybePause();
+        return;
+      }
     }
-    // Wait for the position to settle so scrubbing does not thrash.
-    if (++_outOfRange < 3) return;
+    // A seek to a place without subtitles: work there. Two reports in a
+    // row, so scrubbing does not restart for every frame.
+    if (++_outOfRange < 2) return;
     _outOfRange = 0;
+    AppLog.i('phụ đề', 'Tua tới ${_clock(t)}, làm từ đó');
     unawaited(_restart(t));
   }
 
@@ -414,6 +587,9 @@ class SubtitleSession extends ChangeNotifier {
       'Đã nghe tới giây: ${processedUntil.toStringAsFixed(1)}',
       'Số đoạn âm thanh đã nhận: $_chunksFed',
       'Số câu nghe được: $_linesHeard',
+      'Bỏ qua tiếng đệm (嗯, あ…): $_fillers câu',
+      'Chế độ: ${_mode == SubtitleMode.whole ? 'làm hết phim' : 'chỉ làm trước chỗ đang xem'}'
+          '${paused ? ' (đang nghỉ)' : ''}',
       'Số dòng phụ đề: ${cues.length}',
       'Bộ dịch: ${_translatorReady ? 'sẵn sàng' : 'chưa sẵn sàng'}'
           '${translatorNote.isEmpty ? '' : ' ($translatorNote)'}',

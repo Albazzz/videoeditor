@@ -124,6 +124,9 @@ void main() {
     ]);
     expect(results, ['VI:a', 'VI:b']);
     expect(seen.length, 1);
+    // A line heard again is not sent again.
+    expect(await t.translate('a', 'ja'), 'VI:a');
+    expect(seen.length, 1);
     await t.dispose();
   });
 }

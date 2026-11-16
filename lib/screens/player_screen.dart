@@ -142,6 +142,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   double get _duration => _player.value.duration.inMilliseconds / 1000;
 
   void _onSettings() {
+    _session?.mode = appSettings.subWhole
+        ? SubtitleMode.whole
+        : SubtitleMode.follow;
     if (mounted) setState(() {});
   }
 
@@ -158,7 +161,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!mounted) return;
     final t = _position;
     _savePosition();
-    _session?.updatePosition(t);
+    _session?.updatePosition(t, duration: _duration);
     final cue = _showSubs ? cueAt(_cues, t) : null;
     if (!identical(cue, _cue) || _showControls) setState(() => _cue = cue);
   }
@@ -178,7 +181,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       headers: widget.headers,
       initialCues: reuse ? saved.cues : const [],
       initialCovered: reuse ? saved.covered : const [],
+      // A library file is local: making all of it costs no data.
+      mode: appSettings.subWhole || widget.item != null
+          ? SubtitleMode.whole
+          : SubtitleMode.follow,
     )..addListener(_onSession);
+    session.duration = _duration;
     if (page != null) {
       _saver = SessionSaver(
         session: session,
@@ -429,6 +437,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       style: const TextStyle(
                         color: Colors.white60,
                         fontSize: 12,
+                      ),
+                    ),
+                  if (session != null && _duration > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3, right: 8),
+                      child: CoverageBar(
+                        covered: session.covered,
+                        duration: _duration,
+                        position: _position,
+                        done: session.finished,
+                        height: 4,
                       ),
                     ),
                 ],

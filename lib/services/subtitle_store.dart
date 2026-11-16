@@ -321,7 +321,11 @@ class SessionSaver {
           cues: cues,
           covered: covered,
           duration: length > 0 ? length : (previous?.duration ?? 0),
-          complete: finished || (previous?.complete ?? false),
+          // "Finished" in follow mode only means nothing is left ahead of
+          // the viewer, so it counts only when the whole film is covered.
+          complete:
+              coversWholeVideo(covered, length, reachedEnd: finished) ||
+              (previous?.complete ?? false),
         ),
       );
     } catch (_) {}

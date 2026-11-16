@@ -200,8 +200,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
     appSettings.addListener(_onSettings);
   }
 
+  SubtitleMode get _mode =>
+      appSettings.subWhole ? SubtitleMode.whole : SubtitleMode.follow;
+
   /// Style changes show at once on the page.
   void _onSettings() {
+    _session?.mode = _mode;
     if (_session != null || _fileCues != null) {
       _send(appSettings.subtitleOpts);
     }
@@ -265,7 +269,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       final other = video.src != _sessionSrc;
       if (other != _otherVideo) setState(() => _otherVideo = other);
       if (!other) {
-        session.updatePosition(video.time);
+        session.updatePosition(video.time, duration: video.duration);
         // The player frame was reloaded and lost its lines: send them again.
         final now = DateTime.now();
         if (video.cueCount < session.cues.length &&
@@ -469,7 +473,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
       onCue: sendCue,
       initialCues: reuse ? saved.cues : const [],
       initialCovered: reuse ? saved.covered : const [],
+      mode: _mode,
     )..addListener(_onSession);
+    session.duration = video.duration;
     if (reuse) _sendAllCues(saved.cues);
     _saver = SessionSaver(
       session: session,
@@ -828,7 +834,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
       video.duration,
       reachedEnd: session.finished && session.covered.isNotEmpty,
     );
-    final done = coveredSeconds(session.covered);
     final style = theme.textTheme.labelSmall;
     return [
       const SizedBox(height: 4),
@@ -841,14 +846,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ),
       ),
       if (video.duration > 0) ...[
-        const SizedBox(height: 3),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(2),
-          child: LinearProgressIndicator(
-            value: whole ? 1 : (done / video.duration).clamp(0.0, 1.0),
-            minHeight: 3,
-            color: whole ? Colors.green : null,
-          ),
+        const SizedBox(height: 2),
+        CoverageBar(
+          covered: session.covered,
+          duration: video.duration,
+          position: video.time,
+          done: whole,
+          height: 5,
         ),
       ],
       if (session.translatorNote.isNotEmpty) ...[
@@ -883,7 +887,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       status = 'Đã thấy video · ${kLanguages[appSettings.language]} → Việt';
     } else if (_otherVideo) {
       status = 'Trang đang phát video khác (quảng cáo?), phụ đề tạm dừng';
-    } else if (session.error != null || session.finished) {
+    } else if (session.error != null || session.finished || session.paused) {
       status = session.status;
     } else {
       final lead = session.leadOver(video.time);
@@ -939,6 +943,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   session,
                 ),
                 'earlier' => _shiftFileCues(-0.5),
+                'whole' => appSettings.setSubWhole(true),
+                'follow' => appSettings.setSubWhole(false),
                 'later' => _shiftFileCues(0.5),
                 _ => null,
               },
@@ -955,6 +961,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   const PopupMenuItem(
                     value: 'later',
                     child: Text('Phụ đề muộn hơn 0,5 giây'),
+                  ),
+                ],
+                if (video.playable && fileCues == null) ...[
+                  const PopupMenuDivider(),
+                  CheckedPopupMenuItem(
+                    value: 'whole',
+                    checked: appSettings.subWhole,
+                    child: const Text('Làm hết cả phim'),
+                  ),
+                  CheckedPopupMenuItem(
+                    value: 'follow',
+                    checked: !appSettings.subWhole,
+                    child: const Text('Chỉ làm trước chỗ đang xem'),
                   ),
                 ],
                 if (session != null)

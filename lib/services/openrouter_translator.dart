@@ -110,6 +110,9 @@ class OpenRouterTranslator implements Translator {
   /// The last lines translated, as (original, Vietnamese), for context.
   final _recent = <(String, String)>[];
 
+  /// Lines already translated ("Hả?", "Cảm ơn"): not sent again.
+  final _done = <String, String>{};
+
   @override
   Duration get timeout => const Duration(minutes: 3);
 
@@ -119,6 +122,8 @@ class OpenRouterTranslator implements Translator {
   @override
   Future<String> translate(String text, String lang) {
     if (_disposed) return Future.error(StateError('Đã đóng bộ dịch'));
+    final known = _done['$lang|$text'];
+    if (known != null) return Future.value(known);
     final w = _Waiting(text, lang);
     _waiting.add(w);
     if (_waiting.length >= chunkSize) {
@@ -151,6 +156,8 @@ class OpenRouterTranslator implements Translator {
                 const OpenRouterError('Model không trả câu này'),
               );
             } else {
+              if (_done.length > 3000) _done.clear();
+              _done['${items[i].lang}|${items[i].text}'] = t;
               items[i].done.complete(t);
             }
           }
