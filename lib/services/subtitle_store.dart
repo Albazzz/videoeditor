@@ -55,6 +55,7 @@ class SavedSubs {
     required this.covered,
     this.duration = 0,
     this.complete = false,
+    this.imported = false,
   });
 
   final String id;
@@ -75,8 +76,24 @@ class SavedSubs {
   /// The audio was listened to all the way to the end.
   final bool complete;
 
+  /// Read from a subtitle file instead of made from the audio.
+  final bool imported;
+
+  SavedSubs withCues(List<Cue> newCues) => SavedSubs(
+    id: id,
+    title: title,
+    page: page,
+    language: language,
+    updated: DateTime.now(),
+    cues: newCues,
+    covered: covered,
+    duration: duration,
+    complete: complete,
+    imported: imported,
+  );
+
   bool get isWholeVideo =>
-      coversWholeVideo(covered, duration, reachedEnd: complete);
+      imported || coversWholeVideo(covered, duration, reachedEnd: complete);
 
   /// Share of the video listened to, 0..1, or null when the length is
   /// unknown.
@@ -94,6 +111,7 @@ class SavedSubs {
     'updated': updated.millisecondsSinceEpoch,
     'duration': duration,
     'complete': complete,
+    'imported': imported,
     'covered': [
       for (final r in covered) [r.$1, r.$2],
     ],
@@ -112,6 +130,7 @@ class SavedSubs {
       updated: DateTime.fromMillisecondsSinceEpoch((j['updated'] as int?) ?? 0),
       duration: (j['duration'] as num?)?.toDouble() ?? 0,
       complete: j['complete'] == true,
+      imported: j['imported'] == true,
       covered: [
         for (final r in (j['covered'] as List? ?? const []))
           (d((r as List)[0]), d(r[1])),

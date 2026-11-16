@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/cue.dart';
+import '../models/subtitle_file.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
@@ -45,6 +46,14 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       '${d.day}/${d.month}/${d.year} '
       '${d.hour.toString().padLeft(2, '0')}:'
       '${d.minute.toString().padLeft(2, '0')}';
+
+  String _label(SavedSubs s) => s.imported
+      ? 'Từ file · ${kSubtitleLanguages[s.language] ?? s.language} → Việt'
+      : subtitleProgressLabel(
+          covered: s.covered,
+          duration: s.duration,
+          reachedEnd: s.complete,
+        );
 
   String _host(String page) => Uri.tryParse(page)?.host ?? page;
 
@@ -116,11 +125,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            subtitleProgressLabel(
-                              covered: s.covered,
-                              duration: s.duration,
-                              reachedEnd: s.complete,
-                            ),
+                            _label(s),
                             style: TextStyle(
                               color: s.isWholeVideo
                                   ? Colors.green
@@ -148,7 +153,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                       onTap: () => _open(
                         title: s.title.isEmpty ? _host(s.page) : s.title,
                         subtitle:
-                            '${subtitleProgressLabel(covered: s.covered, duration: s.duration, reachedEnd: s.complete)}'
+                            '${_label(s)}'
                             '\n${s.page}',
                         cues: s.cues,
                         onDelete: () => SubtitleStore.delete(s.id),

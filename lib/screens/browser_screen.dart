@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../models/cue.dart';
+import '../models/subtitle_file.dart';
 import '../services/ad_block.dart';
 import '../services/app_settings.dart';
 import '../services/subtitle_session.dart';
@@ -12,6 +13,7 @@ import '../services/subtitle_store.dart';
 import '../services/web_video.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
+import '../widgets/subtitle_import.dart';
 import 'player_screen.dart';
 
 /// A browser that adds live Vietnamese subtitles to whatever video the page
@@ -39,6 +41,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
   /// episode) from the one subtitles are being made for.
   bool _otherVideo = false;
   DateTime _lastResend = DateTime(0);
+
+  /// Lines read from a subtitle file for this page, shown instead of a
+  /// recognition session.
+  List<Cue>? _fileCues;
+  String _filePage = '';
+  String _fileLanguage = '';
+  double _fileOffset = 0;
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
@@ -142,6 +151,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _lastReport = DateTime.now();
     final changed = _video?.src != video.src;
     _video = video;
+    final fileCues = _fileCues;
+    if (fileCues != null &&
+        video.cueCount < fileCues.length &&
+        DateTime.now().difference(_lastResend) > const Duration(seconds: 3)) {
+      _lastResend = DateTime.now();
+      _sendAllCues(fileCues);
+    }
     final session = _session;
     if (session != null) {
       // Adverts often play in their own <video> first; keep the session
@@ -173,9 +189,78 @@ class _BrowserScreenState extends State<BrowserScreen> {
     });
   }
 
+  Future<(String, String)> _pageInfo() async {
+    final page = (await _web?.getUrl())?.toString() ?? _video?.page ?? '';
+    final title = (await _web?.getTitle()) ?? '';
+    return (page, title);
+  }
+
+  /// Reads a subtitle file for the page being watched.
+  Future<void> _importForPage() async {
+    final (page, title) = await _pageInfo();
+    if (!mounted || page.isEmpty) return;
+    final imported = await importSubtitleFile(context);
+    if (imported == null || !mounted) return;
+    await SubtitleStore.save(
+      SavedSubs(
+        id: SubtitleStore.idFor(page),
+        title: title.isEmpty ? imported.fileName : title,
+        page: page,
+        language: imported.language,
+        updated: DateTime.now(),
+        cues: imported.cues,
+        covered: const [],
+        duration: _video?.duration ?? 0,
+        complete: true,
+        imported: true,
+      ),
+    );
+    if (!mounted) return;
+    _showFileCues(imported.cues, page, imported.language);
+    toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
+  }
+
+  void _showFileCues(List<Cue> cues, String page, String language) {
+    if (_session != null) _stopSubtitles();
+    setState(() {
+      _fileCues = cues;
+      _filePage = page;
+      _fileLanguage = language;
+      _fileOffset = 0;
+    });
+    _sendAllCues(cues);
+  }
+
+  /// Moves file subtitles earlier (negative) or later, and keeps the change.
+  Future<void> _shiftFileCues(double seconds) async {
+    final cues = _fileCues;
+    if (cues == null) return;
+    final shifted = shiftCues(cues, seconds);
+    setState(() {
+      _fileCues = shifted;
+      _fileOffset += seconds;
+    });
+    _sendAllCues(shifted);
+    final id = SubtitleStore.idFor(_filePage);
+    final saved = await SubtitleStore.load(id);
+    if (saved != null) await SubtitleStore.save(saved.withCues(shifted));
+  }
+
   Future<void> _startSubtitles() async {
     final video = _video;
-    if (video == null || !video.playable) return;
+    if (video == null) return;
+    final (page, title) = await _pageInfo();
+    final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
+    if (!mounted) return;
+    if (saved != null && saved.imported) {
+      _showFileCues(saved.cues, page, saved.language);
+      toast(context, 'Dùng phụ đề đã nhập từ file');
+      return;
+    }
+    if (!video.playable) {
+      toast(context, 'Trang này giấu luồng video: hãy nhập phụ đề từ file (⋮)');
+      return;
+    }
     if (!await ensureModels(context)) return;
     var cookies = '';
     try {
@@ -184,9 +269,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
       );
       cookies = list.map((c) => '${c.name}=${c.value}').join('; ');
     } catch (_) {}
-    final page = (await _web?.getUrl())?.toString() ?? video.page;
-    final title = (await _web?.getTitle()) ?? '';
-    final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
     final reuse = saved != null && saved.language == appSettings.language;
     if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
@@ -233,6 +315,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _session = null;
       _sessionSrc = '';
       _otherVideo = false;
+      _fileCues = null;
+      _fileOffset = 0;
     });
   }
 
@@ -334,7 +418,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   },
                   onLoadStart: (_, _) {
                     // A new page: whatever video we knew about is gone.
-                    if (_session != null) _stopSubtitles();
+                    if (_session != null || _fileCues != null) {
+                      _stopSubtitles();
+                    }
                     setState(() => _video = null);
                   },
                   onProgressChanged: (_, p) =>
@@ -457,9 +543,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final video = _video!;
     final session = _session;
     final theme = Theme.of(context);
+    final fileCues = _fileCues;
+    final active = session != null || fileCues != null;
     String status;
-    if (!video.playable) {
-      status = 'Trang này giấu luồng video nên không tạo được phụ đề';
+    if (fileCues != null) {
+      final offset = _fileOffset == 0
+          ? ''
+          : ' · lệch ${_fileOffset > 0 ? '+' : ''}'
+                '${_fileOffset.toStringAsFixed(1)} giây';
+      status =
+          'Phụ đề từ file · ${kSubtitleLanguages[_fileLanguage] ?? _fileLanguage}'
+          ' · ${fileCues.length} dòng$offset';
+    } else if (!video.playable) {
+      status =
+          'Trang này giấu luồng video nên không tự tạo được phụ đề. '
+          'Nhập phụ đề từ file ở nút ⋮';
     } else if (session == null) {
       status = 'Đã thấy video · ${kLanguages[appSettings.language]} → Việt';
     } else if (_otherVideo) {
@@ -510,12 +608,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ),
               ),
             ),
-            if (session != null)
-              IconButton(
-                tooltip: 'Chi tiết phụ đề',
-                icon: const Icon(Icons.info_outline, size: 20),
-                onPressed: () => showSessionDetails(context, session),
-              ),
+            PopupMenuButton<String>(
+              tooltip: 'Thêm',
+              icon: const Icon(Icons.more_vert, size: 20),
+              onSelected: (v) => switch (v) {
+                'import' => _importForPage(),
+                'details' when session != null => showSessionDetails(
+                  context,
+                  session,
+                ),
+                'earlier' => _shiftFileCues(-0.5),
+                'later' => _shiftFileCues(0.5),
+                _ => null,
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'import',
+                  child: Text('Nhập phụ đề từ file…'),
+                ),
+                if (fileCues != null) ...[
+                  const PopupMenuItem(
+                    value: 'earlier',
+                    child: Text('Phụ đề sớm hơn 0,5 giây'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'later',
+                    child: Text('Phụ đề muộn hơn 0,5 giây'),
+                  ),
+                ],
+                if (session != null)
+                  const PopupMenuItem(
+                    value: 'details',
+                    child: Text('Chi tiết phụ đề'),
+                  ),
+              ],
+            ),
             IconButton(
               tooltip: 'Phát trong app',
               icon: const Icon(Icons.open_in_full, size: 20),
@@ -523,14 +650,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
             IconButton.filledTonal(
               tooltip: 'Phụ đề',
-              isSelected: session != null,
+              isSelected: active,
               icon: const Icon(Icons.closed_caption_outlined),
               selectedIcon: const Icon(Icons.closed_caption),
-              onPressed: !video.playable
-                  ? null
-                  : session == null
-                  ? _startSubtitles
-                  : _stopSubtitles,
+              onPressed: active ? _stopSubtitles : _startSubtitles,
             ),
           ],
         ),

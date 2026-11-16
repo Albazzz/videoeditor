@@ -46,9 +46,10 @@ String toSrt(List<Cue> cues, {double from = 0, double? to}) {
 }
 
 double? _parseStamp(String s) {
-  final m = RegExp(r'(\d+):(\d+):(\d+)[,.](\d+)').firstMatch(s);
+  // WebVTT may leave the hours out: "01:02.500".
+  final m = RegExp(r'(?:(\d+):)?(\d{1,2}):(\d{2})[,.](\d{1,3})').firstMatch(s);
   if (m == null) return null;
-  return int.parse(m[1]!) * 3600 +
+  return int.parse(m[1] ?? '0') * 3600 +
       int.parse(m[2]!) * 60 +
       int.parse(m[3]!) +
       int.parse(m[4]!.padRight(3, '0').substring(0, 3)) / 1000;

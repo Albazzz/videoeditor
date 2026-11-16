@@ -41,13 +41,15 @@ class MlKitTranslator implements Translator {
   final _translators = <TranslateLanguage, OnDeviceTranslator>{};
   final _prepared = <TranslateLanguage>{};
 
-  static TranslateLanguage? _language(String lang) => switch (lang) {
-    'ja' => TranslateLanguage.japanese,
-    'zh' || 'yue' => TranslateLanguage.chinese,
-    'ko' => TranslateLanguage.korean,
-    'en' => TranslateLanguage.english,
-    _ => null,
-  };
+  /// Any language ML Kit knows, by code; Vietnamese needs no translation.
+  static TranslateLanguage? _language(String lang) {
+    final code = lang == 'yue' ? 'zh' : lang;
+    if (code == 'vi') return null;
+    for (final l in TranslateLanguage.values) {
+      if (l.bcpCode == code) return l;
+    }
+    return null;
+  }
 
   Future<void> _ensure(TranslateLanguage language) async {
     if (_prepared.contains(language)) return;

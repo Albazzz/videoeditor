@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../services/app_settings.dart';
 import '../services/video_library.dart';
 import '../widgets/common.dart';
+import '../widgets/subtitle_import.dart';
 import 'player_screen.dart';
 
 /// Asks for the vault key and checks it. Returns true when it is correct.
@@ -70,6 +71,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (hidden && !await unlockVault(context)) return;
     await VideoLibrary.setHidden(item, hidden);
     if (mounted) toast(context, hidden ? 'Đã chuyển vào kho ẩn' : 'Đã bỏ ẩn');
+    await _reload();
+  }
+
+  Future<void> _importSubs(VideoItem item) async {
+    final imported = await importSubtitleFile(context);
+    if (imported == null) return;
+    await VideoLibrary.saveCues(item, imported.cues);
+    if (mounted) {
+      toast(context, 'Đã gắn ${imported.cues.length} dòng phụ đề vào video');
+    }
     await _reload();
   }
 
@@ -169,9 +180,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   trailing: PopupMenuButton<String>(
                     onSelected: (v) => switch (v) {
                       'hide' => _setHidden(item, !widget.hidden),
+                      'subs' => _importSubs(item),
                       _ => _delete(item),
                     },
                     itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'subs',
+                        child: Text('Nhập phụ đề từ file…'),
+                      ),
                       PopupMenuItem(
                         value: 'hide',
                         child: Text(widget.hidden ? 'Bỏ ẩn' : 'Ẩn'),

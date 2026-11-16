@@ -12,6 +12,7 @@ import '../services/subtitle_store.dart';
 import '../services/video_library.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
+import '../widgets/subtitle_import.dart';
 import 'export_sheet.dart';
 
 /// Plays a library video or a stream found in the browser, with subtitles
@@ -46,6 +47,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   late final VideoPlayerController _player;
   SubtitleSession? _session;
   SessionSaver? _saver;
+
+  /// Current lines came from a subtitle file.
+  bool _fromFile = false;
   List<Cue> _cues = [];
   bool _showSubs = true;
   bool _showControls = true;
@@ -85,6 +89,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       await _player.play();
       final item = widget.item;
+      final page = widget.page;
       if (item != null) {
         final saved = await VideoLibrary.loadCues(item);
         if (saved.isNotEmpty && mounted) {
@@ -93,9 +98,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
             _saved = true;
           });
         }
+      } else if (page != null) {
+        // Lines imported from a file for this page are used as they are.
+        final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
+        if (saved != null && saved.imported && mounted) {
+          setState(() {
+            _cues = saved.cues;
+            _saved = true;
+            _fromFile = true;
+          });
+        }
       }
       if (mounted) setState(() {});
       if (widget.autoSubtitles && _cues.isEmpty) _startSubtitles();
+      if (!mounted) return;
       _scheduleHide();
     } catch (e) {
       if (mounted) setState(() => _error = 'Không phát được video này.\n$e');
@@ -187,6 +203,68 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final target = (_position + delta).clamp(0.0, _duration);
     _player.seekTo(Duration(milliseconds: (target * 1000).round()));
     _scheduleHide();
+  }
+
+  Future<void> _importFile() async {
+    await _player.pause();
+    if (!mounted) return;
+    final imported = await importSubtitleFile(context);
+    if (imported == null || !mounted) return;
+    _session?.removeListener(_onSession);
+    _saver?.close();
+    _saver = null;
+    _session?.dispose();
+    setState(() {
+      _session = null;
+      _cues = imported.cues;
+      _saved = true;
+      _fromFile = true;
+      _showSubs = true;
+    });
+    await _keepCues();
+    if (mounted) {
+      toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
+    }
+    await _player.play();
+  }
+
+  /// Stores the current lines with the video or the web page.
+  Future<void> _keepCues({String? language}) async {
+    final item = widget.item;
+    final page = widget.page;
+    if (item != null) {
+      await VideoLibrary.saveCues(item, _cues);
+    } else if (page != null) {
+      final id = SubtitleStore.idFor(page);
+      final old = await SubtitleStore.load(id);
+      await SubtitleStore.save(
+        SavedSubs(
+          id: id,
+          title: widget.title,
+          page: page,
+          language: language ?? old?.language ?? '',
+          updated: DateTime.now(),
+          cues: _cues,
+          covered: const [],
+          duration: _duration,
+          complete: true,
+          imported: true,
+        ),
+      );
+    }
+  }
+
+  Future<void> _shift(double seconds) async {
+    setState(() => _cues = shiftCues(_cues, seconds));
+    await _keepCues();
+    if (mounted) {
+      toast(
+        context,
+        seconds < 0
+            ? 'Phụ đề sớm hơn ${-seconds} giây'
+            : 'Phụ đề muộn hơn $seconds giây',
+      );
+    }
   }
 
   Future<void> _export() async {
@@ -317,12 +395,41 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ],
               ),
             ),
-            if (session != null)
-              IconButton(
-                tooltip: 'Chi tiết phụ đề',
-                icon: const Icon(Icons.info_outline, color: Colors.white),
-                onPressed: () => showSessionDetails(context, session),
-              ),
+            PopupMenuButton<String>(
+              tooltip: 'Phụ đề',
+              icon: const Icon(Icons.subtitles_outlined, color: Colors.white),
+              onSelected: (v) => switch (v) {
+                'import' => _importFile(),
+                'earlier' => _shift(-0.5),
+                'later' => _shift(0.5),
+                'details' when session != null => showSessionDetails(
+                  context,
+                  session,
+                ),
+                _ => null,
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'import',
+                  child: Text('Nhập phụ đề từ file…'),
+                ),
+                if (_fromFile && _cues.isNotEmpty) ...[
+                  const PopupMenuItem(
+                    value: 'earlier',
+                    child: Text('Phụ đề sớm hơn 0,5 giây'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'later',
+                    child: Text('Phụ đề muộn hơn 0,5 giây'),
+                  ),
+                ],
+                if (session != null)
+                  const PopupMenuItem(
+                    value: 'details',
+                    child: Text('Chi tiết phụ đề'),
+                  ),
+              ],
+            ),
             if (widget.item != null)
               IconButton(
                 tooltip: 'Cắt / đổi tốc độ / gắn phụ đề',
