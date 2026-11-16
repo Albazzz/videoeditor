@@ -158,7 +158,7 @@ class SubtitleSession extends ChangeNotifier {
     try {
       return await _translator
           .translate(text, lang)
-          .timeout(const Duration(seconds: 10));
+          .timeout(_translator.timeout);
     } catch (e) {
       _translateFailures++;
       _lastTranslateError = '$e';
@@ -174,9 +174,11 @@ class SubtitleSession extends ChangeNotifier {
   void _retranslate() {
     for (final c in List.of(cues)) {
       if (c.source.isEmpty || c.text != c.source) continue;
+      // Started at once so a cloud translator can send them together.
+      final pending = _translate(c.source, language);
       _translating = _translating.then((_) async {
         if (_disposed) return;
-        final text = await _translate(c.source, language);
+        final text = await pending;
         if (text == null || _disposed) return;
         final i = cues.indexWhere(
           (x) => x.start == c.start && x.source == c.source,
@@ -311,11 +313,13 @@ class SubtitleSession extends ChangeNotifier {
       case AsrSegment():
         final gen = _gen;
         _linesHeard++;
-        // Translate one at a time so lines stay in order.
+        // Translations start at once (a cloud translator sends lines heard
+        // close together in one request); lines are added in order.
+        final pending = _translatorReady
+            ? _translate(event.text, _langOf(event))
+            : Future<String?>.value();
         _translating = _translating.then((_) async {
-          final translated = _translatorReady
-              ? await _translate(event.text, _langOf(event))
-              : null;
+          final translated = await pending;
           if (_disposed || gen != _gen) return;
           _addCue(
             Cue(

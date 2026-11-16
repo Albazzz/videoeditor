@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
+import '../services/app_settings.dart';
 import '../services/translator.dart';
 import 'common.dart';
 
@@ -105,7 +106,7 @@ class _ImportSheetState extends State<_ImportSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final preview = widget.cues.take(4).map((c) => c.text).join('\n');
-    final canTranslate = TranslatorPacks.supported && _language != 'vi';
+    final canTranslate = Translator.available && _language != 'vi';
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
@@ -163,10 +164,12 @@ class _ImportSheetState extends State<_ImportSheet> {
               contentPadding: EdgeInsets.zero,
               title: const Text('Dịch sang tiếng Việt'),
               subtitle: Text(
-                !TranslatorPacks.supported
+                !Translator.available
                     ? 'Máy này không có bộ dịch'
                     : _language == 'vi'
                     ? 'Phụ đề đã là tiếng Việt'
+                    : appSettings.useOpenRouter
+                    ? 'Dịch qua OpenRouter (${appSettings.openRouterModel})'
                     : 'Dịch ngay trên máy, lần đầu tải gói dịch ~30 MB',
               ),
               value: canTranslate && _translate,
@@ -204,8 +207,8 @@ class _TranslateDialog extends StatefulWidget {
 }
 
 class _TranslateDialogState extends State<_TranslateDialog> {
-  final _translator = MlKitTranslator();
-  String _status = 'Đang chuẩn bị gói dịch…';
+  final _translator = Translator.create(force: true);
+  String _status = 'Đang chuẩn bị bộ dịch…';
   int _done = 0;
   int _failed = 0;
   bool _cancelled = false;
@@ -225,48 +228,67 @@ class _TranslateDialogState extends State<_TranslateDialog> {
 
   Future<void> _run() async {
     final name = kSubtitleLanguages[widget.language] ?? widget.language;
+    final cloud = appSettings.useOpenRouter;
     try {
-      setState(
-        () => _status =
-            'Đang tải gói dịch $name và tiếng Việt '
-            '(lần đầu khoảng 30 MB mỗi gói)…',
-      );
+      if (!cloud) {
+        setState(
+          () => _status =
+              'Đang tải gói dịch $name và tiếng Việt '
+              '(lần đầu khoảng 30 MB mỗi gói)…',
+        );
+      }
       await _translator.prepare(widget.language);
     } catch (e) {
       if (mounted) setState(() => _error = 'Không tải được gói dịch: $e');
       return;
     }
     if (!mounted || _cancelled) return;
-    setState(() => _status = 'Đang dịch $name → tiếng Việt');
+    setState(
+      () => _status = cloud
+          ? 'Đang dịch $name → tiếng Việt qua OpenRouter, từng đoạn 30 dòng'
+          : 'Đang dịch $name → tiếng Việt',
+    );
 
-    final out = List<Cue?>.filled(widget.cues.length, null);
     // Repeated lines ("Hả?", "Cảm ơn") are translated once.
-    final cache = <String, Future<String>>{};
-    Future<void> one(int i) async {
+    final flat = [
+      for (final c in widget.cues) c.text.replaceAll(RegExp(r'\s*\n\s*'), ' '),
+    ];
+    final unique = flat.toSet().toList();
+    final List<String?> translated;
+    try {
+      translated = await _translator.translateBatch(
+        unique,
+        widget.language,
+        onProgress: (n) {
+          if (!mounted) return;
+          // Progress is counted in lines of the file, not unique lines.
+          setState(
+            () => _done = (n / unique.length * widget.cues.length).round(),
+          );
+        },
+      );
+    } catch (e) {
+      if (mounted && !_cancelled) setState(() => _error = 'Dịch lỗi: $e');
+      return;
+    }
+    if (!mounted || _cancelled) return;
+    final byText = {
+      for (var i = 0; i < unique.length; i++) unique[i]: translated[i],
+    };
+    final out = <Cue>[];
+    for (var i = 0; i < widget.cues.length; i++) {
       final c = widget.cues[i];
-      final flat = c.text.replaceAll('\n', ' ');
-      String text;
-      try {
-        text = await cache.putIfAbsent(
-          flat,
-          () => _translator.translate(flat, widget.language),
-        );
-      } catch (_) {
-        text = c.text;
-        _failed++;
-      }
-      out[i] = Cue(start: c.start, end: c.end, text: text, source: c.text);
-      _done++;
+      final t = byText[flat[i]];
+      if (t == null) _failed++;
+      out.add(
+        Cue(start: c.start, end: c.end, text: t ?? c.text, source: c.text),
+      );
     }
-
-    const batch = 4;
-    for (var i = 0; i < widget.cues.length; i += batch) {
-      if (_cancelled || !mounted) return;
-      final end = (i + batch).clamp(0, widget.cues.length);
-      await Future.wait([for (var j = i; j < end; j++) one(j)]);
-      if (mounted) setState(() {});
+    if (_failed > 0) {
+      setState(() => _done = widget.cues.length);
+      toast(context, '$_failed dòng không dịch được, giữ nguyên câu gốc');
     }
-    if (mounted) Navigator.pop(context, out.cast<Cue>());
+    Navigator.pop(context, out);
   }
 
   @override

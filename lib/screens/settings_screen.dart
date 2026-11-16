@@ -5,6 +5,7 @@ import '../services/model_store.dart';
 import '../widgets/common.dart';
 import 'downloads_screen.dart';
 import 'log_screen.dart';
+import 'translation_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -136,6 +137,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: const Text('Tắt thì phụ đề hiện nguyên tiếng Nhật/Trung'),
             value: appSettings.translate,
             onChanged: appSettings.setTranslate,
+          ),
+          ListTile(
+            leading: const Icon(Icons.translate),
+            title: const Text('Cách dịch'),
+            subtitle: Text(translationSummary()),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const TranslationSettingsScreen(),
+              ),
+            ),
           ),
           SwitchListTile(
             title: const Text('Hiện cả câu gốc'),

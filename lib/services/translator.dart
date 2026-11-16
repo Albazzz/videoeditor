@@ -5,6 +5,7 @@ import 'package:google_mlkit_translation/google_mlkit_translation.dart';
 import 'app_log.dart';
 import 'app_settings.dart';
 import 'crash_trail.dart';
+import 'openrouter_translator.dart';
 
 /// Turns recognised speech into Vietnamese. Kept behind an interface so the
 /// offline engine can be swapped for a cloud one later.
@@ -17,10 +18,63 @@ abstract class Translator {
 
   Future<void> dispose();
 
-  static Translator create() =>
-      appSettings.translate && (Platform.isIOS || Platform.isAndroid)
-      ? MlKitTranslator()
-      : PassthroughTranslator();
+  /// How long one line may take before it is shown untranslated.
+  Duration get timeout;
+
+  /// Translates many lines, e.g. a whole subtitle file. A null entry is a
+  /// line that could not be translated.
+  Future<List<String?>> translateBatch(
+    List<String> lines,
+    String lang, {
+    void Function(int done)? onProgress,
+  });
+
+  /// The translator chosen in Settings. [force] ignores the "translate"
+  /// switch, for when the user asked for a translation there and then.
+  static Translator create({bool force = false}) {
+    if (!force && !appSettings.translate) return PassthroughTranslator();
+    if (appSettings.useOpenRouter) {
+      return OpenRouterTranslator(
+        apiKey: appSettings.openRouterKey,
+        model: appSettings.openRouterModel,
+      );
+    }
+    return TranslatorPacks.supported
+        ? MlKitTranslator()
+        : PassthroughTranslator();
+  }
+
+  /// Whether anything can translate on this device.
+  static bool get available =>
+      appSettings.useOpenRouter || TranslatorPacks.supported;
+
+  /// Short description for screens.
+  static String get label => appSettings.useOpenRouter
+      ? 'OpenRouter · ${appSettings.openRouterModel}'
+      : 'trên máy (Google ML Kit)';
+}
+
+/// Translates [lines] one by one, a few at a time; a failed line is null.
+Future<List<String?>> _oneByOne(
+  Translator t,
+  List<String> lines,
+  String lang,
+  void Function(int done)? onProgress,
+) async {
+  final out = List<String?>.filled(lines.length, null);
+  var done = 0;
+  const parallel = 4;
+  for (var i = 0; i < lines.length; i += parallel) {
+    final end = i + parallel < lines.length ? i + parallel : lines.length;
+    await Future.wait([
+      for (var j = i; j < end; j++)
+        t
+            .translate(lines[j], lang)
+            .then((v) => out[j] = v, onError: (_) => null)
+            .whenComplete(() => onProgress?.call(++done)),
+    ]);
+  }
+  return out;
 }
 
 /// Used where no offline engine exists (desktop development builds).
@@ -33,6 +87,19 @@ class PassthroughTranslator implements Translator {
 
   @override
   Future<void> dispose() async {}
+
+  @override
+  Duration get timeout => const Duration(seconds: 10);
+
+  @override
+  Future<List<String?>> translateBatch(
+    List<String> lines,
+    String lang, {
+    void Function(int done)? onProgress,
+  }) async {
+    onProgress?.call(lines.length);
+    return lines;
+  }
 }
 
 /// Google ML Kit on-device translation (offline after a ~30 MB download per
@@ -92,6 +159,20 @@ class MlKitTranslator implements Translator {
       'Dịch câu (Google ML Kit)',
       () => translator.translateText(text),
     );
+  }
+
+  @override
+  Duration get timeout => const Duration(seconds: 10);
+
+  @override
+  Future<List<String?>> translateBatch(
+    List<String> lines,
+    String lang, {
+    void Function(int done)? onProgress,
+  }) async {
+    final language = _language(lang);
+    if (language != null) await _ensure(language);
+    return _oneByOne(this, lines, lang, onProgress);
   }
 
   @override

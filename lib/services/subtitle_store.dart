@@ -113,12 +113,17 @@ class SavedSubs {
     'complete': complete,
     'imported': imported,
     'covered': [
-      for (final r in covered) [r.$1, r.$2],
+      for (final r in covered) [_ms(r.$1), _ms(r.$2)],
     ],
+    // Times to the millisecond; the original is left out when it is the
+    // same as the shown line (not translated yet).
     'cues': [
-      for (final c in cues) [c.start, c.end, c.text, c.source],
+      for (final c in cues)
+        [_ms(c.start), _ms(c.end), c.text, if (c.source != c.text) c.source],
     ],
   };
+
+  static double _ms(double v) => (v * 1000).round() / 1000;
 
   static SavedSubs fromJson(Map<String, Object?> j) {
     double d(Object? v) => (v as num).toDouble();
@@ -141,7 +146,7 @@ class SavedSubs {
             start: d((c as List)[0]),
             end: d(c[1]),
             text: c[2] as String,
-            source: c.length > 3 ? c[3] as String : '',
+            source: c.length > 3 ? c[3] as String : c[2] as String,
           ),
       ],
     );
@@ -167,43 +172,81 @@ class SubtitleStore {
     return sha1.convert(utf8.encode(key)).toString().substring(0, 20);
   }
 
+  /// Entries are gzip-compressed JSON (a film's lines shrink to about a
+  /// fifth); `.json` is the older, uncompressed form, still read.
+  static const _ext = '.jsonz';
+
   static Future<File> _file(String id) async =>
+      File(p.join((await _dir()).path, '$id$_ext'));
+
+  static Future<File> _oldFile(String id) async =>
       File(p.join((await _dir()).path, '$id.json'));
 
   static Future<void> save(SavedSubs subs) async {
     final file = await _file(subs.id);
     final tmp = File('${file.path}.tmp');
-    await tmp.writeAsString(jsonEncode(subs.toJson()));
+    await tmp.writeAsBytes(gzip.encode(utf8.encode(jsonEncode(subs.toJson()))));
     await tmp.rename(file.path);
+    final old = await _oldFile(subs.id);
+    if (await old.exists()) await old.delete();
   }
 
   static Future<SavedSubs?> load(String id) async {
     try {
       final file = await _file(id);
-      if (!await file.exists()) return null;
-      return SavedSubs.fromJson(
-        jsonDecode(await file.readAsString()) as Map<String, Object?>,
-      );
+      final String text;
+      if (await file.exists()) {
+        text = utf8.decode(gzip.decode(await file.readAsBytes()));
+      } else {
+        final old = await _oldFile(id);
+        if (!await old.exists()) return null;
+        text = await old.readAsString();
+      }
+      return SavedSubs.fromJson(jsonDecode(text) as Map<String, Object?>);
     } catch (_) {
       return null;
     }
   }
 
+  static String? _idOf(String path) {
+    final name = p.basename(path);
+    for (final ext in [_ext, '.json']) {
+      if (name.endsWith(ext)) {
+        return name.substring(0, name.length - ext.length);
+      }
+    }
+    return null;
+  }
+
   /// Newest first.
   static Future<List<SavedSubs>> list() async {
-    final out = <SavedSubs>[];
+    final ids = <String>{};
     await for (final e in (await _dir()).list()) {
-      if (e is! File || !e.path.endsWith('.json')) continue;
-      final s = await load(p.basenameWithoutExtension(e.path));
+      final id = e is File ? _idOf(e.path) : null;
+      if (id != null) ids.add(id);
+    }
+    final out = <SavedSubs>[];
+    for (final id in ids) {
+      final s = await load(id);
       if (s != null) out.add(s);
     }
     out.sort((a, b) => b.updated.compareTo(a.updated));
     return out;
   }
 
+  /// Space the saved subtitles take, in bytes.
+  static Future<int> storageBytes() async {
+    var total = 0;
+    await for (final e in (await _dir()).list()) {
+      if (e is File && _idOf(e.path) != null) total += await e.length();
+    }
+    return total;
+  }
+
   static Future<void> delete(String id) async {
-    final file = await _file(id);
-    if (await file.exists()) await file.delete();
+    for (final file in [await _file(id), await _oldFile(id)]) {
+      if (await file.exists()) await file.delete();
+    }
   }
 
   /// Writes an .srt into the folder the Files app shows. Returns its name.

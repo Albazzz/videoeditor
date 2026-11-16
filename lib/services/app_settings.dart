@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'key_store.dart';
+import 'openrouter_translator.dart';
 
 export 'key_store.dart' show KeySlot;
 
@@ -33,6 +35,19 @@ class AppSettings extends ChangeNotifier {
   /// original language.
   bool translate = true;
 
+  /// 'device' (Google ML Kit, offline) or 'openrouter' (a language model,
+  /// with the user's own key).
+  String translateEngine = 'device';
+  String openRouterModel = kDefaultOpenRouterModel;
+
+  /// Kept in the Keychain, not with the other settings.
+  String openRouterKey = '';
+
+  bool get useOpenRouter =>
+      translateEngine == 'openrouter' && openRouterKey.isNotEmpty;
+
+  static const _secure = FlutterSecureStorage();
+
   /// Subtitle text size, 1 = normal.
   double subScale = 1;
 
@@ -52,6 +67,12 @@ class AppSettings extends ChangeNotifier {
     subScale = prefs.getDouble('subScale') ?? 1;
     subLift = prefs.getDouble('subLift') ?? kDefaultSubLift;
     subBg = prefs.getDouble('subBg') ?? 0.72;
+    translateEngine = prefs.getString('translateEngine') ?? 'device';
+    openRouterModel =
+        prefs.getString('openRouterModel') ?? kDefaultOpenRouterModel;
+    try {
+      openRouterKey = await _secure.read(key: 'openrouter_key') ?? '';
+    } catch (_) {}
     notifyListeners();
   }
 
@@ -70,6 +91,30 @@ class AppSettings extends ChangeNotifier {
   void setAdBlock(bool value) {
     adBlock = value;
     _prefs?.setBool('adBlock', value);
+    notifyListeners();
+  }
+
+  void setTranslateEngine(String value) {
+    translateEngine = value;
+    _prefs?.setString('translateEngine', value);
+    notifyListeners();
+  }
+
+  void setOpenRouterModel(String value) {
+    openRouterModel = value;
+    _prefs?.setString('openRouterModel', value);
+    notifyListeners();
+  }
+
+  Future<void> setOpenRouterKey(String value) async {
+    openRouterKey = value.trim();
+    try {
+      if (openRouterKey.isEmpty) {
+        await _secure.delete(key: 'openrouter_key');
+      } else {
+        await _secure.write(key: 'openrouter_key', value: openRouterKey);
+      }
+    } catch (_) {}
     notifyListeners();
   }
 

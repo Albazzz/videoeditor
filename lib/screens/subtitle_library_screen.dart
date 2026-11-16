@@ -21,6 +21,7 @@ class SubtitleLibraryScreen extends StatefulWidget {
 class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   List<SavedSubs>? _web;
   List<(VideoItem, List<Cue>)> _videos = [];
+  int _bytes = 0;
 
   @override
   void initState() {
@@ -30,6 +31,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
 
   Future<void> _reload() async {
     final web = await SubtitleStore.list();
+    final bytes = await SubtitleStore.storageBytes();
     final videos = <(VideoItem, List<Cue>)>[];
     for (final item in await VideoLibrary.list(hidden: false)) {
       if (!item.srtFile.existsSync()) continue;
@@ -39,6 +41,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     setState(() {
       _web = web;
       _videos = videos;
+      _bytes = bytes;
     });
   }
 
@@ -54,6 +57,10 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
           duration: s.duration,
           reachedEnd: s.complete,
         );
+
+  static String _size(int bytes) => bytes < 1024 * 1024
+      ? '${(bytes / 1024).toStringAsFixed(0)} KB'
+      : '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
 
   String _host(String page) => Uri.tryParse(page)?.host ?? page;
 
@@ -82,7 +89,17 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     final web = _web;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Kho phụ đề'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Kho phụ đề'),
+            if (web != null && web.isNotEmpty)
+              Text(
+                '${web.length} trang · ${_size(_bytes)}',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: 'Tình trạng tải về',

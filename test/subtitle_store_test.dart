@@ -60,6 +60,52 @@ void main() {
     expect((await SubtitleStore.list()).length, 1);
   });
 
+  test('entries are compressed and older plain files still load', () async {
+    final cues = [
+      for (var i = 0; i < 1500; i++)
+        Cue(
+          start: i * 3.123456,
+          end: i * 3.123456 + 2.5,
+          text: 'Câu phụ đề số $i, anh đi đâu vậy?',
+          source: '第$i句，你去哪里？',
+        ),
+    ];
+    final film = SavedSubs(
+      id: 'film',
+      title: 'Phim dài',
+      page: 'https://x.example/film',
+      language: 'zh',
+      updated: DateTime(2026, 3, 1),
+      cues: cues,
+      covered: const [(0, 4700)],
+    );
+    await SubtitleStore.save(film);
+    final stored = await SubtitleStore.storageBytes();
+    final back = (await SubtitleStore.load('film'))!;
+    expect(back.cues.length, 1500);
+    expect(back.cues[10].start, closeTo(31.235, 0.0005));
+    expect(back.cues[10].source, '第10句，你去哪里？');
+    // About 160 KB as plain JSON.
+    expect(stored, lessThan(60 * 1024));
+
+    // A line not translated yet keeps its original after the round trip.
+    await SubtitleStore.save(
+      film.withCues(const [
+        Cue(start: 1, end: 2, text: 'こんにちは', source: 'こんにちは'),
+      ]),
+    );
+    expect((await SubtitleStore.load('film'))!.cues.single.source, 'こんにちは');
+
+    File('${dir.path}/subs/old.json').writeAsStringSync(
+      '{"id":"old","title":"Cũ","updated":0,'
+      '"cues":[[1,2,"Xin chào","こんにちは"]]}',
+    );
+    expect((await SubtitleStore.load('old'))!.cues.single.text, 'Xin chào');
+    expect((await SubtitleStore.list()).map((s) => s.id), contains('old'));
+    await SubtitleStore.delete('old');
+    expect(File('${dir.path}/subs/old.json').existsSync(), isFalse);
+  });
+
   test('a damaged file is skipped instead of breaking the list', () async {
     final bad = await File('${dir.path}/subs/bad.json').create(recursive: true);
     bad.writeAsStringSync('{not json');
