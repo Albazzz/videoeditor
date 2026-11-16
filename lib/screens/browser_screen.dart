@@ -13,6 +13,7 @@ import '../services/ad_block.dart';
 import '../services/active_work.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
+import '../services/bookmarks.dart';
 import '../services/open_page.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
@@ -20,6 +21,7 @@ import '../services/subtitle_store.dart';
 import '../services/watch_position.dart';
 import '../services/web_video.dart';
 import '../widgets/activity_icon.dart';
+import '../widgets/bookmarks_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
@@ -87,6 +89,38 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   /// Videos already written to the log for this page.
   final _logged = <String>{};
+
+  /// The page on show is among the saved pages.
+  bool _bookmarked = false;
+
+  Future<void> _checkBookmark() async {
+    final url = _pageUrl;
+    final saved = url.isNotEmpty && await Bookmarks.contains(url);
+    if (mounted && url == _pageUrl && saved != _bookmarked) {
+      setState(() => _bookmarked = saved);
+    }
+  }
+
+  Future<void> _toggleBookmark() async {
+    final (page, title) = await _pageInfo();
+    if (!mounted || !page.startsWith('http')) return;
+    if (_bookmarked) {
+      await Bookmarks.remove(page);
+      if (mounted) toast(context, 'Đã bỏ lưu trang');
+    } else {
+      await Bookmarks.add(page, title);
+      if (mounted) toast(context, 'Đã lưu trang, mở lại ở ⋮ → Trang đã lưu');
+    }
+    await _checkBookmark();
+  }
+
+  Future<void> _openBookmarks() async {
+    final url = await showBookmarks(context);
+    if (url == null || !mounted) return;
+    _address.text = url;
+    _go(url);
+  }
+
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
@@ -815,6 +849,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     if (url != null && url.toString() != 'about:blank') {
                       _address.text = url.toString();
                       _pageUrl = url.toString();
+                      _checkBookmark();
                     }
                   },
                 ),
@@ -1019,6 +1054,17 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
           IconButton(
+            tooltip: _bookmarked ? 'Bỏ lưu trang' : 'Lưu trang',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _bookmarked ? Icons.star : Icons.star_border,
+              size: 22,
+              color: _bookmarked ? Colors.amber : null,
+            ),
+            onPressed: _toggleBookmark,
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
             tooltip: 'Tải lại',
             icon: const Icon(Icons.refresh, size: 20),
             onPressed: () => _web?.reload(),
@@ -1034,10 +1080,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
             onSelected: (v) => switch (v) {
               'adblock' => _toggleAdBlock(),
               'home' => _go(kHomePage),
+              'save' => _toggleBookmark(),
+              'bookmarks' => _openBookmarks(),
               'clear' => _clearWebData(),
               _ => null,
             },
             itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'save',
+                child: ListTile(
+                  leading: Icon(
+                    _bookmarked ? Icons.star : Icons.star_border,
+                    color: _bookmarked ? Colors.amber : null,
+                  ),
+                  title: Text(
+                    _bookmarked ? 'Bỏ lưu trang này' : 'Lưu trang này',
+                  ),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'bookmarks',
+                child: ListTile(
+                  leading: Icon(Icons.bookmarks_outlined),
+                  title: Text('Trang đã lưu…'),
+                ),
+              ),
+              const PopupMenuDivider(),
               CheckedPopupMenuItem(
                 value: 'adblock',
                 checked: appSettings.adBlock,
