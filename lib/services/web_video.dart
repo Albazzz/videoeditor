@@ -298,6 +298,7 @@ const String kPageScript = r'''
       } else if (d.__vsub === 'rate') { if (v) v.playbackRate = d.v; }
       else if (d.__vsub === 'pause') { if (v) v.pause(); }
       else if (d.__vsub === 'seek') { if (v && isFinite(d.t)) v.currentTime = d.t; }
+      else if (d.__vsub === 'skip') { if (v && isFinite(d.by)) v.currentTime = Math.max(0, (v.currentTime || 0) + d.by); }
       else if (d.__vsub === 'opts') {
         showSource = !!d.showSource;
         if (typeof d.scale === 'number') scale = d.scale;

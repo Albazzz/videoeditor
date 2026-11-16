@@ -854,6 +854,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 session: session,
                 title: ActiveWork.current.value?.title ?? '',
               ),
+            IconButton(
+              tooltip: 'Lùi 10 giây',
+              color: Colors.white,
+              icon: const Icon(Icons.replay_10, size: 20),
+              onPressed: () => _send({'__vsub': 'skip', 'by': -10}),
+            ),
+            IconButton(
+              tooltip: 'Tới 10 giây',
+              color: Colors.white,
+              icon: const Icon(Icons.forward_10, size: 20),
+              onPressed: () => _send({'__vsub': 'skip', 'by': 10}),
+            ),
             if (active)
               IconButton(
                 tooltip: 'Kiểu phụ đề',
@@ -1122,148 +1134,172 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ? '${session.status} (đang đuổi theo video)'
           : 'Phụ đề sẵn trước ${lead.round()} giây';
     }
-    return Material(
-      color: theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.96),
-      borderRadius: BorderRadius.circular(14),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-        child: Row(
-          children: [
-            if (session != null) ...[
-              ActivityIcon(
-                session: session,
-                title: ActiveWork.current.value?.title ?? '',
-              ),
-              const SizedBox(width: 8),
-            ],
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+    // Compact buttons, so the row fits narrower iPhones too.
+    return Theme(
+      data: theme.copyWith(visualDensity: VisualDensity.compact),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.96),
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
                 children: [
-                  Text(
-                    status,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall,
-                  ),
-                  if (session != null) ..._progress(session, video),
-                ],
-              ),
-            ),
-            PopupMenuButton<double>(
-              tooltip: 'Tốc độ',
-              initialValue: _speed,
-              onSelected: _setSpeed,
-              itemBuilder: (_) => [
-                for (final s in kSpeeds)
-                  PopupMenuItem(value: s, child: Text(speedLabel(s))),
-              ],
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text(
-                  speedLabel(_speed),
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-              ),
-            ),
-            PopupMenuButton<String>(
-              tooltip: 'Thêm',
-              icon: const Icon(Icons.more_vert, size: 20),
-              onSelected: (v) => switch (v) {
-                'import' => _importForPage(),
-                'library' => _useFromLibrary(),
-                'player' => _openInPlayer(),
-                'remove' => _stopSubtitles(),
-                'details' when session != null => showSessionDetails(
-                  context,
-                  session,
-                ),
-                'earlier' => _shiftFileCues(-0.5),
-                'whole' => appSettings.setSubWhole(true),
-                'follow' => appSettings.setSubWhole(false),
-                'later' => _shiftFileCues(0.5),
-                _ => null,
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(
-                  value: 'import',
-                  child: Text('Nhập phụ đề từ file…'),
-                ),
-                const PopupMenuItem(
-                  value: 'library',
-                  child: Text('Dùng phụ đề từ kho…'),
-                ),
-                if (fileCues != null) ...[
-                  const PopupMenuItem(
-                    value: 'earlier',
-                    child: Text('Phụ đề sớm hơn 0,5 giây'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'later',
-                    child: Text('Phụ đề muộn hơn 0,5 giây'),
+                  if (session != null) ...[
+                    ActivityIcon(
+                      session: session,
+                      title: ActiveWork.current.value?.title ?? '',
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          status,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                        if (session != null) ..._progress(session, video),
+                      ],
+                    ),
                   ),
                 ],
-                if (video.playable && fileCues == null) ...[
-                  const PopupMenuDivider(),
-                  CheckedPopupMenuItem(
-                    value: 'whole',
-                    checked: appSettings.subWhole,
-                    child: const Text('Làm hết cả phim'),
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Lùi 10 giây',
+                    icon: const Icon(Icons.replay_10, size: 22),
+                    onPressed: () => _send({'__vsub': 'skip', 'by': -10}),
                   ),
-                  CheckedPopupMenuItem(
-                    value: 'follow',
-                    checked: !appSettings.subWhole,
-                    child: const Text('Chỉ làm trước chỗ đang xem'),
+                  IconButton(
+                    tooltip: 'Tới 10 giây',
+                    icon: const Icon(Icons.forward_10, size: 22),
+                    onPressed: () => _send({'__vsub': 'skip', 'by': 10}),
+                  ),
+                  const Spacer(),
+                  PopupMenuButton<double>(
+                    tooltip: 'Tốc độ',
+                    initialValue: _speed,
+                    onSelected: _setSpeed,
+                    itemBuilder: (_) => [
+                      for (final s in kSpeeds)
+                        PopupMenuItem(value: s, child: Text(speedLabel(s))),
+                    ],
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        speedLabel(_speed),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: 'Thêm',
+                    icon: const Icon(Icons.more_vert, size: 20),
+                    onSelected: (v) => switch (v) {
+                      'import' => _importForPage(),
+                      'library' => _useFromLibrary(),
+                      'player' => _openInPlayer(),
+                      'remove' => _stopSubtitles(),
+                      'details' when session != null => showSessionDetails(
+                        context,
+                        session,
+                      ),
+                      'earlier' => _shiftFileCues(-0.5),
+                      'whole' => appSettings.setSubWhole(true),
+                      'follow' => appSettings.setSubWhole(false),
+                      'later' => _shiftFileCues(0.5),
+                      _ => null,
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'import',
+                        child: Text('Nhập phụ đề từ file…'),
+                      ),
+                      const PopupMenuItem(
+                        value: 'library',
+                        child: Text('Dùng phụ đề từ kho…'),
+                      ),
+                      if (fileCues != null) ...[
+                        const PopupMenuItem(
+                          value: 'earlier',
+                          child: Text('Phụ đề sớm hơn 0,5 giây'),
+                        ),
+                        const PopupMenuItem(
+                          value: 'later',
+                          child: Text('Phụ đề muộn hơn 0,5 giây'),
+                        ),
+                      ],
+                      if (video.playable && fileCues == null) ...[
+                        const PopupMenuDivider(),
+                        CheckedPopupMenuItem(
+                          value: 'whole',
+                          checked: appSettings.subWhole,
+                          child: const Text('Làm hết cả phim'),
+                        ),
+                        CheckedPopupMenuItem(
+                          value: 'follow',
+                          checked: !appSettings.subWhole,
+                          child: const Text('Chỉ làm trước chỗ đang xem'),
+                        ),
+                      ],
+                      if (session != null)
+                        const PopupMenuItem(
+                          value: 'details',
+                          child: Text('Chi tiết phụ đề'),
+                        ),
+                      if (video.playable)
+                        const PopupMenuItem(
+                          value: 'player',
+                          child: Text('Phát trong app (toàn màn hình)'),
+                        ),
+                      if (active)
+                        const PopupMenuItem(
+                          value: 'remove',
+                          child: Text('Bỏ phụ đề khỏi trang'),
+                        ),
+                    ],
+                  ),
+                  if (active)
+                    IconButton(
+                      tooltip: 'Kiểu phụ đề',
+                      icon: const Icon(Icons.text_fields, size: 20),
+                      onPressed: () => showSubtitleStyle(context),
+                    ),
+                  // Making subtitles: stop (keeping the lines) or carry on.
+                  if (session != null)
+                    IconButton(
+                      tooltip: 'Dừng làm phụ đề (giữ các dòng đã có)',
+                      icon: const Icon(Icons.pause_circle_outline, size: 24),
+                      onPressed: _stopMaking,
+                    )
+                  else if (_canCarryOn && fileCues != null)
+                    IconButton(
+                      tooltip: 'Làm tiếp phần còn thiếu',
+                      color: Colors.green,
+                      icon: const Icon(Icons.play_circle, size: 26),
+                      onPressed: _startSubtitles,
+                    ),
+                  IconButton.filledTonal(
+                    tooltip: active
+                        ? (_hidden ? 'Hiện phụ đề' : 'Ẩn phụ đề')
+                        : 'Làm phụ đề',
+                    isSelected: active && !_hidden,
+                    icon: const Icon(Icons.closed_caption_outlined),
+                    selectedIcon: const Icon(Icons.closed_caption),
+                    onPressed: active ? _toggleVisible : _startSubtitles,
                   ),
                 ],
-                if (session != null)
-                  const PopupMenuItem(
-                    value: 'details',
-                    child: Text('Chi tiết phụ đề'),
-                  ),
-                if (video.playable)
-                  const PopupMenuItem(
-                    value: 'player',
-                    child: Text('Phát trong app (toàn màn hình)'),
-                  ),
-                if (active)
-                  const PopupMenuItem(
-                    value: 'remove',
-                    child: Text('Bỏ phụ đề khỏi trang'),
-                  ),
-              ],
-            ),
-            if (active)
-              IconButton(
-                tooltip: 'Kiểu phụ đề',
-                icon: const Icon(Icons.text_fields, size: 20),
-                onPressed: () => showSubtitleStyle(context),
               ),
-            // Making subtitles: stop (keeping the lines) or carry on.
-            if (session != null)
-              IconButton(
-                tooltip: 'Dừng làm phụ đề (giữ các dòng đã có)',
-                icon: const Icon(Icons.pause_circle_outline, size: 24),
-                onPressed: _stopMaking,
-              )
-            else if (_canCarryOn && fileCues != null)
-              IconButton(
-                tooltip: 'Làm tiếp phần còn thiếu',
-                color: Colors.green,
-                icon: const Icon(Icons.play_circle, size: 26),
-                onPressed: _startSubtitles,
-              ),
-            IconButton.filledTonal(
-              tooltip: active
-                  ? (_hidden ? 'Hiện phụ đề' : 'Ẩn phụ đề')
-                  : 'Làm phụ đề',
-              isSelected: active && !_hidden,
-              icon: const Icon(Icons.closed_caption_outlined),
-              selectedIcon: const Icon(Icons.closed_caption),
-              onPressed: active ? _toggleVisible : _startSubtitles,
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
