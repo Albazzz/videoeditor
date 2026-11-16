@@ -12,6 +12,7 @@ import 'audio_feed.dart';
 import 'hls.dart';
 import 'hls_proxy.dart';
 import 'model_store.dart';
+import 'openrouter_translator.dart';
 import 'subtitle_store.dart';
 import 'translator.dart';
 
@@ -117,7 +118,7 @@ class SubtitleSession extends ChangeNotifier {
   final String input;
   final String language;
   final Map<String, String> headers;
-  final Translator _translator;
+  Translator _translator;
 
   /// Called for every new subtitle line.
   final void Function(Cue cue)? onCue;
@@ -297,12 +298,42 @@ class SubtitleSession extends ChangeNotifier {
     } catch (e) {
       _translateFailures++;
       _lastTranslateError = '$e';
+      if (e is OpenRouterError && e.account) _fallBackToDevice(e.message);
       // The first few say what is wrong; after that only now and then.
       if (_translateFailures <= 3 || _translateFailures % 25 == 0) {
         AppLog.e('dịch', 'Lần lỗi thứ $_translateFailures ($lang): $e');
       }
       return null;
     }
+  }
+
+  /// OpenRouter will not work until the user fixes the key or the
+  /// balance: carry on with the translator on the phone, once.
+  void _fallBackToDevice(String why) {
+    if (_translator is! OpenRouterTranslator || _disposed) return;
+    final old = _translator;
+    _translator = TranslatorPacks.supported
+        ? MlKitTranslator()
+        : PassthroughTranslator();
+    unawaited(old.dispose());
+    translatorNote = '$why · tạm dịch bằng bộ dịch trên máy';
+    AppLog.e(
+      'dịch',
+      'OpenRouter không dùng được ($why), chuyển sang dịch trên máy',
+    );
+    _translatorReady = false;
+    _translator
+        .prepare(language)
+        .then((_) {
+          if (_disposed) return;
+          _translatorReady = true;
+          _retranslate();
+          notifyListeners();
+        })
+        .catchError((Object e) {
+          AppLog.e('dịch', 'Bộ dịch trên máy cũng lỗi: $e');
+        });
+    notifyListeners();
   }
 
   /// Translates lines that were shown in the original language.

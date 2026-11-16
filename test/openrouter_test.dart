@@ -143,11 +143,9 @@ void main() {
     await expectLater(
       t.translateBatch(['a'], 'ja'),
       throwsA(
-        isA<OpenRouterError>().having(
-          (e) => e.message,
-          'message',
-          contains('Key'),
-        ),
+        isA<OpenRouterError>()
+            .having((e) => e.message, 'message', contains('Key'))
+            .having((e) => e.account, 'account', isTrue),
       ),
     );
     expect(calls, 1);
@@ -189,5 +187,21 @@ void main() {
     expect(out.last, 'VI:câu 59');
     expect(seen.length, lessThanOrEqualTo(4));
     await t.dispose();
+  });
+
+  test('no credit is an account problem (the app falls back)', () async {
+    final t = make(
+      MockClient(
+        (_) async => http.Response('{"error":{"message":"credits"}}', 402),
+      ),
+    );
+    await expectLater(
+      t.translateBatch(['a'], 'ja'),
+      throwsA(
+        isA<OpenRouterError>()
+            .having((e) => e.account, 'account', isTrue)
+            .having((e) => e.message, 'message', contains('hết tiền')),
+      ),
+    );
   });
 }

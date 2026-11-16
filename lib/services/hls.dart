@@ -1,4 +1,6 @@
-import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+import 'net.dart';
 
 Map<String, String> _attributes(String line) {
   final out = <String, String>{};
@@ -72,12 +74,14 @@ Future<String> resolveAudioSource(
   final uri = Uri.tryParse(url);
   if (uri == null || !uri.path.toLowerCase().contains('.m3u8')) return url;
   try {
-    final res = await http
-        .get(uri, headers: headers)
-        .timeout(const Duration(seconds: 10));
-    if (res.statusCode != 200 || !res.body.contains('#EXTM3U')) return url;
-    return pickAudioPlaylist(res.body, uri, language: language)?.toString() ??
-        url;
+    final (status, bytes) = await Net.get(
+      uri,
+      headers,
+      timeout: const Duration(seconds: 10),
+    );
+    final body = utf8.decode(bytes, allowMalformed: true);
+    if (status != 200 || !body.contains('#EXTM3U')) return url;
+    return pickAudioPlaylist(body, uri, language: language)?.toString() ?? url;
   } catch (_) {
     return url;
   }

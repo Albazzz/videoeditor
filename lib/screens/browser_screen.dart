@@ -610,6 +610,31 @@ class _BrowserScreenState extends State<BrowserScreen> {
       toast(context, 'Trang này giấu luồng video: hãy nhập phụ đề từ file (⋮)');
       return;
     }
+    // An advert before the film is often what plays when CC is pressed.
+    if (video.duration > 0 && video.duration < 90) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Có thể là quảng cáo'),
+          content: Text(
+            'Video đang chạy chỉ dài ${video.duration.round()} giây, nhiều '
+            'khả năng là quảng cáo trước phim. Đợi phim chính chạy rồi bấm '
+            'CC lại.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Vẫn làm'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Đợi phim'),
+            ),
+          ],
+        ),
+      );
+      if (go != true || !mounted) return;
+    }
     if (!await ensureModels(context)) return;
     var cookies = '';
     try {

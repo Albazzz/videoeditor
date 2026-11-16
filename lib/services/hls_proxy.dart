@@ -2,9 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:http/http.dart' as http;
-
 import 'app_log.dart';
+import 'net.dart';
 
 /// A small relay on 127.0.0.1 that ffmpeg reads HLS through.
 ///
@@ -14,11 +13,10 @@ import 'app_log.dart';
 /// every piece is fetched through it, cuts the picture off the front, and
 /// adds the page's headers (cookies, referer) to every request.
 class HlsProxy {
-  HlsProxy._(this._server, this._headers, this._client);
+  HlsProxy._(this._server, this._headers);
 
   final HttpServer _server;
   final Map<String, String> _headers;
-  final http.Client _client;
   int stripped = 0;
 
   /// What went wrong last, for the details panel.
@@ -26,7 +24,7 @@ class HlsProxy {
 
   static Future<HlsProxy> start(Map<String, String> headers) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    final proxy = HlsProxy._(server, headers, http.Client());
+    final proxy = HlsProxy._(server, headers);
     server.listen(proxy._handle);
     return proxy;
   }
@@ -42,16 +40,13 @@ class HlsProxy {
     final kind = req.uri.path.replaceAll('/', '');
     try {
       if (target == null) throw const HttpException('no target');
-      final res = await _client
-          .get(Uri.parse(target), headers: _headers)
-          .timeout(const Duration(seconds: 30));
-      req.response.statusCode = res.statusCode;
-      if (res.statusCode != 200) {
-        lastError = 'máy chủ trả ${res.statusCode}';
-        AppLog.e(
-          'relay',
-          'Máy chủ trả ${res.statusCode} cho ${AppLog.url(target)}',
-        );
+      // Fetched the way Safari fetches (see Net), so servers that turn
+      // away other clients still answer.
+      final (status, bytes) = await Net.get(Uri.parse(target), _headers);
+      req.response.statusCode = status;
+      if (status != 200) {
+        lastError = 'máy chủ trả $status';
+        AppLog.e('relay', 'Máy chủ trả $status cho ${AppLog.url(target)}');
         await req.response.close();
         return;
       }
@@ -62,14 +57,14 @@ class HlsProxy {
         );
         req.response.write(
           rewritePlaylist(
-            String.fromCharCodes(res.bodyBytes),
+            String.fromCharCodes(bytes),
             Uri.parse(target),
             playlistUrl: (u) => _local('p', u),
             segmentUrl: (u) => _local('s', u),
           ),
         );
       } else {
-        final body = res.bodyBytes;
+        final body = bytes;
         final start = mediaStart(body);
         if (start > 0) stripped++;
         req.response.add(start > 0 ? Uint8List.sublistView(body, start) : body);
@@ -87,7 +82,6 @@ class HlsProxy {
 
   Future<void> close() async {
     await _server.close(force: true);
-    _client.close();
   }
 }
 

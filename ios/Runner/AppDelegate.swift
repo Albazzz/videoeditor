@@ -14,6 +14,63 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "VsubNet") {
+      installNetChannel(registrar.messenger())
+    }
+  }
+}
+
+// MARK: - Downloads through iOS's own network stack
+//
+// Some video servers reset any connection whose TLS handshake does not look
+// like Safari's; Dart's HTTP client and ffmpeg both were. URLSession goes
+// through the same system stack as the web view. Dart side: lib/services/net.dart.
+
+private let netSession: URLSession = {
+  let config = URLSessionConfiguration.default
+  // The page's cookies arrive as a header; the shared store must not
+  // replace them.
+  config.httpShouldSetCookies = false
+  config.httpCookieStorage = nil
+  config.urlCache = nil
+  config.timeoutIntervalForRequest = 30
+  return URLSession(configuration: config)
+}()
+
+/// Kept for the life of the app.
+private var netChannel: FlutterMethodChannel?
+
+private func installNetChannel(_ messenger: FlutterBinaryMessenger) {
+  let channel = FlutterMethodChannel(name: "vsub/net", binaryMessenger: messenger)
+  netChannel = channel
+  channel.setMethodCallHandler { call, result in
+    guard call.method == "get",
+      let args = call.arguments as? [String: Any],
+      let address = args["url"] as? String,
+      let url = URL(string: address)
+    else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    var request = URLRequest(url: url)
+    if let seconds = args["timeout"] as? Int {
+      request.timeoutInterval = TimeInterval(seconds)
+    }
+    if let headers = args["headers"] as? [String: String] {
+      for (name, value) in headers {
+        request.setValue(value, forHTTPHeaderField: name)
+      }
+    }
+    netSession.dataTask(with: request) { data, response, error in
+      DispatchQueue.main.async {
+        if let error = error {
+          result(FlutterError(code: "net", message: error.localizedDescription, details: nil))
+          return
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        result(["status": status, "body": FlutterStandardTypedData(bytes: data ?? Data())])
+      }
+    }.resume()
   }
 }
 

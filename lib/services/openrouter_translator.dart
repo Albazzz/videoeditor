@@ -42,8 +42,12 @@ const kDefaultOpenRouterModel = 'qwen/qwen3.7-flash';
 
 /// Raised for problems retrying will not fix (wrong key, no credit).
 class OpenRouterError implements Exception {
-  const OpenRouterError(this.message);
+  const OpenRouterError(this.message, {this.account = false});
   final String message;
+
+  /// The key or the balance is the problem: no request will work until
+  /// the user fixes it.
+  final bool account;
   @override
   String toString() => message;
 }
@@ -397,11 +401,13 @@ class OpenRouterTranslator implements Translator {
         if (code == 401 || code == 403) {
           throw const OpenRouterError(
             'Key OpenRouter không đúng hoặc đã bị thu hồi',
+            account: true,
           );
         }
         if (code == 402) {
           throw const OpenRouterError(
             'Tài khoản OpenRouter hết tiền, nạp thêm hoặc chọn model miễn phí',
+            account: true,
           );
         }
         if (code == 400 || code == 404) {
