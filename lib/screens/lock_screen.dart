@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../services/app_settings.dart';
 
 /// First launch: create the keys. Afterwards: ask for the app key.
+///
+/// The lock sits above the app's navigator, so it brings its own overlay:
+/// text fields need one for the cursor handles and the paste menu.
 class LockScreen extends StatefulWidget {
   const LockScreen({super.key, required this.setup, required this.onUnlocked});
 
@@ -10,10 +13,37 @@ class LockScreen extends StatefulWidget {
   final VoidCallback onUnlocked;
 
   @override
-  State<LockScreen> createState() => _LockScreenState();
+  State<LockScreen> createState() => _LockOverlayState();
 }
 
-class _LockScreenState extends State<LockScreen> {
+class _LockOverlayState extends State<LockScreen> {
+  // Reads `widget` when built, so it always uses the latest settings.
+  late final _entry = OverlayEntry(
+    builder: (_) =>
+        _LockBody(setup: widget.setup, onUnlocked: widget.onUnlocked),
+  );
+
+  @override
+  void didUpdateWidget(LockScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _entry.markNeedsBuild();
+  }
+
+  @override
+  Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
+}
+
+class _LockBody extends StatefulWidget {
+  const _LockBody({required this.setup, required this.onUnlocked});
+
+  final bool setup;
+  final VoidCallback onUnlocked;
+
+  @override
+  State<_LockBody> createState() => _LockScreenState();
+}
+
+class _LockScreenState extends State<_LockBody> {
   final _key = TextEditingController();
   final _confirm = TextEditingController();
   final _vault = TextEditingController();

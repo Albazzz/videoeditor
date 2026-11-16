@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -52,6 +54,62 @@ class _BrowserScreenState extends State<BrowserScreen> {
   double _speed = 1;
   DateTime _lastBlockNotice = DateTime(0);
 
+  /// Built once: the web view only reads them when it is created.
+  late final _settings = InAppWebViewSettings(
+    allowsInlineMediaPlayback: true,
+    mediaPlaybackRequiresUserGesture: false,
+    allowsBackForwardNavigationGestures: true,
+    javaScriptCanOpenWindowsAutomatically: false,
+    supportMultipleWindows: true,
+    // Pass as Safari: some sites stall or loop on a "checking your
+    // browser" page for an unknown web view.
+    applicationNameForUserAgent: _safariName(),
+    // No per-navigation callback into Dart: it made every page and every
+    // iframe wait on the app. Ad hosts are blocked by the content blocker.
+    contentBlockers: appSettings.adBlock ? adBlockRules() : [],
+  );
+  late final _scripts = UnmodifiableListView(_userScripts());
+
+  /// The tail Mobile Safari adds to its user agent, for this iOS version.
+  static String _safariName() {
+    final m = RegExp(
+      r'(\d+)\.(\d+)',
+    ).firstMatch(Platform.operatingSystemVersion);
+    final version = m == null ? '18.0' : '${m[1]}.${m[2]}';
+    return 'Version/$version Mobile/15E148 Safari/604.1';
+  }
+
+  DateTime _loadStarted = DateTime(0);
+  Timer? _slowLoad;
+
+  void _onLoadStart(String url) {
+    _loadStarted = DateTime.now();
+    AppLog.i('web', 'Mở ${AppLog.url(url)}');
+    _slowLoad?.cancel();
+    _slowLoad = Timer(const Duration(seconds: 15), () {
+      if (!mounted || _loading >= 1) return;
+      AppLog.i(
+        'web',
+        'Trang tải quá 15 giây (${(_loading * 100).round()}%), '
+            'chặn quảng cáo: ${appSettings.adBlock ? 'bật' : 'tắt'}',
+      );
+      if (!appSettings.adBlock) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: const Text('Trang tải lâu. Thử tắt chặn quảng cáo?'),
+          action: SnackBarAction(label: 'Tắt', onPressed: _toggleAdBlock),
+        ),
+      );
+    });
+  }
+
+  void _onLoadStop(String url) {
+    _slowLoad?.cancel();
+    final ms = DateTime.now().difference(_loadStarted).inMilliseconds;
+    AppLog.i('web', 'Tải xong sau ${(ms / 1000).toStringAsFixed(1)} giây');
+  }
+
   List<UserScript> _userScripts() => [
     UserScript(
       source: kPageScript,
@@ -74,11 +132,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (web != null) {
       await web.removeAllUserScripts();
       await web.addUserScripts(userScripts: _userScripts());
-      await web.setSettings(
-        settings: InAppWebViewSettings(
-          contentBlockers: on ? adBlockRules() : [],
-        ),
-      );
+      // The full settings: a fresh object would reset the others to their
+      // defaults (inline playback off, for one).
+      _settings.contentBlockers = on ? adBlockRules() : [];
+      await web.setSettings(settings: _settings);
       if (_started) await web.reload();
     }
     if (mounted) {
@@ -121,6 +178,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
+    _slowLoad?.cancel();
     _saver?.close();
     _session?.dispose();
     _address.dispose();
@@ -387,16 +445,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
             child: Stack(
               children: [
                 InAppWebView(
-                  initialSettings: InAppWebViewSettings(
-                    allowsInlineMediaPlayback: true,
-                    mediaPlaybackRequiresUserGesture: false,
-                    allowsBackForwardNavigationGestures: true,
-                    javaScriptCanOpenWindowsAutomatically: false,
-                    supportMultipleWindows: true,
-                    useShouldOverrideUrlLoading: true,
-                    contentBlockers: appSettings.adBlock ? adBlockRules() : [],
-                  ),
-                  initialUserScripts: UnmodifiableListView(_userScripts()),
+                  initialSettings: _settings,
+                  initialUserScripts: _scripts,
                   // Without this the web view loads every pop-up over the
                   // page being watched.
                   onCreateWindow: (_, action) async {
@@ -406,17 +456,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     if (!shouldBlockPopup(target, page)) return false;
                     _onBlocked('${target ?? ''}');
                     return true;
-                  },
-                  shouldOverrideUrlLoading: (_, action) async {
-                    final target = action.request.url;
-                    if (appSettings.adBlock &&
-                        action.isForMainFrame &&
-                        target != null &&
-                        isAdHost(target.host)) {
-                      _onBlocked('$target');
-                      return NavigationActionPolicy.CANCEL;
-                    }
-                    return NavigationActionPolicy.ALLOW;
                   },
                   onWebViewCreated: (c) {
                     _web = c;
@@ -431,12 +470,39 @@ class _BrowserScreenState extends State<BrowserScreen> {
                           _onBlocked(args.isEmpty ? '' : '${args.first}'),
                     );
                   },
-                  onLoadStart: (_, _) {
+                  onLoadStart: (_, url) {
                     // A new page: whatever video we knew about is gone.
                     if (_session != null || _fileCues != null) {
                       _stopSubtitles();
                     }
                     setState(() => _video = null);
+                    _onLoadStart('${url ?? ''}');
+                  },
+                  onLoadStop: (_, url) {
+                    if (_speed != 1) _send({'__vsub': 'rate', 'v': _speed});
+                    _onLoadStop('${url ?? ''}');
+                  },
+                  onReceivedError: (_, request, error) {
+                    if (request.isForMainFrame != true) return;
+                    AppLog.e(
+                      'web',
+                      'Không tải được ${AppLog.url('${request.url}')}: '
+                          '${error.type} ${error.description}',
+                    );
+                  },
+                  onReceivedHttpError: (_, request, response) {
+                    if (request.isForMainFrame != true) return;
+                    AppLog.e(
+                      'web',
+                      'Máy chủ trả lỗi ${response.statusCode} cho '
+                          '${AppLog.url('${request.url}')}',
+                    );
+                  },
+                  // iOS kills a page that uses too much memory and leaves it
+                  // blank; load it again.
+                  onWebContentProcessDidTerminate: (c) {
+                    AppLog.e('web', 'iOS đã tắt trang (thiếu bộ nhớ), tải lại');
+                    c.reload();
                   },
                   onProgressChanged: (_, p) =>
                       setState(() => _loading = p / 100),
@@ -444,9 +510,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     if (url != null && url.toString() != 'about:blank') {
                       _address.text = url.toString();
                     }
-                  },
-                  onLoadStop: (_, _) {
-                    if (_speed != 1) _send({'__vsub': 'rate', 'v': _speed});
                   },
                 ),
                 if (!_started) const _StartHint(),
