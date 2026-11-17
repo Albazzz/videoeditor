@@ -47,6 +47,7 @@ class AudioFeed {
     /// The input is an HLS playlist (options below exist only for HLS).
     bool hls = false,
   }) async {
+    if (_stopped) return;
     final isUrl = input.startsWith('http');
     final other = headers.entries
         .where((e) => e.key != 'User-Agent')
@@ -120,10 +121,12 @@ class AudioFeed {
         }),
       );
       _sessionId = session.getSessionId();
+      if (_stopped) await FFmpegKit.cancel(_sessionId!);
     } else {
       // Desktop (development only): use the ffmpeg on PATH.
       final p = await Process.start('ffmpeg', ['-nostdin', ...args]);
       _process = p;
+      if (_stopped) p.kill();
       final err = StringBuffer();
       p.stdout.drain<void>();
       p.stderr.transform(const SystemEncoding().decoder).listen(err.write);

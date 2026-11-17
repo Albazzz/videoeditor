@@ -32,6 +32,8 @@ const kAdDomains = <String>[
   'plugrush.com', 'ero-advertising.com', 'adxpansion.com', 'twinrdsrv.com',
   'richads.com', 'evadav.com', 'zeropark.com', 'adnium.com', 'yllix.com',
   'revenuehits.com', 'adf.ly', 'shorte.st', 'bebi.com',
+  // Video adverts observed in the browser log.
+  'growcdnssedge.com', 'greentrafsa.com', 'prncams.com', 'playhubconnect.com',
   // Vietnamese networks
   'admicro.vn', 'eclick.vn', 'novanet.vn', 'blueseed.tv', 'ants.vn',
   'adtima.vn', 'yomedia.vn',

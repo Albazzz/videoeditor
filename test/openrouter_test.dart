@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -61,6 +63,202 @@ OpenRouterTranslator make(http.Client client, {int maxLines = 3}) =>
     );
 
 void main() {
+  test('Retry-After accepts seconds, dates and provider error text', () {
+    final now = DateTime.utc(2026, 11, 17);
+    expect(retryAfter('1.5', ''), const Duration(milliseconds: 1500));
+    expect(
+      retryAfter(
+        HttpDate.format(now.add(const Duration(seconds: 35))),
+        '',
+        now: now,
+      ),
+      const Duration(seconds: 35),
+    );
+    expect(
+      retryAfter(null, 'Rate limited. Retry after 35s.'),
+      const Duration(seconds: 35),
+    );
+    expect(
+      retryAfter('invalid', 'Retry after 2s.'),
+      const Duration(seconds: 2),
+    );
+    expect(retryAfter('-1', ''), isNull);
+  });
+
+  test('rate limit cooldown also holds newly queued requests', () async {
+    var calls = 0;
+    final limited = Completer<void>();
+    final good = fakeServer();
+    final times = <DateTime>[];
+    final t = OpenRouterTranslator(
+      apiKey: 'k',
+      model: 'm',
+      parallel: 1,
+      gatherFor: Duration.zero,
+      maxLines: 1,
+      retryDelay: const Duration(milliseconds: 1),
+      client: MockClient((req) async {
+        times.add(DateTime.now());
+        if (calls++ == 0) {
+          limited.complete();
+          return http.Response(
+            '{"error":{"message":"busy"}}',
+            429,
+            headers: {'retry-after': '0.1'},
+          );
+        }
+        return good.post(req.url, headers: req.headers, body: req.body);
+      }),
+    );
+    addTearDown(t.dispose);
+    final first = t.translate('a', 'zh');
+    await limited.future;
+    final second = t.translate('b', 'zh');
+    expect(await Future.wait([first, second]), ['VI:a', 'VI:b']);
+    expect(
+      times[1].difference(times[0]).inMilliseconds,
+      greaterThanOrEqualTo(90),
+    );
+  });
+
+  test(
+    'no credit stops a queued file after the first failed request',
+    () async {
+      var calls = 0;
+      final t = OpenRouterTranslator(
+        apiKey: 'k',
+        model: 'm',
+        parallel: 1,
+        maxLines: 1,
+        client: MockClient((_) async {
+          calls++;
+          return http.Response('{}', 402);
+        }),
+      );
+      addTearDown(t.dispose);
+      await expectLater(
+        t.translateBatch(List.filled(20, 'x'), 'zh'),
+        throwsA(
+          isA<OpenRouterError>().having((e) => e.account, 'account', true),
+        ),
+      );
+      expect(calls, 1);
+    },
+  );
+
+  test(
+    'dispose settles active, queued and slot-waiting translations',
+    () async {
+      final started = Completer<void>();
+      final response = Completer<http.Response>();
+      var calls = 0;
+      final t = OpenRouterTranslator(
+        apiKey: 'k',
+        model: 'm',
+        parallel: 1,
+        maxLines: 1,
+        gatherFor: Duration.zero,
+        client: MockClient((_) {
+          calls++;
+          if (!started.isCompleted) started.complete();
+          return response.future;
+        }),
+      );
+      final live = t.translate('one', 'zh');
+      final queued = t.translate('two', 'zh');
+      final file = t.translateBatch(['three', 'four'], 'zh');
+      final checks = [
+        expectLater(live, throwsA(isA<TranslationCancelled>())),
+        expectLater(queued, throwsA(isA<TranslationCancelled>())),
+        expectLater(file, throwsA(isA<TranslationCancelled>())),
+      ];
+      await started.future;
+      await t.dispose();
+      await Future.wait(checks).timeout(const Duration(seconds: 1));
+      response.complete(http.Response('{}', 500));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(calls, 1);
+    },
+  );
+
+  test(
+    'dispose interrupts server-requested cooldown without another call',
+    () async {
+      final started = Completer<void>();
+      var calls = 0;
+      final t = make(
+        MockClient((_) async {
+          calls++;
+          started.complete();
+          return http.Response('{}', 429, headers: {'retry-after': '60'});
+        }),
+      );
+      final result = expectLater(
+        t.translateBatch(['x'], 'zh'),
+        throwsA(isA<TranslationCancelled>()),
+      );
+      await started.future;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await t.dispose();
+      await result.timeout(const Duration(seconds: 1));
+      expect(calls, 1);
+    },
+  );
+
+  test('moderation is reported once without retrying that request', () async {
+    var calls = 0;
+    final t = make(
+      MockClient((_) async {
+        calls++;
+        return http.Response(
+          '{"error":{"message":"InternalError.Algo.DataInspectionFailed"}}',
+          400,
+        );
+      }),
+    );
+    addTearDown(t.dispose);
+    await expectLater(
+      t.translateBatch(['a'], 'zh'),
+      throwsA(isA<OpenRouterError>().having((e) => e.blocked, 'blocked', true)),
+    );
+    expect(calls, 1);
+  });
+
+  test(
+    'unsupported structured outputs fall back to the ordinary prompt',
+    () async {
+      var calls = 0;
+      final good = fakeServer();
+      final t = make(
+        MockClient((req) async {
+          if (calls++ == 0) {
+            return http.Response(
+              '{"error":{"message":"response_format json_schema unsupported"}}',
+              400,
+            );
+          }
+          expect(jsonDecode(req.body).containsKey('response_format'), false);
+          return good.post(req.url, headers: req.headers, body: req.body);
+        }),
+      );
+      addTearDown(t.dispose);
+      expect(await t.translateBatch(['a'], 'zh'), ['VI:a']);
+      expect(calls, 2);
+    },
+  );
+
+  test('keeps complete JSON strings in malformed or truncated output', () {
+    expect(parseTranslations('{"1":"a","2":"b",","3":"unfinished', 3), [
+      'a',
+      'b',
+      null,
+    ]);
+    expect(parseTranslations(r'{"1":"he said \"yes\"","2":"unfinished', 2), [
+      'he said "yes"',
+      null,
+    ]);
+    expect(parseTranslations('[null,42]', 2), [null, null]);
+  });
   test('reads numbered answers, old-style lists, fences and chatter', () {
     expect(parseTranslations('Sure!\n```json\n{"1":"a","2":"b"}\n```', 2), [
       'a',

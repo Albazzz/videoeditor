@@ -158,7 +158,7 @@ class SubtitleSession extends ChangeNotifier {
 
   SessionActivity get activity {
     if (error != null) return SessionActivity.failed;
-    if (finished) return SessionActivity.done;
+    if (finished && waitingTranslation == 0) return SessionActivity.done;
     if (paused) return SessionActivity.paused;
     return DateTime.now().difference(lastActivity) > const Duration(seconds: 20)
         ? SessionActivity.stuck
@@ -213,6 +213,8 @@ class SubtitleSession extends ChangeNotifier {
   int _translateFailures = 0;
   String _lastTranslateError = '';
   String _feedError = '';
+  final _translations = <String, Future<String?>>{};
+  final _blockedTranslations = <String>{};
   final DateTime _created = DateTime.now();
 
   /// Ranges [from, to] already transcribed by earlier runs.
@@ -235,26 +237,40 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   Future<void> start(double at) async {
+    if (_disposed) return;
     _position = at;
     AppLog.i(
       'phụ đề',
       'Bắt đầu: ${AppLog.url(input)} · tiếng $language · từ giây '
           '${at.toStringAsFixed(1)} · ${cues.length} dòng có sẵn · '
-          'dịch: ${_translator.runtimeType}',
+          'dịch: ${_translator is OpenRouterTranslator ? '${(_translator as OpenRouterTranslator).provider.name} · ${(_translator as OpenRouterTranslator).model}' : _translator.runtimeType}',
     );
     try {
       _set('Đang nạp mô hình nhận dạng…');
-      _worker ??= await AsrWorker.spawn(await ModelStore.config(language));
+      final config = await ModelStore.config(language);
+      if (_disposed) return;
+      final worker = await AsrWorker.spawn(config);
+      if (_disposed) {
+        worker.dispose();
+        return;
+      }
+      _worker = worker;
       AppLog.i('phụ đề', 'Đã nạp bộ nhận dạng');
       if (_disposed) return;
       _sub ??= _worker!.events.listen(_onEvent);
       _prepareTranslator();
       final tmp = await getTemporaryDirectory();
+      if (_disposed) return;
       _root ??= await Directory(
         p.join(tmp.path, 'vsub'),
       ).create(recursive: true).then((d) => d.createTemp('s'));
+      if (_disposed) {
+        await _root?.delete(recursive: true);
+        return;
+      }
       await _restart(at);
     } catch (e, st) {
+      if (_disposed) return;
       AppLog.e('phụ đề', 'Không khởi động được: $e', st);
       error = '$e';
       _set('Lỗi: $e');
@@ -282,20 +298,44 @@ class SubtitleSession extends ChangeNotifier {
           notifyListeners();
         })
         .catchError((Object e) {
-          AppLog.e('dịch', 'Không chuẩn bị được bộ dịch $language: $e');
           if (_disposed) return;
+          AppLog.e('dịch', 'Không chuẩn bị được bộ dịch $language: $e');
           translatorNote = 'Bộ dịch chưa dùng được, đang hiện câu gốc';
           _lastTranslateError = '$e';
           notifyListeners();
         });
   }
 
-  Future<String?> _translate(String text, String lang) async {
+  Future<String?> _translate(String text, String lang) {
+    if (_disposed) return Future.value();
+    final key = '$lang|$text';
+    if (_blockedTranslations.contains(key)) return Future.value();
+    return _translations.putIfAbsent(
+      key,
+      () => _doTranslate(
+        text,
+        lang,
+      ).whenComplete(() => _translations.remove(key)),
+    );
+  }
+
+  Future<String?> _doTranslate(String text, String lang) async {
+    final translator = _translator;
     try {
-      return await _translator
-          .translate(text, lang)
-          .timeout(_translator.timeout);
+      // Cloud requests have their own bounded attempts and abortable timeout.
+      // Time spent waiting in the batch queue must not expire each line and
+      // create a second, duplicate request while the first is still running.
+      final result = translator.translate(text, lang);
+      return await (translator is OpenRouterTranslator
+          ? result
+          : result.timeout(translator.timeout));
     } catch (e) {
+      if (_disposed || e is TranslationCancelled || translator != _translator) {
+        return null;
+      }
+      if (e is OpenRouterError && e.blocked) {
+        _blockedTranslations.add('$lang|$text');
+      }
       _translateFailures++;
       _lastTranslateError = '$e';
       if (e is OpenRouterError && e.account) _fallBackToDevice(e.message);
@@ -319,7 +359,7 @@ class SubtitleSession extends ChangeNotifier {
     translatorNote = '$why · tạm dịch bằng bộ dịch trên máy';
     AppLog.e(
       'dịch',
-      'OpenRouter không dùng được ($why), chuyển sang dịch trên máy',
+      'Bộ dịch AI không dùng được ($why), chuyển sang dịch trên máy',
     );
     _translatorReady = false;
     _translator
@@ -338,6 +378,7 @@ class SubtitleSession extends ChangeNotifier {
 
   /// Translates lines that were shown in the original language.
   void _retranslate() {
+    if (_disposed) return;
     for (final c in List.of(cues)) {
       if (c.source.isEmpty || c.text != c.source) continue;
       // Started at once so a cloud translator can send them together.
@@ -372,10 +413,20 @@ class SubtitleSession extends ChangeNotifier {
       headers,
       language: language == 'auto' ? '' : language,
     );
+    if (_disposed) throw const TranslationCancelled();
     _hls = '$resolved $input'.contains('m3u8');
-    if (!_hls || _noRelay) return _source = resolved;
+    if (_noRelay) return _source = resolved;
+    // A plain file is read by ffmpeg directly (one fast stream); the relay
+    // (small ranged reads through iOS networking) only once the server has
+    // turned ffmpeg away.
+    if (!_hls && !_fileRelay) return _source = resolved;
     // HLS goes through the relay, which strips fake picture headers.
     final proxy = _proxy ??= await HlsProxy.start(headers);
+    if (_disposed) {
+      await proxy.close();
+      throw const TranslationCancelled();
+    }
+    if (!_hls) return _source = proxy.urlForFile(resolved);
     AppLog.i('phụ đề', 'Lấy HLS qua bộ chuyển tiếp: ${AppLog.url(resolved)}');
     return _source = proxy.urlFor(resolved);
   }
@@ -386,12 +437,16 @@ class SubtitleSession extends ChangeNotifier {
   /// The relay could not fetch this stream; ffmpeg fetches it itself.
   bool _noRelay = false;
 
+  /// A plain file is fetched through the relay (ffmpeg was turned away).
+  bool _fileRelay = false;
+
   Future<void> _restart(double at) async {
+    if (_disposed) return;
+    final gen = ++_gen;
     try {
       if (_feed != null && processedUntil > _base) {
         _covered.add((_base, processedUntil));
       }
-      final gen = ++_gen;
       paused = false;
       _resumeAt = null;
       _poll?.cancel();
@@ -418,6 +473,7 @@ class SubtitleSession extends ChangeNotifier {
       error = null;
       _feedError = '';
       _dir = await Directory(p.join(_root!.path, 'g$gen')).create();
+      if (_disposed || gen != _gen) return;
       _worker!.reset(gen, _base);
       // Stop where subtitles already exist, so nothing is made twice.
       final end = _runEnd = runEnd(_covered, _base);
@@ -428,6 +484,7 @@ class SubtitleSession extends ChangeNotifier {
       );
       final feed = _feed = AudioFeed();
       final source = await _audioSource();
+      if (_disposed || gen != _gen) return;
       await feed.start(
         input: source,
         outDir: _dir!.path,
@@ -437,9 +494,14 @@ class SubtitleSession extends ChangeNotifier {
         startSec: _base,
         lengthSec: end == null ? null : end - _base,
       );
+      if (_disposed || gen != _gen) {
+        await feed.stop();
+        return;
+      }
       _set('Đang nghe và dịch…');
       _poll = Timer.periodic(const Duration(milliseconds: 400), (_) => _pump());
     } catch (e, st) {
+      if (_disposed || gen != _gen) return;
       AppLog.e('phụ đề', 'Không lấy được âm thanh: $e', st);
       error = '$e';
       _set('Lỗi: $e');
@@ -447,6 +509,7 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   void _pump() {
+    if (_disposed) return;
     final feed = _feed;
     final dir = _dir;
     if (feed == null || dir == null || _lastSent) return;
@@ -462,6 +525,7 @@ class SubtitleSession extends ChangeNotifier {
     }
     // Keep the worker's queue short so a seek takes effect quickly.
     while (_pending < 3) {
+      if (waitingTranslation >= 160) return;
       final current = File(p.join(dir.path, chunkName(_nextChunk)));
       final next = File(p.join(dir.path, chunkName(_nextChunk + 1)));
       if (next.existsSync()) {
@@ -488,6 +552,8 @@ class SubtitleSession extends ChangeNotifier {
 
   /// The audio ran out. That is only good news if some of it was heard.
   void _finish() {
+    if (_disposed) return;
+    _poll?.cancel();
     final heardNothing = processedUntil - _base < 1 && cues.isEmpty;
     AppLog.i(
       'phụ đề',
@@ -502,7 +568,23 @@ class SubtitleSession extends ChangeNotifier {
     }
     // Some servers refuse the relay (a link tied to how the browser
     // connected, for one) but not ffmpeg: let ffmpeg fetch it directly.
-    if (_feedError.contains('127.0.0.1') && _hls && !_noRelay) {
+    // The other way round for a plain file on iOS: ffmpeg was refused (a
+    // server that only answers browsers), so try iOS networking.
+    if (_feedError.isNotEmpty &&
+        !_feedError.contains('127.0.0.1') &&
+        !_hls &&
+        !_fileRelay &&
+        Platform.isIOS &&
+        input.startsWith('http')) {
+      _fileRelay = true;
+      _source = null;
+      AppLog.e('phụ đề', 'ffmpeg bị từ chối, thử tải qua mạng của iOS');
+      _set('Thử cách tải khác…');
+      final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
+      unawaited(_restart(at));
+      return;
+    }
+    if (_feedError.contains('127.0.0.1') && !_noRelay) {
       _noRelay = true;
       _source = null;
       AppLog.e(
@@ -526,7 +608,7 @@ class SubtitleSession extends ChangeNotifier {
       );
       _feedError = '';
     }
-    if (_feedError.isNotEmpty && !heardNothing && _feedRetries < 6) {
+    if (_feedError.isNotEmpty && _feedRetries < (heardNothing ? 2 : 6)) {
       // Part way through: links often carry a token that expires. Fetch
       // the playlist again and carry on from where it stopped.
       _retryFeed(_feedError);
@@ -666,7 +748,7 @@ class SubtitleSession extends ChangeNotifier {
             unawaited(
               pending.then((text) {
                 waitingTranslation--;
-                if (text != null && !_disposed) {
+                if (text != null && !_disposed && gen == _gen) {
                   _replaceText(event.start, event.text, text);
                 }
                 if (!_disposed) notifyListeners();
@@ -935,8 +1017,10 @@ class SubtitleSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) return;
     AppLog.i('phụ đề', 'Dừng (${cues.length} dòng)');
     _disposed = true;
+    _gen++;
     _poll?.cancel();
     _sub?.cancel();
     _feed?.stop();

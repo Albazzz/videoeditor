@@ -1,3 +1,5 @@
+import 'ad_block.dart';
+
 /// What the page script reports about the video the user is watching.
 class WebVideo {
   const WebVideo({
@@ -40,11 +42,21 @@ class WebVideo {
 
   bool get playable => src.startsWith('http');
 
+  bool get isAdvertisement {
+    final uri = Uri.tryParse(src);
+    final frame = Uri.tryParse(page);
+    if (isAdHost(uri?.host ?? '') || isAdHost(frame?.host ?? '')) return true;
+    final path = uri?.path.toLowerCase() ?? '';
+    return (path.contains('/thumbs/') && path.contains('preview')) ||
+        RegExp(r'/(?:images|static/media)/mobile-[^/]+\.mp4$').hasMatch(path);
+  }
+
   /// The film among several videos reporting at once. [keep] (the one
   /// subtitles are being made for) stays chosen while it is on the page.
   static WebVideo? main(Iterable<WebVideo> videos, {String keep = ''}) {
     WebVideo? best;
     for (final v in videos) {
+      if (v.isAdvertisement) continue;
       if (keep.isNotEmpty && v.src == keep) return v;
       if (best == null || v.score > best.score) best = v;
     }

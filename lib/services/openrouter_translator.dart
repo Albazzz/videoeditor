@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -129,14 +130,24 @@ AiProvider? aiProviderById(String id) {
 
 /// Raised for problems retrying will not fix (wrong key, no credit).
 class OpenRouterError implements Exception {
-  const OpenRouterError(this.message, {this.account = false});
+  const OpenRouterError(
+    this.message, {
+    this.account = false,
+    this.blocked = false,
+  });
   final String message;
 
   /// The key or the balance is the problem: no request will work until
   /// the user fixes it.
   final bool account;
+  final bool blocked;
   @override
   String toString() => message;
+}
+
+/// Normal termination when the user stops subtitles, not a service failure.
+class TranslationCancelled extends OpenRouterError {
+  const TranslationCancelled() : super('Đã dừng dịch');
 }
 
 const _languageNames = {
@@ -177,16 +188,18 @@ class OpenRouterTranslator implements Translator {
     this.provider = kOpenRouter,
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
-    this.budget = 1500,
-    this.maxLines = 80,
+    this.budget = 1000,
+    this.maxLines = 40,
     this.parallel = 3,
     this.retryDelay = const Duration(seconds: 2),
+    this.requestTimeout = const Duration(seconds: 90),
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null;
 
   final String apiKey;
   final String model;
   final AiProvider provider;
+  String get _logTag => provider.id;
   final Duration gatherFor;
 
   /// Characters of original text per request: Chinese or Japanese lines
@@ -199,6 +212,7 @@ class OpenRouterTranslator implements Translator {
 
   /// First wait before retrying; doubled each time.
   final Duration retryDelay;
+  final Duration requestTimeout;
 
   final http.Client _client;
   final bool _ownsClient;
@@ -210,6 +224,48 @@ class OpenRouterTranslator implements Translator {
   bool _disposed = false;
   int _inFlight = 0;
   final _slots = <Completer<void>>[];
+  final _cancel = Completer<void>();
+  final _active = <_Waiting>{};
+  OpenRouterError? _fatal;
+  DateTime _nextRequest = DateTime(0);
+  Duration _requestSpacing = Duration.zero;
+  bool _structured = true;
+
+  void _checkActive() {
+    if (_disposed) throw const TranslationCancelled();
+    if (_fatal != null) throw _fatal!;
+  }
+
+  Future<T> _untilCancelled<T>(Future<T> work) => Future.any([
+    work,
+    _cancel.future.then<T>((_) => throw const TranslationCancelled()),
+  ]);
+
+  Future<void> _wait(Duration duration) async {
+    _checkActive();
+    if (duration <= Duration.zero) return;
+    final done = Completer<void>();
+    final timer = Timer(duration, done.complete);
+    try {
+      await _untilCancelled(done.future);
+    } finally {
+      timer.cancel();
+    }
+    _checkActive();
+  }
+
+  Future<void> _waitForTurn() async {
+    while (true) {
+      _checkActive();
+      final delay = _nextRequest.difference(DateTime.now());
+      if (delay > Duration.zero) {
+        await _wait(delay);
+        continue;
+      }
+      _nextRequest = DateTime.now().add(_requestSpacing);
+      return;
+    }
+  }
 
   /// The last lines translated live, as (original, Vietnamese).
   final _recent = <(String, String)>[];
@@ -225,7 +281,8 @@ class OpenRouterTranslator implements Translator {
 
   @override
   Future<String> translate(String text, String lang) {
-    if (_disposed) return Future.error(StateError('Đã đóng bộ dịch'));
+    if (_disposed) return Future.error(const TranslationCancelled());
+    if (_fatal != null) return Future.error(_fatal!);
     final known = _done['$lang|$text'];
     if (known != null) return Future.value(known);
     final w = _Waiting(text, lang);
@@ -277,12 +334,14 @@ class OpenRouterTranslator implements Translator {
     }
     for (final entry in byLang.entries) {
       final items = entry.value;
+      _active.addAll(items);
       final context = List.of(_recent);
       _liveRequests++;
       _translateChunk([for (final w in items) w.text], entry.key, context)
           .then(
             (out) {
               for (var i = 0; i < items.length; i++) {
+                if (items[i].done.isCompleted) continue;
                 final t = out[i];
                 if (t == null) {
                   items[i].done.completeError(
@@ -301,11 +360,12 @@ class OpenRouterTranslator implements Translator {
             },
             onError: (Object e) {
               for (final w in items) {
-                w.done.completeError(e);
+                if (!w.done.isCompleted) w.done.completeError(e);
               }
             },
           )
           .whenComplete(() {
+            _active.removeAll(items);
             _liveRequests--;
             _dispatch();
           });
@@ -318,6 +378,7 @@ class OpenRouterTranslator implements Translator {
     String lang, {
     void Function(int done)? onProgress,
   }) async {
+    _checkActive();
     final out = List<String?>.filled(lines.length, null);
     final chunks = chunkByLength(lines, budget: budget, maxLines: maxLines);
     var done = 0;
@@ -364,11 +425,12 @@ class OpenRouterTranslator implements Translator {
         if (out[i] == null) i,
     ];
     if (missing.isEmpty || lines.length == 1) return out;
-    AppLog.i('openrouter', 'Hỏi lại ${missing.length} câu bị bỏ sót');
-    for (var k = 0; k < missing.length; k += 5) {
+    AppLog.i(_logTag, 'Hỏi lại ${missing.length} câu bị bỏ sót');
+    for (var k = 0; k < missing.length; k += maxLines) {
+      _checkActive();
       final group = missing.sublist(
         k,
-        k + 5 < missing.length ? k + 5 : missing.length,
+        k + maxLines < missing.length ? k + maxLines : missing.length,
       );
       final first = group.first;
       final near = [
@@ -432,17 +494,25 @@ class OpenRouterTranslator implements Translator {
 
   /// Waits for one of the [parallel] request slots.
   Future<void> _acquire() async {
+    _checkActive();
     while (_inFlight >= parallel) {
       final c = Completer<void>();
       _slots.add(c);
-      await c.future;
+      await _untilCancelled(c.future);
+      _checkActive();
     }
     _inFlight++;
   }
 
   void _release() {
     _inFlight--;
-    if (_slots.isNotEmpty) _slots.removeAt(0).complete();
+    // Wake all contenders: after a fatal account error each must be able
+    // to leave without acquiring a slot or waiting for another release.
+    final slots = List.of(_slots);
+    _slots.clear();
+    for (final slot in slots) {
+      slot.complete();
+    }
   }
 
   /// Sends one request, retrying network trouble and rate limits. Lines
@@ -467,23 +537,67 @@ class OpenRouterTranslator implements Translator {
   ) async {
     const attempts = 4;
     for (var attempt = 1; ; attempt++) {
+      await _waitForTurn();
       final started = DateTime.now();
       try {
-        final res = await _client
-            .post(
-              _endpoint,
-              headers: {
+        final abort = Completer<void>();
+        final request =
+            http.AbortableRequest(
+                'POST',
+                _endpoint,
+                abortTrigger: Future.any([abort.future, _cancel.future]),
+              )
+              ..headers.addAll({
                 'Authorization': 'Bearer $apiKey',
                 'Content-Type': 'application/json',
                 'X-Title': 'AIcall app',
+              });
+        request.body = jsonEncode({
+          'model': model,
+          'messages': messages(lines, lang, context),
+          'temperature': 0.3,
+          'max_tokens':
+              (lines.fold<int>(0, (n, l) => n + l.length) * 2 +
+                      lines.length * 16 +
+                      512)
+                  .clamp(1024, 4096),
+          if (_structured)
+            'response_format': {
+              'type': 'json_schema',
+              'json_schema': {
+                'name': 'subtitles',
+                'strict': true,
+                'schema': {
+                  'type': 'object',
+                  'properties': {
+                    for (var i = 1; i <= lines.length; i++)
+                      '$i': {'type': 'string'},
+                  },
+                  'required': [for (var i = 1; i <= lines.length; i++) '$i'],
+                  'additionalProperties': false,
+                },
               },
-              body: jsonEncode({
-                'model': model,
-                'messages': messages(lines, lang, context),
-                'temperature': 0.3,
-              }),
-            )
-            .timeout(const Duration(seconds: 90));
+            },
+        });
+        final http.Response res;
+        try {
+          res =
+              await _untilCancelled(
+                _client.send(request).then(http.Response.fromStream),
+              ).timeout(
+                requestTimeout,
+                onTimeout: () {
+                  if (!abort.isCompleted) abort.complete();
+                  throw TimeoutException(
+                    'Máy chủ dịch phản hồi quá chậm',
+                    requestTimeout,
+                  );
+                },
+              );
+        } finally {
+          if (!abort.isCompleted) abort.complete();
+        }
+        _checkActive();
         final ms = DateTime.now().difference(started).inMilliseconds;
         final code = res.statusCode;
         if (code == 401 || code == 403) {
@@ -499,9 +613,46 @@ class OpenRouterTranslator implements Translator {
           );
         }
         if (code == 400 || code == 404) {
+          final detail = _errorText(res.body);
+          // Custom models may not implement structured outputs. Retry once
+          // without that option; never treat moderation as format trouble.
+          if (code == 400 &&
+              _structured &&
+              RegExp(
+                r'response_format|json_schema|structured.output',
+                caseSensitive: false,
+              ).hasMatch(detail) &&
+              !detail.contains('DataInspectionFailed')) {
+            _structured = false;
+            if (attempt < attempts) continue;
+          }
+          final blocked =
+              detail.contains('DataInspectionFailed') ||
+              detail.contains('content_filter');
           throw OpenRouterError(
-            '${provider.name} từ chối ($code): ${_errorText(res.body)}',
+            blocked
+                ? '${provider.name}: nhà cung cấp chặn nội dung ($code), tạm hiện câu gốc'
+                : '${provider.name} từ chối ($code): $detail',
+            blocked: blocked,
           );
+        }
+        if (code == 429) {
+          final detail = _errorText(res.body);
+          final limit = RegExp(
+            r'limit of (\d+) requests per minute',
+          ).firstMatch(detail);
+          final rpm = int.tryParse(limit?[1] ?? '');
+          if (rpm != null && rpm > 0) {
+            _requestSpacing = Duration(
+              milliseconds: (60000 / rpm).ceil() + 100,
+            );
+          }
+          final delay =
+              retryAfter(res.headers['retry-after'], detail) ??
+              retryDelay * (1 << (attempt - 1));
+          final next = DateTime.now().add(delay);
+          if (next.isAfter(_nextRequest)) _nextRequest = next;
+          throw _Retry('${provider.name} giới hạn tần suất (429): $detail');
         }
         if (code != 200) {
           throw _Retry('${provider.name} lỗi $code: ${_errorText(res.body)}');
@@ -510,38 +661,70 @@ class OpenRouterTranslator implements Translator {
         if (body is Map && body['error'] != null) {
           throw _Retry('${provider.name}: ${_errorText(res.body)}');
         }
-        final content = '${body['choices']?[0]?['message']?['content'] ?? ''}';
+        final choices = body is Map ? body['choices'] : null;
+        final choice =
+            choices is List && choices.isNotEmpty && choices.first is Map
+            ? choices.first as Map
+            : null;
+        if (choice?['finish_reason'] == 'content_filter') {
+          throw OpenRouterError(
+            '${provider.name}: nhà cung cấp chặn nội dung, tạm hiện câu gốc',
+            blocked: true,
+          );
+        }
+        final message = choice?['message'];
+        final content = message is Map && message['content'] is String
+            ? message['content'] as String
+            : '';
+        if (message is Map && message['refusal'] != null) {
+          throw OpenRouterError(
+            '${provider.name}: model từ chối dịch nội dung này, tạm hiện câu gốc',
+            blocked: true,
+          );
+        }
         final usage = body['usage'];
         final parsed = parseTranslations(content, lines.length);
         final got = parsed.where((t) => t != null).length;
         AppLog.i(
-          'openrouter',
+          _logTag,
           '$got/${lines.length} câu (${lines.fold(0, (n, l) => n + l.length)} '
-              'ký tự) trong ${(ms / 1000).toStringAsFixed(1)} giây'
-              '${usage is Map ? ' · ${usage['prompt_tokens']}+${usage['completion_tokens']} token' : ''}',
+          'ký tự) trong ${(ms / 1000).toStringAsFixed(1)} giây'
+          '${usage is Map ? ' · ${usage['prompt_tokens']}+${usage['completion_tokens']} token' : ''}',
         );
         if (got == 0) {
           AppLog.e(
-            'openrouter',
+            _logTag,
             'Không đọc được câu trả lời: '
-                '${content.length > 300 ? content.substring(0, 300) : content}',
+            '${content.length > 300 ? content.substring(0, 300) : content}',
           );
         }
         return parsed;
       } on OpenRouterError catch (e) {
-        AppLog.e('openrouter', e.message);
+        if (e is TranslationCancelled) rethrow;
+        if (e.account) {
+          _fatal = e;
+          for (final w in _waiting) {
+            if (!w.done.isCompleted) w.done.completeError(e);
+          }
+          _waiting.clear();
+          _waitingChars = 0;
+        }
+        AppLog.e(_logTag, e.message);
         rethrow;
       } catch (e) {
+        _checkActive();
         if (attempt >= attempts || _disposed) {
-          AppLog.e('openrouter', 'Bỏ sau $attempt lần: $e');
+          AppLog.e(_logTag, 'Bỏ sau $attempt lần: $e');
           throw OpenRouterError('Không dịch được qua ${provider.name}: $e');
         }
-        final wait = retryDelay * (1 << (attempt - 1));
+        var wait = retryDelay * (1 << (attempt - 1));
+        final cooldown = _nextRequest.difference(DateTime.now());
+        if (cooldown > wait) wait = cooldown;
         AppLog.i(
-          'openrouter',
+          _logTag,
           'Lần $attempt lỗi ($e), thử lại sau ${wait.inSeconds} giây',
         );
-        await Future<void>.delayed(wait);
+        await _wait(wait);
       }
     }
   }
@@ -557,14 +740,41 @@ class OpenRouterTranslator implements Translator {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
     _disposed = true;
+    _cancel.complete();
     _gather?.cancel();
-    for (final w in _waiting) {
-      w.done.completeError(StateError('Đã đóng bộ dịch'));
+    for (final w in [..._waiting, ..._active]) {
+      if (!w.done.isCompleted) {
+        w.done.completeError(const TranslationCancelled());
+      }
     }
     _waiting.clear();
+    _waitingChars = 0;
     if (_ownsClient) _client.close();
   }
+}
+
+/// Accept both HTTP Retry-After forms and provider messages such as
+/// "Retry after 35s". A malformed value falls back to normal backoff.
+Duration? retryAfter(String? header, String message, {DateTime? now}) {
+  final seconds = double.tryParse(header ?? '');
+  if (seconds != null && seconds.isFinite && seconds >= 0) {
+    return Duration(milliseconds: (seconds * 1000).ceil());
+  }
+  if (header != null) {
+    try {
+      final delay = HttpDate.parse(header).difference(now ?? DateTime.now());
+      return delay.isNegative ? Duration.zero : delay;
+    } catch (_) {}
+  }
+  final match = RegExp(
+    r'retry after\s+(\d+(?:\.\d+)?)\s*s',
+    caseSensitive: false,
+  ).firstMatch(message);
+  return match == null
+      ? null
+      : Duration(milliseconds: (double.parse(match[1]!) * 1000).ceil());
 }
 
 /// Splits [lines] into requests of about [budget] characters and at most
@@ -600,11 +810,22 @@ List<String?> parseTranslations(String content, int count) {
   if (start < 0) return out;
   final open = content[start];
   final end = content.lastIndexOf(open == '{' ? '}' : ']');
-  if (end <= start) return out;
   Object? decoded;
   try {
+    if (end <= start) throw const FormatException('truncated JSON');
     decoded = jsonDecode(content.substring(start, end + 1));
   } catch (_) {
+    // Preserve complete numbered strings from a malformed/truncated answer.
+    // Each value still has to be a valid JSON string; never guess missing text.
+    final pairs = RegExp(r'"(\d+)"\s*:\s*("(?:[^"\\]|\\.)*")');
+    for (final m in pairs.allMatches(content.substring(start))) {
+      final i = int.tryParse(m[1]!);
+      if (i == null || i < 1 || i > count) continue;
+      try {
+        final text = (jsonDecode(m[2]!) as String).trim();
+        if (text.isNotEmpty) out[i - 1] = text;
+      } catch (_) {}
+    }
     return out;
   }
   if (decoded is Map) {
@@ -622,7 +843,8 @@ List<String?> parseTranslations(String content, int count) {
   }
   if (decoded is List && decoded.length == count) {
     for (var i = 0; i < count; i++) {
-      final t = '${decoded[i]}'.trim();
+      if (decoded[i] is! String) continue;
+      final t = (decoded[i] as String).trim();
       if (t.isNotEmpty) out[i] = t;
     }
   }

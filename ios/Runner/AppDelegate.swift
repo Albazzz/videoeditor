@@ -26,6 +26,69 @@ import UIKit
 // like Safari's; Dart's HTTP client and ffmpeg both were. URLSession goes
 // through the same system stack as the web view. Dart side: lib/services/net.dart.
 
+private final class NetDownload {
+  let result: FlutterResult
+  let maxBytes: Int
+  var data = Data()
+  var response: HTTPURLResponse?
+  var problem: String?
+
+  init(result: @escaping FlutterResult, maxBytes: Int) {
+    self.result = result
+    self.maxBytes = maxBytes
+  }
+}
+
+// Delegate callbacks and channel calls both run on the main queue, so the
+// request map has one owner. Check limits before buffering movie data.
+private final class NetDelegate: NSObject, URLSessionDataDelegate {
+  var downloads: [Int: NetDownload] = [:]
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+    didReceive response: URLResponse,
+    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+  ) {
+    guard let download = downloads[dataTask.taskIdentifier] else {
+      completionHandler(.cancel)
+      return
+    }
+    download.response = response as? HTTPURLResponse
+    if response.expectedContentLength > Int64(download.maxBytes) {
+      download.problem = "Máy chủ bỏ qua giới hạn tải từng phần"
+      completionHandler(.cancel)
+    } else {
+      completionHandler(.allow)
+    }
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    guard let download = downloads[dataTask.taskIdentifier] else { return }
+    if download.data.count + data.count > download.maxBytes {
+      download.problem = "Dữ liệu video vượt giới hạn tải từng phần"
+      dataTask.cancel()
+    } else {
+      download.data.append(data)
+    }
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    guard let download = downloads.removeValue(forKey: task.taskIdentifier) else { return }
+    if let problem = download.problem ?? error?.localizedDescription {
+      download.result(FlutterError(code: "net", message: problem, details: nil))
+      return
+    }
+    var headers: [String: String] = [:]
+    for (name, value) in download.response?.allHeaderFields ?? [:] {
+      headers[String(describing: name).lowercased()] = String(describing: value)
+    }
+    download.result([
+      "status": download.response?.statusCode ?? 0,
+      "body": FlutterStandardTypedData(bytes: download.data), "headers": headers,
+    ])
+  }
+}
+
+private let netDelegate = NetDelegate()
 private let netSession: URLSession = {
   let config = URLSessionConfiguration.default
   // The page's cookies arrive as a header; the shared store must not
@@ -34,7 +97,7 @@ private let netSession: URLSession = {
   config.httpCookieStorage = nil
   config.urlCache = nil
   config.timeoutIntervalForRequest = 30
-  return URLSession(configuration: config)
+  return URLSession(configuration: config, delegate: netDelegate, delegateQueue: .main)
 }()
 
 /// Kept for the life of the app.
@@ -61,16 +124,10 @@ private func installNetChannel(_ messenger: FlutterBinaryMessenger) {
         request.setValue(value, forHTTPHeaderField: name)
       }
     }
-    netSession.dataTask(with: request) { data, response, error in
-      DispatchQueue.main.async {
-        if let error = error {
-          result(FlutterError(code: "net", message: error.localizedDescription, details: nil))
-          return
-        }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        result(["status": status, "body": FlutterStandardTypedData(bytes: data ?? Data())])
-      }
-    }.resume()
+    let task = netSession.dataTask(with: request)
+    netDelegate.downloads[task.taskIdentifier] = NetDownload(
+      result: result, maxBytes: (args["maxBytes"] as? Int) ?? 32 * 1024 * 1024)
+    task.resume()
   }
 }
 

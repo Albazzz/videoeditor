@@ -53,11 +53,12 @@ class AsrError extends AsrEvent {
 /// Runs voice-activity detection + speech recognition in a background
 /// isolate so the UI and the video never stutter.
 class AsrWorker {
-  AsrWorker._(this._isolate, this._toWorker, this._events);
+  AsrWorker._(this._isolate, this._toWorker, this._events, this._receivePort);
 
   final Isolate _isolate;
   final SendPort _toWorker;
   final StreamController<AsrEvent> _events;
+  final ReceivePort _receivePort;
 
   Stream<AsrEvent> get events => _events.stream;
 
@@ -108,7 +109,7 @@ class AsrWorker {
     ]);
     try {
       final port = await ready.future;
-      return AsrWorker._(isolate, port, events);
+      return AsrWorker._(isolate, port, events, fromWorker);
     } catch (_) {
       isolate.kill();
       fromWorker.close();
@@ -130,6 +131,7 @@ class AsrWorker {
 
   void dispose() {
     _isolate.kill(priority: Isolate.immediate);
+    _receivePort.close();
     _events.close();
   }
 }

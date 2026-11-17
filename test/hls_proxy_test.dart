@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:video/services/hls_proxy.dart';
 
@@ -22,6 +23,69 @@ Uint8List tsPackets(int n) {
 }
 
 void main() {
+  test(
+    'MP4 relay preserves seeks and headers across bounded range reads',
+    () async {
+      final data = Uint8List.fromList(
+        List.generate(4 * 1024 * 1024 + 317, (i) => i % 251),
+      );
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      var calls = 0;
+      origin.listen((req) async {
+        expect(req.headers.value('referer'), 'https://film.example/');
+        expect(req.headers.value('cookie'), 'session=test');
+        final range = RegExp(
+          r'bytes=(\d+)-(\d+)',
+        ).firstMatch(req.headers.value('range')!)!;
+        final start = int.parse(range[1]!);
+        final requestedEnd = int.parse(range[2]!);
+        expect(requestedEnd - start + 1, lessThanOrEqualTo(4 * 1024 * 1024));
+        final end = requestedEnd < data.length ? requestedEnd : data.length - 1;
+        calls++;
+        req.response.statusCode = 206;
+        req.response.headers.set(
+          'content-range',
+          'bytes $start-$end/${data.length}',
+        );
+        req.response.contentLength = end - start + 1;
+        req.response.add(data.sublist(start, end + 1));
+        await req.response.close();
+      });
+      final relay = await HlsProxy.start({
+        'Referer': 'https://film.example/',
+        'Cookie': 'session=test',
+      });
+      addTearDown(relay.close);
+      final url = Uri.parse(
+        relay.urlForFile('http://127.0.0.1:${origin.port}/video.mp4'),
+      );
+      final all = await http.get(url, headers: {'Range': 'bytes=17-'});
+      expect(all.statusCode, 206);
+      expect(
+        all.headers['content-range'],
+        'bytes 17-${data.length - 1}/${data.length}',
+      );
+      expect(all.bodyBytes, data.sublist(17));
+      expect(calls, 2);
+      final seek = await http.get(url, headers: {'Range': 'bytes=200-219'});
+      expect(seek.statusCode, 206);
+      expect(seek.bodyBytes, data.sublist(200, 220));
+      expect(relay.lastError, isEmpty);
+    },
+  );
+
+  test('keys and init sections can use the relay with page headers', () {
+    final out = rewritePlaylist(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="init.mp4"\n',
+      Uri.parse('https://cdn.example/master.m3u8'),
+      playlistUrl: (u) => 'P[$u]',
+      segmentUrl: (u) => 'S[$u]',
+      resourceUrl: (u) => 'R[$u]',
+    );
+    expect(out, contains('URI="R[https://cdn.example/key.bin]"'));
+    expect(out, contains('URI="R[https://cdn.example/init.mp4]"'));
+  });
   test('playlists: pieces and nested playlists go through the relay', () {
     const media =
         '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n'

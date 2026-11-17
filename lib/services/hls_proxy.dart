@@ -18,6 +18,7 @@ class HlsProxy {
   final HttpServer _server;
   final Map<String, String> _headers;
   int stripped = 0;
+  bool _closed = false;
 
   /// What went wrong last, for the details panel.
   String lastError = '';
@@ -32,6 +33,10 @@ class HlsProxy {
   /// The address ffmpeg should open instead of [playlist].
   String urlFor(String playlist) => _local('p', playlist);
 
+  /// MP4 reads go through URLSession on iOS too. Fetch bounded ranges to
+  /// avoid buffering an entire movie and preserve ffmpeg's seeking.
+  String urlForFile(String video) => _local('f', video);
+
   String _local(String kind, String target) =>
       'http://127.0.0.1:${_server.port}/$kind?u=${Uri.encodeQueryComponent(target)}';
 
@@ -39,10 +44,16 @@ class HlsProxy {
     final target = req.uri.queryParameters['u'];
     final kind = req.uri.path.replaceAll('/', '');
     try {
+      if (_closed) return;
       if (target == null) throw const HttpException('no target');
+      if (kind == 'f') {
+        await _file(req, Uri.parse(target));
+        return;
+      }
       // Fetched the way Safari fetches (see Net), so servers that turn
       // away other clients still answer.
       final (status, bytes) = await Net.get(Uri.parse(target), _headers);
+      if (_closed) return;
       req.response.statusCode = status;
       if (status != 200) {
         lastError = 'máy chủ trả $status';
@@ -61,16 +72,18 @@ class HlsProxy {
             Uri.parse(target),
             playlistUrl: (u) => _local('p', u),
             segmentUrl: (u) => _local('s', u),
+            resourceUrl: (u) => _local('r', u),
           ),
         );
       } else {
         final body = bytes;
-        final start = mediaStart(body);
+        final start = kind == 'r' ? 0 : mediaStart(body);
         if (start > 0) stripped++;
         req.response.add(start > 0 ? Uint8List.sublistView(body, start) : body);
       }
       await req.response.close();
     } catch (e) {
+      if (_closed) return;
       lastError = '$e';
       AppLog.e('relay', 'Lỗi khi lấy ${AppLog.url(target ?? '')}: $e');
       try {
@@ -80,7 +93,89 @@ class HlsProxy {
     }
   }
 
+  Future<void> _file(HttpRequest req, Uri target) async {
+    final requested = req.headers.value(HttpHeaders.rangeHeader);
+    final range = requested == null
+        ? null
+        : RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(requested);
+    if (requested != null && range == null) {
+      req.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      await req.response.close();
+      return;
+    }
+    var offset = int.tryParse(range?[1] ?? '') ?? 0;
+    final requestedEnd = int.tryParse(range?[2] ?? '');
+    // Big enough that a film is not thousands of round trips.
+    const block = 4 * 1024 * 1024;
+    int? end;
+    var first = true;
+    while (!_closed) {
+      var to = offset + block - 1;
+      if (requestedEnd != null && to > requestedEnd) to = requestedEnd;
+      if (end != null && to > end) to = end;
+      final response = await Net.fetch(target, {
+        ..._headers,
+        'Range': 'bytes=$offset-$to',
+      }, maxBytes: block);
+      if (_closed) return;
+      if (response.status != 200 && response.status != 206) {
+        throw HttpException(
+          'Máy chủ video trả ${response.status}',
+          uri: target,
+        );
+      }
+      final contentRange = RegExp(
+        r'^bytes (\d+)-(\d+)/(\d+)$',
+      ).firstMatch(response.headers['content-range'] ?? '');
+      if (response.status == 206 &&
+          (contentRange == null ||
+              int.parse(contentRange[1]!) != offset ||
+              int.parse(contentRange[2]!) > to ||
+              int.parse(contentRange[2]!) - offset + 1 !=
+                  response.bytes.length)) {
+        throw const HttpException('Máy chủ trả sai khoảng dữ liệu video');
+      }
+      if (first) {
+        first = false;
+        req.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+        req.response.headers.set(
+          HttpHeaders.contentTypeHeader,
+          response.headers['content-type'] ?? 'application/octet-stream',
+        );
+        if (contentRange != null) {
+          final total = int.parse(contentRange[3]!);
+          end = requestedEnd != null && requestedEnd < total
+              ? requestedEnd
+              : total - 1;
+          req.response.statusCode = requested == null ? 200 : 206;
+          req.response.contentLength = end - offset + 1;
+          if (requested != null) {
+            req.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes $offset-$end/$total',
+            );
+          }
+        } else if (offset > 0) {
+          throw const HttpException('Máy chủ không hỗ trợ tua video');
+        } else {
+          req.response.contentLength = response.bytes.length;
+        }
+      }
+      req.response.add(response.bytes);
+      await req.response.flush();
+      offset += response.bytes.length;
+      if (response.status == 200 ||
+          response.bytes.isEmpty ||
+          (end != null && offset > end)) {
+        break;
+      }
+    }
+    await req.response.close();
+  }
+
   Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
     await _server.close(force: true);
   }
 }
@@ -93,6 +188,7 @@ String rewritePlaylist(
   Uri base, {
   required String Function(String) playlistUrl,
   required String Function(String) segmentUrl,
+  String Function(String)? resourceUrl,
 }) {
   final master = text.contains('#EXT-X-STREAM-INF');
   final out = StringBuffer();
@@ -108,7 +204,7 @@ String rewritePlaylist(
           final isPlaylist =
               line.startsWith('#EXT-X-MEDIA') ||
               line.startsWith('#EXT-X-I-FRAME-STREAM-INF');
-          return 'URI="${isPlaylist ? playlistUrl(abs) : abs}"';
+          return 'URI="${isPlaylist ? playlistUrl(abs) : resourceUrl?.call(abs) ?? abs}"';
         }),
       );
     } else {

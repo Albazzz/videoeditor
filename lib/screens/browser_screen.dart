@@ -848,11 +848,29 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   },
                   onReceivedError: (_, request, error) {
                     if (request.isForMainFrame != true) return;
+                    final cancelled =
+                        error.type == WebResourceErrorType.CANCELLED ||
+                        error.description.contains('error -999') ||
+                        error.description.contains('code=102');
+                    if (cancelled) {
+                      AppLog.i(
+                        'web',
+                        'Yêu cầu trang bị hủy/chuyển hướng: ${AppLog.url('${request.url}')}',
+                      );
+                      return;
+                    }
+                    _slowLoad?.cancel();
                     AppLog.e(
                       'web',
                       'Không tải được ${AppLog.url('${request.url}')}: '
                           '${error.type} ${error.description}',
                     );
+                    if (mounted) {
+                      toast(
+                        context,
+                        'Không tải được trang: ${error.type}. Thử tải lại hoặc kiểm tra mạng.',
+                      );
+                    }
                   },
                   onReceivedHttpError: (_, request, response) {
                     if (request.isForMainFrame != true) return;
@@ -861,6 +879,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       'Máy chủ trả lỗi ${response.statusCode} cho '
                           '${AppLog.url('${request.url}')}',
                     );
+                    if (mounted) {
+                      toast(
+                        context,
+                        'Trang web trả lỗi ${response.statusCode}',
+                      );
+                    }
                   },
                   // iOS kills a page that uses too much memory and leaves it
                   // blank; load it again.

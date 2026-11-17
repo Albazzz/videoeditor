@@ -19,6 +19,25 @@ WebVideo report(
 })!;
 
 void main() {
+  test('known ad streams and thumbnail previews never become the film', () {
+    for (final src in [
+      'https://edge-hls.growcdnssedge.com/hls/master.m3u8',
+      'https://playhubconnect.com/bn/alternative/ad.mp4',
+      'https://static-sg-cdn.eporner.com/thumbs/static4/123-preview.webm',
+      'https://site.example/images/mobile-game68-190926.mp4',
+      'https://site.example/static/media/mobile-cm88-250926.mp4',
+    ]) {
+      expect(
+        WebVideo.main([report(src, area: 1000000)], keep: src),
+        isNull,
+        reason: src,
+      );
+    }
+    expect(
+      WebVideo.main([report('https://film.example/short.mp4', duration: 8)]),
+      isNotNull,
+    );
+  });
   // Like the page in the user's log: the film plus muted, looping adverts
   // in other frames, all reporting at once.
   final film = report(
