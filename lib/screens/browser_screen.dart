@@ -14,6 +14,7 @@ import '../services/active_work.dart';
 import '../services/app_log.dart';
 import '../services/app_settings.dart';
 import '../services/bookmarks.dart';
+import '../services/browser_tabs.dart';
 import '../services/open_page.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
@@ -22,6 +23,8 @@ import '../services/watch_position.dart';
 import '../services/web_video.dart';
 import '../widgets/activity_icon.dart';
 import '../widgets/bookmarks_sheet.dart';
+import '../widgets/browser_history_sheet.dart';
+import '../widgets/browser_tabs_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
@@ -41,10 +44,150 @@ class BrowserScreen extends StatefulWidget {
 }
 
 class _BrowserScreenState extends State<BrowserScreen> {
+  final _tabs = BrowserTabs(homeUrl: kHomePage);
+  final _pages = <int, GlobalKey<_BrowserTabViewState>>{};
+  bool _disposing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs.addListener(_changed);
+    openPageRequest.addListener(_openRequested);
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  void _openRequested() {
+    final url = openPageRequest.value;
+    if (url == null || url.isEmpty) return;
+    final existing = _tabs.tabs.where((t) => t.url == url).firstOrNull;
+    if (existing != null) {
+      _tabs.select(existing.id);
+    } else {
+      _newTab(url: url);
+    }
+  }
+
+  void _newTab({String? url, int? windowId}) {
+    if (_disposing) return;
+    _tabs.add(url: url, windowId: windowId);
+  }
+
+  void _closeTab(int id) {
+    if (_disposing) return;
+    _tabs.close(id);
+    _pages.remove(id);
+  }
+
+  void _showTabs() {
+    showBrowserTabs(
+      context,
+      _tabs,
+      onNewTab: () => _newTab(),
+      onClose: _closeTab,
+    );
+  }
+
+  void _updateWork() {
+    if (_disposing) return;
+    KeepAwake.set(
+      _pages.values.any((key) => KeepAwake.needed(key.currentState?._session)),
+    );
+  }
+
+  @override
+  void dispose() {
+    _disposing = true;
+    openPageRequest.removeListener(_openRequested);
+    _tabs.dispose();
+    KeepAwake.set(false);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_tabs.selected.canGoBack && _tabs.tabs.length == 1,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final tab = _tabs.selected;
+        if (tab.canGoBack) {
+          await _pages[tab.id]?.currentState?._web?.goBack();
+        } else if (_tabs.tabs.length > 1) {
+          _closeTab(tab.id);
+        }
+      },
+      child: IndexedStack(
+        index: _tabs.selectedIndex,
+        children: [
+          for (final tab in _tabs.tabs)
+            _BrowserTabView(
+              key: _pages.putIfAbsent(
+                tab.id,
+                () => GlobalKey<_BrowserTabViewState>(),
+              ),
+              tab: tab,
+              active: tab.id == _tabs.selected.id,
+              tabCount: _tabs.tabs.length,
+              onTabs: _showTabs,
+              onNewTab: _newTab,
+              onClose: () => _closeTab(tab.id),
+              onPage: ({url, title, canGoBack}) {
+                if (_disposing) return;
+                _tabs.update(
+                  tab.id,
+                  url: url,
+                  title: title,
+                  canGoBack: canGoBack,
+                );
+              },
+              onWork: _updateWork,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserTabView extends StatefulWidget {
+  const _BrowserTabView({
+    super.key,
+    required this.tab,
+    required this.active,
+    required this.tabCount,
+    required this.onTabs,
+    required this.onNewTab,
+    required this.onClose,
+    required this.onPage,
+    required this.onWork,
+  });
+
+  final BrowserTab tab;
+  final bool active;
+  final int tabCount;
+  final VoidCallback onTabs;
+  final void Function({String? url, int? windowId}) onNewTab;
+  final VoidCallback onClose;
+  final void Function({String? url, String? title, bool? canGoBack}) onPage;
+  final VoidCallback onWork;
+
+  @override
+  State<_BrowserTabView> createState() => _BrowserTabViewState();
+}
+
+class _BrowserTabViewState extends State<_BrowserTabView> {
   final _address = TextEditingController();
   final _addressFocus = FocusNode();
   InAppWebViewController? _web;
   double _loading = 0;
+  bool _canBack = false;
+  bool _canForward = false;
+  bool _panelHidden = false;
+  bool _appliedAdBlock = appSettings.adBlock;
+  int _historyRequest = 0;
+  DateTime _lastBackgroundPause = DateTime(0);
 
   WebVideo? _video;
   DateTime _lastReport = DateTime(0);
@@ -160,7 +303,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     AppLog.i('web', 'Mở ${AppLog.url(url)}');
     _slowLoad?.cancel();
     _slowLoad = Timer(const Duration(seconds: 15), () {
-      if (!mounted || _loading >= 1) return;
+      if (!mounted || !widget.active || _loading >= 1) return;
       AppLog.i(
         'web',
         'Trang tải quá 15 giây (${(_loading * 100).round()}%), '
@@ -199,6 +342,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Future<void> _toggleAdBlock() async {
     final on = !appSettings.adBlock;
+    _appliedAdBlock = on;
     appSettings.setAdBlock(on);
     setState(() {});
     final web = _web;
@@ -219,7 +363,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   /// Tells the user something was stopped and lets them open it anyway,
   /// because a real link to another site looks the same as an advert.
   void _onBlocked(String url) {
-    if (!mounted) return;
+    if (!mounted || !widget.active) return;
     final now = DateTime.now();
     if (now.difference(_lastBlockNotice) < const Duration(seconds: 2)) return;
     _lastBlockNotice = now;
@@ -241,8 +385,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           action: canOpen
               ? SnackBarAction(
                   label: 'Vẫn mở',
-                  onPressed: () =>
-                      _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url))),
+                  onPressed: () => widget.onNewTab(url: url),
                 )
               : null,
         ),
@@ -252,16 +395,62 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void initState() {
     super.initState();
+    _pageUrl = widget.tab.initialUrl;
+    _address.text = _pageUrl;
     appSettings.addListener(_onSettings);
-    openPageRequest.addListener(_openRequested);
   }
 
-  void _openRequested() {
-    final url = openPageRequest.value;
-    if (url == null || url.isEmpty) return;
-    AppLog.i('web', 'Mở lại trang từ kho phụ đề: ${AppLog.url(url)}');
-    _address.text = url;
-    _go(url);
+  @override
+  void didUpdateWidget(covariant _BrowserTabView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active && !widget.active) {
+      _addressFocus.unfocus();
+      _pauseBackground();
+    } else if (!oldWidget.active && widget.active) {
+      _web?.evaluateJavascript(
+        source:
+            'window.__vsubSend && window.__vsubSend({"__vsub":"background","value":false});',
+      );
+      _refreshHistory();
+    }
+  }
+
+  void _pauseBackground() {
+    _lastBackgroundPause = DateTime.now();
+    // Pause all frames, including players the app has not selected yet.
+    _web?.evaluateJavascript(
+      source:
+          'window.__vsubSend && window.__vsubSend({"__vsub":"background","value":true});',
+    );
+  }
+
+  Future<void> _refreshHistory() async {
+    final request = ++_historyRequest;
+    WebHistory? history;
+    try {
+      history = await _web?.getCopyBackForwardList();
+    } catch (e) {
+      if (mounted) AppLog.i('web', 'Chưa đọc được lịch sử tab: $e');
+      return;
+    }
+    if (!mounted || request != _historyRequest || history == null) return;
+    final index = history.currentIndex ?? 0;
+    final count = history.list?.length ?? 0;
+    setState(() {
+      _canBack = index > 0;
+      _canForward = index < count - 1;
+    });
+    widget.onPage(canGoBack: _canBack);
+  }
+
+  Future<void> _showHistory() async {
+    final web = _web;
+    final history = await web?.getCopyBackForwardList();
+    if (!mounted || !widget.active || web == null) return;
+    final item = await showBrowserHistory(context, history ?? WebHistory());
+    if (item == null || !mounted || !widget.active) return;
+    await web.goTo(historyItem: item);
+    await _refreshHistory();
   }
 
   SubtitleMode get _mode =>
@@ -269,6 +458,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   /// Style changes show at once on the page.
   void _onSettings() {
+    if (_appliedAdBlock != appSettings.adBlock) {
+      _appliedAdBlock = appSettings.adBlock;
+      unawaited(_syncAdBlock());
+    }
     _session?.mode = _mode;
     if (_session != null || _fileCues != null) {
       _send(appSettings.subtitleOpts);
@@ -276,14 +469,31 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _syncAdBlock() async {
+    final web = _web;
+    if (web == null) return;
+    try {
+      await web.removeAllUserScripts();
+      if (!mounted) return;
+      await web.addUserScripts(userScripts: _userScripts());
+      _settings.contentBlockers = appSettings.adBlock ? adBlockRules() : [];
+      await web.setSettings(settings: _settings);
+    } catch (e) {
+      if (mounted) {
+        AppLog.e('web', 'Không cập nhật được chặn quảng cáo cho tab: $e');
+      }
+    }
+  }
+
   @override
   void dispose() {
-    KeepAwake.set(false);
     appSettings.removeListener(_onSettings);
-    openPageRequest.removeListener(_openRequested);
     _slowLoad?.cancel();
+    ActiveWork.end(_session);
     _saver?.close();
     _session?.dispose();
+    _session = null;
+    widget.onWork();
     _address.dispose();
     _addressFocus.dispose();
     super.dispose();
@@ -314,6 +524,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _onReport(Object? message) {
+    if (!widget.active) {
+      if (DateTime.now().difference(_lastBackgroundPause) >
+          const Duration(seconds: 1)) {
+        _pauseBackground();
+      }
+      return;
+    }
+    final wasVisible = _videoVisible;
     final report = WebVideo.fromMessage(message);
     if (report == null || !mounted) return;
     // Every frame with a video reports; adverts too. Keep the latest of
@@ -377,7 +595,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         video.duration >= WatchPosition.minDuration) {
       _autoForPage(video);
     }
-    if (changed) setState(() {});
+    if (changed || !wasVisible) setState(() {});
   }
 
   /// The film itself, not an advert, is playing on this page: bring
@@ -390,7 +608,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       final id = SubtitleStore.idFor(page);
       final saved = await SubtitleStore.load(id);
       final resume = await WatchPosition.load(id, duration: video.duration);
-      if (!mounted || page != _pageUrl) return;
+      if (!mounted || !widget.active || page != _pageUrl) return;
       _autoPage = page;
       if (resume != null && video.time < 10) _offerResume(resume);
       if (saved == null || saved.cues.isEmpty) return;
@@ -719,12 +937,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _onSession() {
-    KeepAwake.update(_session);
+    widget.onWork();
     if (mounted) setState(() {});
   }
 
   void _stopSubtitles() {
-    KeepAwake.set(false);
     _hidden = false;
     _ackLogged = false;
     ActiveWork.end(_session);
@@ -742,6 +959,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _fileCues = null;
       _fileOffset = 0;
     });
+    widget.onWork();
   }
 
   void _setSpeed(double speed) {
@@ -789,7 +1007,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     // big, with only a small subtitle control in the corner.
     final landscape =
         MediaQuery.orientationOf(context) == Orientation.landscape;
-    if (landscape != _landscape) {
+    if (widget.active && landscape != _landscape) {
       _landscape = landscape;
       SystemChrome.setEnabledSystemUIMode(
         landscape ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
@@ -805,112 +1023,38 @@ class _BrowserScreenState extends State<BrowserScreen> {
             LinearProgressIndicator(value: _loading, minHeight: 2),
           Expanded(
             child: Stack(
+              fit: StackFit.expand,
               children: [
-                InAppWebView(
-                  // Google as the home page, so searching works at once.
-                  initialUrlRequest: URLRequest(url: WebUri(kHomePage)),
-                  initialSettings: _settings,
-                  initialUserScripts: _scripts,
-                  // Without this the web view loads every pop-up over the
-                  // page being watched.
-                  onCreateWindow: (_, action) async {
-                    final target = action.request.url;
-                    if (!appSettings.adBlock) return false;
-                    final page = await _web?.getUrl();
-                    if (!shouldBlockPopup(target, page)) return false;
-                    _onBlocked('${target ?? ''}');
-                    return true;
-                  },
-                  onWebViewCreated: (c) {
-                    _web = c;
-                    c.addJavaScriptHandler(
-                      handlerName: 'vsub',
-                      callback: (args) =>
-                          _onReport(args.isEmpty ? null : args.first),
-                    );
-                    c.addJavaScriptHandler(
-                      handlerName: 'vsubPopup',
-                      callback: (args) =>
-                          _onBlocked(args.isEmpty ? '' : '${args.first}'),
-                    );
-                  },
-                  onLoadStart: (_, url) {
-                    // A new page: whatever video we knew about is gone.
-                    if (_session != null || _fileCues != null) {
-                      _stopSubtitles();
-                    }
-                    setState(() => _video = null);
-                    _onLoadStart('${url ?? ''}');
-                  },
-                  onLoadStop: (_, url) {
-                    if (_speed != 1) _send({'__vsub': 'rate', 'v': _speed});
-                    _onLoadStop('${url ?? ''}');
-                  },
-                  onReceivedError: (_, request, error) {
-                    if (request.isForMainFrame != true) return;
-                    final cancelled =
-                        error.type == WebResourceErrorType.CANCELLED ||
-                        error.description.contains('error -999') ||
-                        error.description.contains('code=102');
-                    if (cancelled) {
-                      AppLog.i(
-                        'web',
-                        'Yêu cầu trang bị hủy/chuyển hướng: ${AppLog.url('${request.url}')}',
-                      );
-                      return;
-                    }
-                    _slowLoad?.cancel();
-                    AppLog.e(
-                      'web',
-                      'Không tải được ${AppLog.url('${request.url}')}: '
-                          '${error.type} ${error.description}',
-                    );
-                    if (mounted) {
-                      toast(
-                        context,
-                        'Không tải được trang: ${error.type}. Thử tải lại hoặc kiểm tra mạng.',
-                      );
-                    }
-                  },
-                  onReceivedHttpError: (_, request, response) {
-                    if (request.isForMainFrame != true) return;
-                    AppLog.e(
-                      'web',
-                      'Máy chủ trả lỗi ${response.statusCode} cho '
-                          '${AppLog.url('${request.url}')}',
-                    );
-                    if (mounted) {
-                      toast(
-                        context,
-                        'Trang web trả lỗi ${response.statusCode}',
-                      );
-                    }
-                  },
-                  // iOS kills a page that uses too much memory and leaves it
-                  // blank; load it again.
-                  onWebContentProcessDidTerminate: (c) {
-                    AppLog.e('web', 'iOS đã tắt trang (thiếu bộ nhớ), tải lại');
-                    c.reload();
-                  },
-                  onProgressChanged: (_, p) =>
-                      setState(() => _loading = p / 100),
-                  onUpdateVisitedHistory: (_, url, _) {
-                    if (url != null && url.toString() != 'about:blank') {
-                      _address.text = url.toString();
-                      _pageUrl = url.toString();
-                      _checkBookmark();
-                    }
-                  },
-                ),
-                if (_videoVisible && !landscape)
+                _webView,
+                if (_videoVisible && !_panelHidden && !landscape)
                   Positioned(
                     left: 8,
                     right: 8,
                     bottom: 8,
                     child: _videoPanel(),
                   ),
-                if (_videoVisible && landscape)
+                if (_videoVisible && !_panelHidden && landscape)
                   Positioned(top: 8, right: 8, child: _compactPanel()),
+                if (_videoVisible && _panelHidden)
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: IconButton.filledTonal(
+                      tooltip: 'Hiện thanh video',
+                      icon: const Icon(Icons.video_settings),
+                      onPressed: () => setState(() => _panelHidden = false),
+                    ),
+                  ),
+                if (landscape)
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: IconButton.filledTonal(
+                      tooltip: 'Các tab đang mở',
+                      icon: const Icon(Icons.tab),
+                      onPressed: widget.onTabs,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -918,6 +1062,117 @@ class _BrowserScreenState extends State<BrowserScreen> {
       ),
     );
   }
+
+  // Keep the platform view instance stable while tab labels and controls rebuild.
+  late final Widget _webView = _buildWebView();
+
+  Widget _buildWebView() => InAppWebView(
+    // Google as the home page, so searching works at once.
+    windowId: widget.tab.windowId,
+    initialUrlRequest: widget.tab.windowId == null
+        ? URLRequest(url: WebUri(widget.tab.initialUrl))
+        : null,
+    initialSettings: _settings,
+    initialUserScripts: _scripts,
+    // Without this the web view loads every pop-up over the
+    // page being watched.
+    onCreateWindow: (_, action) async {
+      final target = action.request.url;
+      if (!widget.active) return false;
+      final page = await _web?.getUrl();
+      if (!mounted || !widget.active) return false;
+      // Pop-unders fire on the very tap that starts the film, so a tap does
+      // not make another site's window welcome. It is stopped with a "Vẫn
+      // mở" offer (a new tab); windows of the same site open as tabs.
+      if (appSettings.adBlock && shouldBlockPopup(target, page)) {
+        _onBlocked('${target ?? ''}');
+        return false;
+      }
+      widget.onNewTab(url: target?.toString(), windowId: action.windowId);
+      return true;
+    },
+    onCloseWindow: (_) => widget.onClose(),
+    onWebViewCreated: (c) {
+      _web = c;
+      c.addJavaScriptHandler(
+        handlerName: 'vsub',
+        callback: (args) => _onReport(args.isEmpty ? null : args.first),
+      );
+      c.addJavaScriptHandler(
+        handlerName: 'vsubPopup',
+        callback: (args) => _onBlocked(args.isEmpty ? '' : '${args.first}'),
+      );
+    },
+    onLoadStart: (_, url) {
+      // A new page: whatever video we knew about is gone.
+      if (_session != null || _fileCues != null) {
+        _stopSubtitles();
+      }
+      setState(() => _video = null);
+      _onLoadStart('${url ?? ''}');
+      widget.onPage(url: url?.toString(), title: '');
+    },
+    onLoadStop: (_, url) {
+      if (_speed != 1) _send({'__vsub': 'rate', 'v': _speed});
+      _onLoadStop('${url ?? ''}');
+      _refreshHistory();
+      if (!widget.active) _pauseBackground();
+    },
+    onTitleChanged: (_, title) => widget.onPage(title: title ?? ''),
+    onReceivedError: (_, request, error) {
+      if (request.isForMainFrame != true) return;
+      final cancelled =
+          error.type == WebResourceErrorType.CANCELLED ||
+          error.description.contains('error -999') ||
+          error.description.contains('code=102');
+      if (cancelled) {
+        AppLog.i(
+          'web',
+          'Yêu cầu trang bị hủy/chuyển hướng: ${AppLog.url('${request.url}')}',
+        );
+        return;
+      }
+      _slowLoad?.cancel();
+      AppLog.e(
+        'web',
+        'Không tải được ${AppLog.url('${request.url}')}: '
+            '${error.type} ${error.description}',
+      );
+      if (mounted && widget.active) {
+        toast(
+          context,
+          'Không tải được trang: ${error.type}. Thử tải lại hoặc kiểm tra mạng.',
+        );
+      }
+    },
+    onReceivedHttpError: (_, request, response) {
+      if (request.isForMainFrame != true) return;
+      AppLog.e(
+        'web',
+        'Máy chủ trả lỗi ${response.statusCode} cho '
+            '${AppLog.url('${request.url}')}',
+      );
+      if (mounted && widget.active) {
+        toast(context, 'Trang web trả lỗi ${response.statusCode}');
+      }
+    },
+    // iOS kills a page that uses too much memory and leaves it
+    // blank; load it again.
+    onWebContentProcessDidTerminate: (c) {
+      AppLog.e('web', 'iOS đã tắt trang (thiếu bộ nhớ), tải lại');
+      c.reload();
+    },
+    onProgressChanged: (_, p) => setState(() => _loading = p / 100),
+    onUpdateVisitedHistory: (_, url, _) {
+      if (url != null && url.toString() != 'about:blank') {
+        _address.text = url.toString();
+        _pageUrl = url.toString();
+        _checkBookmark();
+        widget.onPage(url: url.toString());
+      }
+      _refreshHistory();
+    },
+  );
 
   bool _landscape = false;
 
@@ -933,11 +1188,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            IconButton(
+              tooltip: 'Ẩn thanh video',
+              color: Colors.white,
+              icon: const Icon(Icons.expand_less),
+              onPressed: () => setState(() => _panelHidden = true),
+            ),
             if (session != null)
-              ActivityIcon(
-                session: session,
-                title: ActiveWork.current.value?.title ?? '',
-              ),
+              ActivityIcon(session: session, title: widget.tab.label),
             IconButton(
               tooltip: 'Lùi 10 giây',
               color: Colors.white,
@@ -1049,15 +1307,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
     await _web?.reload();
   }
 
+  Widget _navigationButton({required bool forward}) {
+    final enabled = forward ? _canForward : _canBack;
+    return Tooltip(
+      message: forward
+          ? 'Đi tới (giữ để xem lịch sử)'
+          : 'Quay lại (giữ để xem lịch sử)',
+      triggerMode: TooltipTriggerMode.manual,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onLongPress: _showHistory,
+        onTap: !enabled
+            ? null
+            : () {
+                forward ? _web?.goForward() : _web?.goBack();
+              },
+        child: SizedBox(
+          width: 40,
+          height: 48,
+          child: Icon(
+            forward ? Icons.arrow_forward_ios : Icons.arrow_back_ios_new,
+            size: 18,
+            color: enabled ? null : Theme.of(context).disabledColor,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _addressBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
       child: Row(
         children: [
-          IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-            onPressed: () => _web?.goBack(),
-          ),
+          _navigationButton(forward: false),
+          _navigationButton(forward: true),
           Expanded(
             child: TextField(
               controller: _address,
@@ -1113,10 +1397,28 @@ class _BrowserScreenState extends State<BrowserScreen> {
             onPressed: _toggleBookmark,
           ),
           IconButton(
+            tooltip: 'Các tab đang mở',
             visualDensity: VisualDensity.compact,
-            tooltip: 'Tải lại',
-            icon: const Icon(Icons.refresh, size: 20),
-            onPressed: () => _web?.reload(),
+            icon: Container(
+              width: 25,
+              height: 25,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.onSurface,
+                  width: 1.5,
+                ),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                '${widget.tabCount}',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            onPressed: widget.onTabs,
           ),
           PopupMenuButton<String>(
             tooltip: 'Thêm',
@@ -1132,9 +1434,54 @@ class _BrowserScreenState extends State<BrowserScreen> {
               'save' => _toggleBookmark(),
               'bookmarks' => _openBookmarks(),
               'clear' => _clearWebData(),
+              'newtab' => widget.onNewTab(),
+              'duplicate' => widget.onNewTab(url: _pageUrl),
+              'history' => _showHistory(),
+              'reload' => _web?.reload(),
+              'panel' => setState(() => _panelHidden = !_panelHidden),
               _ => null,
             },
             itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'newtab',
+                child: ListTile(
+                  leading: Icon(Icons.add),
+                  title: Text('Tab mới'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'duplicate',
+                child: ListTile(
+                  leading: Icon(Icons.open_in_new),
+                  title: Text('Mở trang này trong tab mới'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'history',
+                child: ListTile(
+                  leading: Icon(Icons.history),
+                  title: Text('Lịch sử tab…'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'reload',
+                child: ListTile(
+                  leading: Icon(Icons.refresh),
+                  title: Text('Tải lại'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'panel',
+                child: ListTile(
+                  leading: Icon(
+                    _panelHidden ? Icons.visibility : Icons.visibility_off,
+                  ),
+                  title: Text(
+                    _panelHidden ? 'Hiện thanh video' : 'Ẩn thanh video',
+                  ),
+                ),
+              ),
+              const PopupMenuDivider(),
               PopupMenuItem(
                 value: 'save',
                 child: ListTile(
@@ -1265,10 +1612,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               Row(
                 children: [
                   if (session != null) ...[
-                    ActivityIcon(
-                      session: session,
-                      title: ActiveWork.current.value?.title ?? '',
-                    ),
+                    ActivityIcon(session: session, title: widget.tab.label),
                     const SizedBox(width: 8),
                   ],
                   Expanded(
@@ -1285,6 +1629,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         if (session != null) ..._progress(session, video),
                       ],
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Ẩn thanh video',
+                    icon: const Icon(Icons.expand_more),
+                    onPressed: () => setState(() => _panelHidden = true),
                   ),
                 ],
               ),

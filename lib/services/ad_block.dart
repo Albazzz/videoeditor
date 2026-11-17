@@ -134,6 +134,8 @@ const String kAdBlockScript = r'''
   var realOpen = window.open;
   window.open = function (u) {
     // An empty window that is filled in later is the classic pop-under.
+    // A click does not make another site safe: pop-unders fire on the very
+    // click that starts the film. The app offers "Vẫn mở" (new tab) instead.
     if (!u || u === 'about:blank' || otherSite(u)) {
       report(u);
       return null;
@@ -146,6 +148,7 @@ const String kAdBlockScript = r'''
     if (!a) return;
     var t = (a.getAttribute('target') || '').toLowerCase();
     if (t === '' || t === '_self' || t === '_top' || t === '_parent') return;
+    // Invisible links laid over the player are real taps too.
     if (otherSite(a.href)) {
       ev.preventDefault();
       ev.stopPropagation();

@@ -17,14 +17,19 @@ class ActiveWork {
   final SubtitleSession session;
 
   static final current = ValueNotifier<ActiveWork?>(null);
+  static final _running = <SubtitleSession, ActiveWork>{};
 
-  static void begin(String id, String title, SubtitleSession session) =>
-      current.value = ActiveWork(id: id, title: title, session: session);
+  static void begin(String id, String title, SubtitleSession session) {
+    final work = ActiveWork(id: id, title: title, session: session);
+    _running[session] = work;
+    current.value = work;
+  }
 
-  /// Clears the record if it is still about [session].
+  /// Removes this session and shows another tab's work if any remains.
   static void end(SubtitleSession? session) {
+    _running.remove(session);
     if (session != null && current.value?.session == session) {
-      current.value = null;
+      current.value = _running.values.lastOrNull;
     }
   }
 }

@@ -108,6 +108,10 @@ const String kPageScript = r'''
 (function () {
   if (window.__vsub) return;
   window.__vsub = true;
+  var background = false;
+  document.addEventListener('play', function (ev) {
+    if (background && ev.target && ev.target.pause) ev.target.pause();
+  }, true);
 
   // On pages that feed the player through a blob, remember the playlist.
   var playlist = '';
@@ -300,6 +304,10 @@ const String kPageScript = r'''
   }
 
   function handle(d) {
+    if (d.__vsub === 'background') {
+      background = !!d.value;
+      if (background) document.querySelectorAll('video,audio').forEach(function (m) { m.pause(); });
+    }
     var v = pick();
     // Pages often hold adverts in other frames: commands are for the one
     // video the app chose ("target"), except clearing, which is for all.
