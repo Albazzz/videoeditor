@@ -87,6 +87,20 @@ class AppSettings extends ChangeNotifier {
     openRouterModel =
         prefs.getString('openRouterModel') ?? kDefaultOpenRouterModel;
     vercelModel = prefs.getString('vercelModel') ?? kVercel.defaultModel;
+    // The default became Mistral Small (Qwen on Alibaba's servers refuses
+    // adult content). Move whoever was still on an old default, once.
+    if (prefs.getBool('defaultModels2') != true) {
+      if (openRouterModel == 'qwen/qwen3.7-flash') {
+        openRouterModel = kDefaultOpenRouterModel;
+        await prefs.setString('openRouterModel', openRouterModel);
+      }
+      if (vercelModel == 'mistral/mistral-nemo' ||
+          vercelModel == 'alibaba/qwen3.7-flash') {
+        vercelModel = kVercel.defaultModel;
+        await prefs.setString('vercelModel', vercelModel);
+      }
+      await prefs.setBool('defaultModels2', true);
+    }
     try {
       openRouterKey = await _secure.read(key: 'openrouter_key') ?? '';
       vercelKey = await _secure.read(key: 'vercel_key') ?? '';

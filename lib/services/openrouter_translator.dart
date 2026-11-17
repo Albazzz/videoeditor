@@ -18,6 +18,11 @@ class OpenRouterModel {
 
 const kOpenRouterModels = [
   OpenRouterModel(
+    'mistralai/mistral-small-3.2-24b-instruct',
+    'Mistral Small 3.2',
+    'Mặc định: ít bị chặn nội dung, dịch Trung/Nhật khá · ~300đ một phim',
+  ),
+  OpenRouterModel(
     'qwen/qwen3.7-flash',
     'Qwen 3.7 Flash',
     'Rẻ nhất, giỏi tiếng Trung/Nhật · ~150đ một phim',
@@ -44,11 +49,16 @@ const kOpenRouterModels = [
   ),
 ];
 
-const kDefaultOpenRouterModel = 'qwen/qwen3.7-flash';
+const kDefaultOpenRouterModel = 'mistralai/mistral-small-3.2-24b-instruct';
 
 /// Prices as listed by Vercel AI Gateway in November 2026. The first is
 /// the default.
 const kVercelModels = [
+  OpenRouterModel(
+    'mistral/mistral-small',
+    'Mistral Small',
+    'Mặc định: ít bị chặn nội dung, dịch Trung/Nhật khá · ~600đ một phim',
+  ),
   OpenRouterModel(
     'mistral/mistral-nemo',
     'Mistral Nemo',
