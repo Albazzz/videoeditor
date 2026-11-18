@@ -1,5 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// A page the user saved to come back to.
@@ -9,6 +14,7 @@ class Bookmark {
     required this.title,
     required this.added,
     this.folder = '',
+    this.thumb = '',
   });
 
   final String url;
@@ -16,10 +22,15 @@ class Bookmark {
   final DateTime added;
   final String folder;
 
-  Bookmark copyWith({String? title, String? folder}) => Bookmark(
+  /// File name of a small picture of the page (in [Bookmarks.thumbDir]),
+  /// or empty.
+  final String thumb;
+
+  Bookmark copyWith({String? title, String? folder, String? thumb}) => Bookmark(
     url: url,
     title: title ?? this.title,
     folder: folder ?? this.folder,
+    thumb: thumb ?? this.thumb,
     added: added,
   );
 
@@ -35,6 +46,7 @@ class Bookmark {
     'folder': folder,
     'title': title,
     'added': added.millisecondsSinceEpoch,
+    if (thumb.isNotEmpty) 'thumb': thumb,
   };
 
   static Bookmark? fromJson(Object? j) {
@@ -43,6 +55,7 @@ class Bookmark {
       url: j['url'] as String,
       folder: j['folder'] as String? ?? '',
       title: (j['title'] as String?) ?? '',
+      thumb: j['thumb'] as String? ?? '',
       added: DateTime.fromMillisecondsSinceEpoch((j['added'] as int?) ?? 0),
     );
   }
@@ -131,20 +144,55 @@ class Bookmarks {
     return true;
   }
 
-  static Future<Bookmark> add(String url, String title) =>
-      _change((prefs) async {
-        final all = await load();
-        all.removeWhere((b) => key(b.url) == key(url));
-        final last = prefs.getString('lastBookmarkFolder') ?? '';
-        final bookmark = Bookmark(
-          url: url,
-          title: title,
-          added: DateTime.now(),
-          folder: (await folders()).contains(last) ? last : '',
-        );
-        await _write([bookmark, ...all]);
-        return bookmark;
-      });
+  /// The folder chosen last, offered first when saving the next page.
+  static Future<String> lastFolder() async {
+    final prefs = await SharedPreferences.getInstance();
+    final last = prefs.getString('lastBookmarkFolder') ?? '';
+    return (await folders()).contains(last) ? last : '';
+  }
+
+  /// Saves [url] into [folder] (the user picks it; '' = top level).
+  static Future<Bookmark> add(
+    String url,
+    String title, {
+    String folder = '',
+    String thumb = '',
+  }) => _change((prefs) async {
+    final all = await load();
+    all.removeWhere((b) => key(b.url) == key(url));
+    final known = folder.isEmpty || (await folders()).contains(folder);
+    final bookmark = Bookmark(
+      url: url,
+      title: title.trim(),
+      added: DateTime.now(),
+      folder: known ? folder : '',
+      thumb: thumb,
+    );
+    await _write([bookmark, ...all]);
+    await prefs.setString('lastBookmarkFolder', bookmark.folder);
+    return bookmark;
+  });
+
+  /// Where page pictures are kept. Null where there is no file system
+  /// path (tests).
+  static Future<Directory?> thumbDir() async {
+    try {
+      final base = await getApplicationSupportDirectory();
+      return Directory(p.join(base.path, 'bookmark_thumbs'))
+        ..createSync(recursive: true);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Stores a small picture of [url]'s page; returns its file name.
+  static Future<String> saveThumb(String url, Uint8List jpeg) async {
+    final dir = await thumbDir();
+    if (dir == null || jpeg.isEmpty) return '';
+    final name = '${sha1.convert(utf8.encode(key(url)))}.jpg';
+    await File(p.join(dir.path, name)).writeAsBytes(jpeg, flush: true);
+    return name;
+  }
 
   static Future<void> rename(String url, String title) =>
       update(url, title: title);
@@ -167,8 +215,17 @@ class Bookmarks {
 
   static Future<void> remove(String url) => _change((prefs) async {
     final all = await load();
+    final gone = all.where((b) => key(b.url) == key(url)).toList();
     all.removeWhere((b) => key(b.url) == key(url));
     await _write(all);
+    for (final b in gone) {
+      if (b.thumb.isEmpty) continue;
+      final dir = await thumbDir();
+      final file = dir == null ? null : File(p.join(dir.path, b.thumb));
+      try {
+        if (file != null && file.existsSync()) file.deleteSync();
+      } catch (_) {}
+    }
   });
 
   static Future<bool> contains(String url) async =>

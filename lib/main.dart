@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'screens/browser_screen.dart';
-import 'screens/library_screen.dart';
+import 'screens/saved_pages_screen.dart';
 import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/subtitle_library_screen.dart';
@@ -124,6 +124,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Bumped on every visit so the subtitle list reloads.
   int _subsVisit = 0;
+  int _savedVisit = 0;
 
   @override
   void initState() {
@@ -188,7 +189,9 @@ class _HomeScreenState extends State<HomeScreen> {
         index: _tab,
         children: [
           const BrowserScreen(),
-          const LibraryScreen(),
+          // Watching on the web works well now; saved pages are what is
+          // reached for. The video library sits in Settings.
+          SavedPagesScreen(key: ValueKey(_savedVisit)),
           SubtitleLibraryScreen(key: ValueKey(_subsVisit)),
           const SettingsScreen(),
         ],
@@ -203,6 +206,7 @@ class _HomeScreenState extends State<HomeScreen> {
               selectedIndex: _tab,
               onDestinationSelected: (i) => setState(() {
                 if (i == 2 && _tab != 2) _subsVisit++;
+                if (i == 1 && _tab != 1) _savedVisit++;
                 _tab = i;
               }),
               destinations: const [
@@ -211,8 +215,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   label: 'Xem web',
                 ),
                 NavigationDestination(
-                  icon: Icon(Icons.video_library_outlined),
-                  label: 'Thư viện',
+                  icon: Icon(Icons.bookmarks_outlined),
+                  label: 'Trang lưu',
                 ),
                 NavigationDestination(
                   icon: Icon(Icons.subtitles_outlined),

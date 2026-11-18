@@ -268,23 +268,35 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       await Bookmarks.remove(page);
       if (mounted) toast(context, 'Đã bỏ lưu trang');
     } else {
-      final bookmark = await Bookmarks.add(page, title);
+      // Ask where it goes; nothing is filed away without the user's say.
+      final place = await askBookmarkPlace(context, title);
+      if (place == null || !mounted) return;
+      final (name, folder) = place;
+      // A small picture of the page for the saved-pages list.
+      var thumb = '';
+      try {
+        final shot = await _web?.takeScreenshot(
+          screenshotConfiguration: ScreenshotConfiguration(
+            compressFormat: CompressFormat.JPEG,
+            quality: 60,
+            snapshotWidth: 320,
+          ),
+        );
+        if (shot != null) thumb = await Bookmarks.saveThumb(page, shot);
+      } catch (e) {
+        AppLog.e('web', 'Không chụp được ảnh trang: $e');
+      }
+      final bookmark = await Bookmarks.add(
+        page,
+        name.isEmpty ? title : name,
+        folder: folder,
+        thumb: thumb,
+      );
       if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            SnackBar(
-              content: Text(
-                'Đã lưu vào ${bookmark.folder.isEmpty ? 'Ngoài cùng' : bookmark.folder}',
-              ),
-              action: SnackBarAction(
-                label: 'Đổi',
-                onPressed: () {
-                  if (mounted) editBookmark(context, bookmark);
-                },
-              ),
-            ),
-          );
+        toast(
+          context,
+          'Đã lưu vào ${bookmark.folder.isEmpty ? 'Ngoài cùng' : bookmark.folder}',
+        );
       }
     }
     await _checkBookmark();

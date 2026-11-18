@@ -1,4 +1,8 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../services/bookmarks.dart';
 
@@ -8,8 +12,89 @@ Future<String?> showBookmarks(BuildContext context) =>
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => const _BookmarksSheet(),
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.75,
+          child: BookmarksView(onOpen: (url) => Navigator.pop(context, url)),
+        ),
+      ),
     );
+
+/// Asks where to save a page before saving it: its name and a folder
+/// (with a way to make a new one). Returns (title, folder) or null.
+Future<(String, String)?> askBookmarkPlace(
+  BuildContext context,
+  String title,
+) async {
+  final folders = await Bookmarks.folders();
+  var folder = await Bookmarks.lastFolder();
+  if (!context.mounted) return null;
+  var name = title;
+  final result = await showDialog<(String, String)>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => AlertDialog(
+        title: const Text('Lưu trang vào đâu?'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              TextFormField(
+                initialValue: title,
+                decoration: const InputDecoration(labelText: 'Tên trang'),
+                onChanged: (v) => name = v,
+              ),
+              const SizedBox(height: 8),
+              RadioGroup<String>(
+                groupValue: folder,
+                onChanged: (v) => setState(() => folder = v ?? ''),
+                child: Column(
+                  children: [
+                    for (final f in ['', ...folders])
+                      RadioListTile<String>(
+                        contentPadding: EdgeInsets.zero,
+                        value: f,
+                        secondary: Icon(
+                          f.isEmpty ? Icons.star_outline : Icons.folder,
+                        ),
+                        title: Text(
+                          _folderName(f),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                icon: const Icon(Icons.create_new_folder_outlined),
+                label: const Text('Thư mục mới…'),
+                onPressed: () async {
+                  final made = await _askName(ctx, 'Thư mục mới');
+                  if (made == null || made.isEmpty) return;
+                  await Bookmarks.createFolder(made);
+                  if (!folders.contains(made)) folders.add(made);
+                  setState(() => folder = made);
+                },
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Huỷ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, (name.trim(), folder)),
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    ),
+  );
+  return result;
+}
 
 String _folderName(String folder) => folder.isEmpty ? 'Ngoài cùng' : folder;
 
@@ -102,14 +187,21 @@ Future<void> editBookmark(
   }
 }
 
-class _BookmarksSheet extends StatefulWidget {
-  const _BookmarksSheet();
+/// Saved pages grouped by folder, with search and editing. Used in the
+/// browser's sheet and as the "Trang lưu" tab.
+class BookmarksView extends StatefulWidget {
+  const BookmarksView({super.key, required this.onOpen});
+
+  /// A page was tapped.
+  final void Function(String url) onOpen;
+
   @override
-  State<_BookmarksSheet> createState() => _BookmarksSheetState();
+  State<BookmarksView> createState() => _BookmarksViewState();
 }
 
-class _BookmarksSheetState extends State<_BookmarksSheet> {
+class _BookmarksViewState extends State<BookmarksView> {
   List<Bookmark>? _all;
+  String? _thumbs;
   List<String> _folders = [];
   final _expanded = <String>{};
   String _filter = '';
@@ -123,11 +215,18 @@ class _BookmarksSheetState extends State<_BookmarksSheet> {
   Future<void> _load() async {
     final all = await Bookmarks.load();
     final folders = await Bookmarks.folders();
-    if (mounted) {
-      setState(() {
-        _all = all;
-        _folders = folders;
-      });
+    if (!mounted) return;
+    setState(() {
+      _all = all;
+      _folders = folders;
+    });
+    // The list shows at once; pictures follow when their folder is known.
+    if (_thumbs == null) {
+      unawaited(
+        Bookmarks.thumbDir().then((dir) {
+          if (mounted && dir != null) setState(() => _thumbs = dir.path);
+        }),
+      );
     }
   }
 
@@ -166,8 +265,28 @@ class _BookmarksSheetState extends State<_BookmarksSheet> {
     await _load();
   }
 
+  Widget _picture(Bookmark b) {
+    final dir = _thumbs;
+    final file = b.thumb.isEmpty || dir == null
+        ? null
+        : File(p.join(dir, b.thumb));
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: SizedBox(
+        width: 64,
+        height: 40,
+        child: file != null && file.existsSync()
+            ? Image.file(file, fit: BoxFit.cover, cacheWidth: 192)
+            : const ColoredBox(
+                color: Color(0x22FFC107),
+                child: Icon(Icons.star, color: Colors.amber),
+              ),
+      ),
+    );
+  }
+
   Widget _page(Bookmark b) => ListTile(
-    leading: const Icon(Icons.star, color: Colors.amber),
+    leading: _picture(b),
     title: Text(
       b.title.isEmpty ? b.host : b.title,
       maxLines: 2,
@@ -183,115 +302,111 @@ class _BookmarksSheetState extends State<_BookmarksSheet> {
         PopupMenuItem(value: 'remove', child: Text('Xoá')),
       ],
     ),
-    onTap: () => Navigator.pop(context, b.url),
+    onTap: () => widget.onOpen(b.url),
   );
 
   @override
   Widget build(BuildContext context) {
     final shown = _all?.where((b) => b.matches(_filter)).toList() ?? [];
     final searching = _filter.trim().isNotEmpty;
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.75,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Trang đã lưu',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Trang đã lưu',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  TextButton.icon(
-                    onPressed: () => _folderAction(null),
-                    icon: const Icon(Icons.create_new_folder_outlined),
-                    label: const Text('Thư mục mới'),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                decoration: const InputDecoration(
-                  hintText: 'Tìm tên, địa chỉ hoặc thư mục',
-                  prefixIcon: Icon(Icons.search),
                 ),
-                onChanged: (v) => setState(() => _filter = v),
-              ),
+                TextButton.icon(
+                  onPressed: () => _folderAction(null),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                  label: const Text('Thư mục mới'),
+                ),
+              ],
             ),
-            Expanded(
-              child: _all == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView(
-                      children: [
-                        for (final folder in _folders)
-                          if (!searching ||
-                              folder.toLowerCase().contains(
-                                _filter.trim().toLowerCase(),
-                              ) ||
-                              shown.any((b) => b.folder == folder)) ...[
-                            ListTile(
-                              leading: Icon(
-                                searching || _expanded.contains(folder)
-                                    ? Icons.folder_open
-                                    : Icons.folder,
-                              ),
-                              title: Text(folder),
-                              onTap: () => setState(() {
-                                if (!_expanded.remove(folder)) {
-                                  _expanded.add(folder);
-                                }
-                              }),
-                              trailing: PopupMenuButton<String>(
-                                tooltip: 'Sửa thư mục',
-                                onSelected: (v) => _folderAction(
-                                  folder,
-                                  delete: v == 'delete',
-                                ),
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                    value: 'rename',
-                                    child: Text('Đổi tên'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text('Xoá thư mục'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            if (searching || _expanded.contains(folder))
-                              for (final b in shown.where(
-                                (b) => b.folder == folder,
-                              ))
-                                _page(b),
-                          ],
-                        for (final b in shown.where((b) => b.folder.isEmpty))
-                          _page(b),
-                        if (shown.isEmpty &&
-                            (_folders.isEmpty ||
-                                searching &&
-                                    !_folders.any(
-                                      (f) => f.toLowerCase().contains(
-                                        _filter.trim().toLowerCase(),
-                                      ),
-                                    )))
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: 'Tìm tên, địa chỉ hoặc thư mục',
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (v) => setState(() => _filter = v),
+            ),
+          ),
+          Expanded(
+            child: _all == null
+                ? const Center(child: CircularProgressIndicator())
+                : ListView(
+                    children: [
+                      for (final folder in _folders)
+                        if (!searching ||
+                            folder.toLowerCase().contains(
+                              _filter.trim().toLowerCase(),
+                            ) ||
+                            shown.any((b) => b.folder == folder)) ...[
                           ListTile(
-                            title: Text(
-                              searching
-                                  ? 'Không tìm thấy trang'
-                                  : 'Chưa lưu trang nào',
+                            leading: Icon(
+                              searching || _expanded.contains(folder)
+                                  ? Icons.folder_open
+                                  : Icons.folder,
+                            ),
+                            title: Text(folder),
+                            onTap: () => setState(() {
+                              if (!_expanded.remove(folder)) {
+                                _expanded.add(folder);
+                              }
+                            }),
+                            trailing: PopupMenuButton<String>(
+                              tooltip: 'Sửa thư mục',
+                              onSelected: (v) =>
+                                  _folderAction(folder, delete: v == 'delete'),
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(
+                                  value: 'rename',
+                                  child: Text('Đổi tên'),
+                                ),
+                                PopupMenuItem(
+                                  value: 'delete',
+                                  child: Text('Xoá thư mục'),
+                                ),
+                              ],
                             ),
                           ),
-                      ],
-                    ),
-            ),
-          ],
-        ),
+                          if (searching || _expanded.contains(folder))
+                            for (final b in shown.where(
+                              (b) => b.folder == folder,
+                            ))
+                              _page(b),
+                        ],
+                      for (final b in shown.where((b) => b.folder.isEmpty))
+                        _page(b),
+                      if (shown.isEmpty &&
+                          (_folders.isEmpty ||
+                              searching &&
+                                  !_folders.any(
+                                    (f) => f.toLowerCase().contains(
+                                      _filter.trim().toLowerCase(),
+                                    ),
+                                  )))
+                        ListTile(
+                          title: Text(
+                            searching
+                                ? 'Không tìm thấy trang'
+                                : 'Chưa lưu trang nào',
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
+        ],
       ),
     );
   }

@@ -20,9 +20,11 @@ void main() {
       expect(await Bookmarks.createFolder('Trống'), true);
       await Bookmarks.rename(old.url, 'Mùa hè');
       await Bookmarks.move(old.url, 'Phim');
+      // The folder is chosen when saving; the last one is only offered.
+      expect(await Bookmarks.lastFolder(), 'Phim');
       final pages = await Future.wait([
-        Bookmarks.add('https://a.example', 'Tập A'),
-        Bookmarks.add('https://b.example', 'Tập B'),
+        Bookmarks.add('https://a.example', 'Tập A', folder: 'Phim'),
+        Bookmarks.add('https://b.example', 'Tập B', folder: 'Phim'),
       ]);
       expect(pages.every((p) => p.folder == 'Phim'), true);
       await Bookmarks.renameFolder('Phim', 'Yêu thích');
@@ -31,10 +33,21 @@ void main() {
       expect(renamed.matches('Trống'), false);
       expect(renamed.added, old.added);
       expect(await Bookmarks.folders(), ['Trống', 'Yêu thích']);
+      expect(await Bookmarks.lastFolder(), 'Yêu thích');
       expect(
-        (await Bookmarks.add('https://c.example', 'C')).folder,
+        (await Bookmarks.add(
+          'https://c.example',
+          'C',
+          folder: await Bookmarks.lastFolder(),
+        )).folder,
         'Yêu thích',
       );
+      expect(
+        (await Bookmarks.add('https://x.example', 'X')).folder,
+        '',
+        reason: 'nothing is filed away without being asked',
+      );
+      await Bookmarks.remove('https://x.example');
       await Bookmarks.deleteFolder('Yêu thích');
       final kept = await Bookmarks.load();
       expect(kept.length, 4);
@@ -102,5 +115,54 @@ void main() {
     await Bookmarks.remove('https://a.example/phim-1');
     expect((await Bookmarks.load()).map((b) => b.title), ['Phim 2']);
     expect(await Bookmarks.contains('https://a.example/phim-1'), isFalse);
+  });
+
+  testWidgets('saving asks for the name and folder first', (tester) async {
+    await Bookmarks.createFolder('Phim Trung');
+    (String, String)? picked;
+    var asked = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => TextButton(
+              onPressed: () async {
+                picked = await askBookmarkPlace(ctx, 'Tập 1');
+                asked = true;
+              },
+              child: const Text('Lưu'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Lưu'));
+    await tester.pumpAndSettle();
+    expect(find.text('Lưu trang vào đâu?'), findsOneWidget);
+    expect(find.text('Ngoài cùng'), findsOneWidget);
+    // A new folder can be made right there and is then chosen.
+    await tester.tap(find.text('Thư mục mới…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).last, 'Hàn');
+    await tester.tap(find.text('Lưu').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Hàn'), findsOneWidget);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Tập 1'),
+      'Tập 1 - bản đẹp',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Lưu'));
+    await tester.pumpAndSettle();
+    expect(picked, ('Tập 1 - bản đẹp', 'Hàn'));
+
+    // Cancelling saves nothing.
+    picked = null;
+    asked = false;
+    await tester.tap(find.text('Lưu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Huỷ'));
+    await tester.pumpAndSettle();
+    expect(asked, isTrue);
+    expect(picked, isNull);
   });
 }

@@ -4,6 +4,7 @@ import '../services/app_settings.dart';
 import '../services/model_store.dart';
 import '../widgets/common.dart';
 import 'downloads_screen.dart';
+import 'library_screen.dart';
 import 'log_screen.dart';
 import 'translation_settings_screen.dart';
 
@@ -157,6 +158,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             value: appSettings.showSource,
             onChanged: appSettings.setShowSource,
+          ),
+          ListTile(
+            leading: const Icon(Icons.video_library_outlined),
+            title: const Text('Thư viện video'),
+            subtitle: const Text('Video trong máy, kho ẩn, cắt và xuất video'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const LibraryScreen()),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.download_done),
