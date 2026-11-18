@@ -2,9 +2,13 @@ import '../models/cue.dart';
 import 'translator.dart';
 
 class CueRevision {
-  CueRevision(this.videoId, this.before, this.after);
+  CueRevision(this.videoId, this.before, this.after, {this.skipped = 0});
   final String videoId;
   final List<Cue> before, after;
+
+  /// Lines asked for that could not be translated (refused, missing from
+  /// the answer); they keep their current text.
+  final int skipped;
 
   List<Cue> apply(
     String targetVideoId,
@@ -57,20 +61,31 @@ class CueRevision {
       language,
       onProgress: onProgress,
     );
-    if (result.length != before.length ||
-        result.any((text) => text == null || text.trim().isEmpty)) {
-      throw StateError(
-        'Chưa dịch được đầy đủ các câu đã chọn. Bản cũ vẫn được giữ.',
-      );
-    }
-    return CueRevision(videoId, before, [
-      for (var i = 0; i < before.length; i++)
+    // A line the provider refuses must not throw away all the others:
+    // keep what was translated, leave the rest as it is.
+    final kept = <Cue>[];
+    final changed = <Cue>[];
+    for (var i = 0; i < before.length; i++) {
+      final text = i < result.length ? result[i]?.trim() : null;
+      if (text == null || text.isEmpty) continue;
+      kept.add(before[i]);
+      changed.add(
         Cue(
           start: before[i].start,
           end: before[i].end,
           source: before[i].source,
-          text: result[i]!,
+          text: text,
         ),
-    ]);
+      );
+    }
+    if (kept.isEmpty) {
+      throw StateError('Chưa dịch được câu nào. Bản cũ vẫn được giữ.');
+    }
+    return CueRevision(
+      videoId,
+      kept,
+      changed,
+      skipped: before.length - kept.length,
+    );
   }
 }

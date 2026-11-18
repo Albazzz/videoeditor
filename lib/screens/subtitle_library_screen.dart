@@ -364,7 +364,7 @@ class _SubtitleViewState extends State<_SubtitleView> {
     }
   }
 
-  Future<void> _revise({int? index}) async {
+  Future<void> _revise({int? index, bool onlyMissing = false}) async {
     final selected = index == null ? null : cues[index];
     final id = saved?.id ?? 'file:${widget.item!.file.absolute.path}';
     final language =
@@ -376,6 +376,7 @@ class _SubtitleViewState extends State<_SubtitleView> {
       language: language,
       initialIndex: index,
       initialCue: selected,
+      onlyMissing: onlyMissing,
       currentCues: () => List.of(ActiveWork.find(id)?.session.cues ?? cues),
       onApply: _storeCues,
     );
@@ -536,7 +537,8 @@ class _SubtitleViewState extends State<_SubtitleView> {
               ),
               actions: [
                 TextButton(
-                  onPressed: () => _revise(),
+                  // Only the lines that failed, never the whole film.
+                  onPressed: () => _revise(onlyMissing: true),
                   child: const Text('Dịch lại'),
                 ),
               ],

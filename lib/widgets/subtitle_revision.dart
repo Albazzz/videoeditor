@@ -14,6 +14,7 @@ Future<void> showSubtitleRevision(
   required Future<void> Function(List<Cue>) onApply,
   int? initialIndex,
   Cue? initialCue,
+  bool onlyMissing = false,
 }) => showModalBottomSheet<void>(
   context: context,
   isScrollControlled: true,
@@ -25,6 +26,7 @@ Future<void> showSubtitleRevision(
     onApply: onApply,
     initialIndex: initialIndex,
     initialCue: initialCue,
+    onlyMissing: onlyMissing,
   ),
 );
 
@@ -36,8 +38,12 @@ class _RevisionSheet extends StatefulWidget {
     required this.onApply,
     this.initialIndex,
     this.initialCue,
+    this.onlyMissing = false,
   });
   final String videoId, language;
+
+  /// Opened from "N câu chưa dịch": only those lines, never the rest.
+  final bool onlyMissing;
   final List<Cue> Function() currentCues;
   final Future<void> Function(List<Cue>) onApply;
   final int? initialIndex;
@@ -59,7 +65,21 @@ class _RevisionSheetState extends State<_RevisionSheet> {
   final _instruction = TextEditingController();
   late final _from = TextEditingController(text: '${(_initialIndex ?? 0) + 1}');
   late final _to = TextEditingController(text: '${(_initialIndex ?? 0) + 1}');
-  late String _scope = _initialIndex == null ? 'all' : 'one';
+  // Lines still in the original language (translation failed or timed
+  // out). Re-translating the whole film by mistake costs money and replaces
+  // good lines, so these come first when there are any.
+  static List<int> _missingIn(List<Cue> cues) => [
+    for (var i = 0; i < cues.length; i++)
+      if (cues[i].source.isNotEmpty && cues[i].text == cues[i].source) i,
+  ];
+  late final int _missingCount = _missingIn(_basis).length;
+  late String _scope = widget.onlyMissing
+      ? 'missing'
+      : _initialIndex != null
+      ? 'one'
+      : _missingCount > 0
+      ? 'missing'
+      : 'all';
   Translator? _translator;
   CueRevision? _draft;
   String? _error;
@@ -90,17 +110,29 @@ class _RevisionSheetState extends State<_RevisionSheet> {
       );
       return;
     }
-    final cues = List.of(_scope == 'all' ? widget.currentCues() : _basis);
-    final first = _scope == 'all' ? 0 : (int.tryParse(_from.text) ?? 0) - 1;
-    final last = _scope == 'all'
-        ? cues.length - 1
-        : _scope == 'one'
-        ? first
-        : (int.tryParse(_to.text) ?? 0) - 1;
-    if (first < 0 || last < first || last >= cues.length) {
-      setState(() => _error = 'Số câu không hợp lệ (1–${cues.length}).');
-      return;
+    final whole = _scope == 'all' || _scope == 'missing';
+    final cues = List.of(whole ? widget.currentCues() : _basis);
+    final List<int> indices;
+    if (_scope == 'missing') {
+      indices = _missingIn(cues);
+      if (indices.isEmpty) {
+        setState(() => _error = 'Không còn câu nào chưa dịch.');
+        return;
+      }
+    } else {
+      final from = _scope == 'all' ? 0 : (int.tryParse(_from.text) ?? 0) - 1;
+      final to = _scope == 'all'
+          ? cues.length - 1
+          : _scope == 'one'
+          ? from
+          : (int.tryParse(_to.text) ?? 0) - 1;
+      if (from < 0 || to < from || to >= cues.length) {
+        setState(() => _error = 'Số câu không hợp lệ (1–${cues.length}).');
+        return;
+      }
+      indices = [for (var i = from; i <= to; i++) i];
     }
+    final first = indices.first;
     final nearby = [
       for (var i = (first - 4).clamp(0, cues.length); i < first; i++)
         (cues[i].source, cues[i].text),
@@ -123,14 +155,22 @@ class _RevisionSheetState extends State<_RevisionSheet> {
       final draft = await CueRevision.generate(
         videoId: widget.videoId,
         cues: cues,
-        indices: [for (var i = first; i <= last; i++) i],
+        indices: indices,
         language: widget.language,
         translator: translator,
         onProgress: (n) {
           if (mounted) setState(() => _done = n);
         },
       );
-      if (mounted) setState(() => _draft = draft);
+      if (mounted) {
+        setState(() {
+          _draft = draft;
+          _error = draft.skipped > 0
+              ? '${draft.skipped} câu không dịch được (bị từ chối hoặc thiếu), '
+                    'giữ nguyên bản cũ; các câu còn lại xem bên dưới.'
+              : null;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
@@ -195,10 +235,21 @@ class _RevisionSheetState extends State<_RevisionSheet> {
                 DropdownButtonFormField<String>(
                   initialValue: _scope,
                   decoration: const InputDecoration(labelText: 'Phạm vi'),
-                  items: const [
-                    DropdownMenuItem(value: 'one', child: Text('Một câu')),
-                    DropdownMenuItem(value: 'range', child: Text('Một đoạn')),
-                    DropdownMenuItem(
+                  items: [
+                    if (_missingCount > 0 || _scope == 'missing')
+                      DropdownMenuItem(
+                        value: 'missing',
+                        child: Text('Câu chưa dịch ($_missingCount)'),
+                      ),
+                    const DropdownMenuItem(
+                      value: 'one',
+                      child: Text('Một câu'),
+                    ),
+                    const DropdownMenuItem(
+                      value: 'range',
+                      child: Text('Một đoạn'),
+                    ),
+                    const DropdownMenuItem(
                       value: 'all',
                       child: Text('Toàn bộ phụ đề'),
                     ),
@@ -210,7 +261,7 @@ class _RevisionSheetState extends State<_RevisionSheet> {
                           _draft = null;
                         }),
                 ),
-                if (_scope != 'all')
+                if (_scope == 'one' || _scope == 'range')
                   Row(
                     children: [
                       Expanded(
