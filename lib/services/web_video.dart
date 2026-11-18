@@ -12,6 +12,7 @@ class WebVideo {
     this.cueCount = 0,
     this.area = 0,
     this.muted = false,
+    this.elementId = '',
   });
 
   /// Stream URL (mp4 / m3u8). Empty or `blob:` when the site hides it.
@@ -31,6 +32,8 @@ class WebVideo {
   /// On-screen size in square pixels; adverts in hidden frames show 0.
   final int area;
   final bool muted;
+  final String elementId;
+  String get reportKey => elementId.isEmpty ? src : '$elementId|$src';
 
   /// How likely this is the film rather than an advert or a preview:
   /// big on screen, playing, with sound and longer than two minutes.
@@ -57,7 +60,7 @@ class WebVideo {
     WebVideo? best;
     for (final v in videos) {
       if (v.isAdvertisement) continue;
-      if (keep.isNotEmpty && v.src == keep) return v;
+      if (keep.isNotEmpty && (v.reportKey == keep || v.src == keep)) return v;
       if (best == null || v.score > best.score) best = v;
     }
     return best;
@@ -76,6 +79,7 @@ class WebVideo {
       cueCount: num0(message['n']).toInt(),
       area: num0(message['area']).toInt(),
       muted: message['muted'] == true,
+      elementId: '${message['element'] ?? ''}',
     );
   }
 
@@ -114,11 +118,25 @@ const String kPageScript = r'''
   }, true);
 
   // On pages that feed the player through a blob, remember the playlist.
-  var playlist = '';
+  var playlist = '', playlists = [];
+  var frameId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  var nextElement = 0, cueElement = '', cueSource = '';
+  function elementId(v) {
+    if (!v.__vsubId) v.__vsubId = frameId + ':' + (++nextElement);
+    return v.__vsubId;
+  }
+  function elementById(id) {
+    var list = document.querySelectorAll('video');
+    for (var i = 0; i < list.length; i++) if (elementId(list[i]) === id) return list[i];
+    return null;
+  }
   function note(u) {
     try {
       u = new URL(u, location.href).href;
-      if (!playlist && /\.m3u8(\?|#|$)/i.test(u)) playlist = u;
+      if (/\.m3u8(\?|#|$)/i.test(u) && playlists.indexOf(u) < 0) {
+        playlists.push(u);
+        playlist = playlists.length === 1 ? u : '';
+      }
     } catch (e) {}
   }
   var open = XMLHttpRequest.prototype.open;
@@ -175,15 +193,20 @@ const String kPageScript = r'''
   var track = null, trackVideo = null, fullscreen = false;
   function ensureTrack(v) {
     if (trackVideo !== v) {
+      clearTrack();
+      if (track) track.mode = 'disabled';
       trackVideo = v;
       track = v.addTextTrack('subtitles', 'Tiếng Việt', 'vi');
+      var ownedTrack = track;
       fullscreen = !!v.webkitDisplayingFullscreen;
       track.mode = fullscreen ? 'showing' : 'hidden';
       v.addEventListener('webkitbeginfullscreen', function () {
+        if (track !== ownedTrack || srcOf(v) !== cueSource) return;
         fullscreen = true;
         if (track) track.mode = 'showing';
       });
       v.addEventListener('webkitendfullscreen', function () {
+        if (track !== ownedTrack) return;
         fullscreen = false;
         if (track) track.mode = 'hidden';
       });
@@ -243,7 +266,11 @@ const String kPageScript = r'''
   function hide() { if (box) box.style.display = 'none'; }
   function draw() {
     if (!cues.length) return hide();
-    var v = pick();
+    var v = cueElement ? elementById(cueElement) : pick();
+    if (v && cueSource && srcOf(v) !== cueSource) {
+      clearTrack();
+      return hide();
+    }
     var c = v ? cueAt(v.currentTime || 0) : null;
     if (!v || !c || fullscreen) return hide();
     var r = v.getBoundingClientRect();
@@ -299,7 +326,7 @@ const String kPageScript = r'''
       var s = v.querySelector('source');
       if (s) src = s.src;
     }
-    if (!src || /^blob:/.test(src)) src = playlist || src;
+    if ((!src || /^blob:/.test(src)) && document.querySelectorAll('video').length === 1) src = playlist || src;
     return src;
   }
 
@@ -308,10 +335,11 @@ const String kPageScript = r'''
       background = !!d.value;
       if (background) document.querySelectorAll('video,audio').forEach(function (m) { m.pause(); });
     }
-    var v = pick();
+    var v = d.element ? elementById(d.element) : pick();
     // Pages often hold adverts in other frames: commands are for the one
     // video the app chose ("target"), except clearing, which is for all.
-    var mine = !d.target || (v && srcOf(v) === d.target);
+    var mine = (!d.element || (v && elementId(v) === d.element)) &&
+        (!d.target || (v && srcOf(v) === d.target));
     try {
       if (!mine && d.__vsub !== 'clear' && d.__vsub !== 'opts') {
         // not ours
@@ -328,10 +356,15 @@ const String kPageScript = r'''
         shown = '';
       }
       else if (d.__vsub === 'cue') {
+        if (cueSource && (cueSource !== d.target || cueElement !== (d.element || ''))) {
+          cues = []; clearTrack();
+        }
+        cueSource = d.target || ''; cueElement = d.element || '';
         var c = toCue(d.c);
         upsert(c);
         if (v) { ensureTrack(v); addTrackCue(c); }
       } else if (d.__vsub === 'cues') {
+        cueSource = d.target || ''; cueElement = d.element || '';
         cues = (d.list || []).map(toCue);
         cues.sort(function (a, b) { return a.s - b.s; });
         clearTrack();
@@ -342,6 +375,7 @@ const String kPageScript = r'''
         shown = '';
       } else if (d.__vsub === 'clear') {
         cues = [];
+        cueSource = ''; cueElement = '';
         clearTrack();
         shown = '';
         hide();
@@ -374,10 +408,12 @@ const String kPageScript = r'''
 
   setInterval(function () {
     inline();
-    var v = pick();
-    if (!v || !window.flutter_inappwebview) return;
+    if (!window.flutter_inappwebview) return;
+    var videos = document.querySelectorAll('video');
+    for (var vi = 0; vi < videos.length; vi++) {
+    var v = videos[vi];
     var src = srcOf(v);
-    if (!src) return;
+    if (!src) continue;
     // How much of the video can be seen: a hidden or tiny frame (adverts)
     // shows little or nothing.
     var r = v.getBoundingClientRect();
@@ -386,16 +422,18 @@ const String kPageScript = r'''
     try {
       window.flutter_inappwebview.callHandler('vsub', {
         src: src,
+        element: elementId(v),
         t: v.currentTime || 0,
         paused: v.paused,
         dur: isFinite(v.duration) ? v.duration : 0,
         page: location.href,
         ua: navigator.userAgent,
-        n: cues.length,
+        n: (!cueSource || cueSource === src) && (!cueElement || cueElement === elementId(v)) ? cues.length : 0,
         area: Math.round(w * h),
         muted: !!v.muted
       });
     } catch (e) {}
+    }
   }, 250);
 })();
 ''';

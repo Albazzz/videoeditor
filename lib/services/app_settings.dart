@@ -23,7 +23,7 @@ class AppSettings extends ChangeNotifier {
   SharedPreferences? _prefs;
 
   /// Language spoken in the videos.
-  String language = 'ja';
+  String language = 'auto';
 
   /// Show the original line above the Vietnamese one.
   bool showSource = false;
@@ -77,7 +77,7 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> load() async {
     final prefs = _prefs = await SharedPreferences.getInstance();
-    language = prefs.getString('language') ?? 'ja';
+    language = prefs.getString('language') ?? 'auto';
     showSource = prefs.getBool('showSource') ?? false;
     backgroundLinks = prefs.getBool('backgroundLinks') ?? false;
     parallelSubtitles = prefs.getBool('parallelSubtitles') ?? true;

@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../models/cue.dart';
 import '../services/subtitle_session.dart';
+import '../services/active_work.dart';
+import '../services/app_settings.dart';
 import 'common.dart';
+import 'subtitle_revision.dart';
+import '../screens/retained_audio_screen.dart';
 
 /// Lists subtitle lines: time, Vietnamese text and the original speech.
 class CueList extends StatelessWidget {
@@ -46,11 +50,17 @@ class CueList extends StatelessWidget {
             children: [
               SizedBox(
                 width: 52,
-                child: Text(
-                  formatTime(c.start),
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.primary,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('#${i + 1}', style: theme.textTheme.labelSmall),
+                    Text(
+                      formatTime(c.start),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               Expanded(
@@ -93,6 +103,7 @@ Future<void> showSessionDetails(BuildContext context, SubtitleSession session) {
         listenable: session,
         builder: (context, _) {
           final theme = Theme.of(context);
+          final snapshot = List.of(session.cues);
           return CustomScrollView(
             controller: scroll,
             slivers: [
@@ -107,6 +118,54 @@ Future<void> showSessionDetails(BuildContext context, SubtitleSession session) {
                         style: theme.textTheme.titleMedium,
                       ),
                       const SizedBox(height: 8),
+                      Text(session.languageNotice),
+                      TextButton.icon(
+                        icon: const Icon(Icons.lock_outline),
+                        label: const Text(
+                          'Âm thanh lưu riêng — quản lý / xác nhận…',
+                        ),
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => RetainedAudioScreen(
+                              videoId: session.videoId,
+                              includeHidden: session.audioHidden,
+                              store: session.audioStore,
+                            ),
+                          ),
+                        ),
+                      ),
+                      DropdownButton<String>(
+                        value: session.language,
+                        items: [
+                          for (final entry in kLanguages.entries)
+                            DropdownMenuItem(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            ),
+                        ],
+                        onChanged: (value) async {
+                          if (value == null) return;
+                          await session.selectLanguage(value);
+                          await ActiveWork.persist(session.videoId);
+                        },
+                      ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.translate),
+                        label: const Text('Yêu cầu dịch lại…'),
+                        onPressed: session.cues.isEmpty
+                            ? null
+                            : () => showSubtitleRevision(
+                                context,
+                                videoId: session.videoId,
+                                language: session.language,
+                                currentCues: () => List.of(session.cues),
+                                onApply: (next) async {
+                                  session.applyCues(next);
+                                  await ActiveWork.persist(session.videoId);
+                                },
+                              ),
+                      ),
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(12),
@@ -131,7 +190,22 @@ Future<void> showSessionDetails(BuildContext context, SubtitleSession session) {
                 ),
               ),
               SliverToBoxAdapter(
-                child: CueList(cues: List.of(session.cues), shrinkWrap: true),
+                child: CueList(
+                  cues: snapshot,
+                  shrinkWrap: true,
+                  onTap: (index) => showSubtitleRevision(
+                    context,
+                    videoId: session.videoId,
+                    language: session.language,
+                    initialIndex: index,
+                    initialCue: snapshot[index],
+                    currentCues: () => List.of(session.cues),
+                    onApply: (next) async {
+                      session.applyCues(next);
+                      await ActiveWork.persist(session.videoId);
+                    },
+                  ),
+                ),
               ),
               const SliverToBoxAdapter(child: SizedBox(height: 24)),
             ],

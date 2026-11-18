@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video/screens/browser_screen.dart';
 import 'package:video/services/app_settings.dart';
+import 'package:video/services/active_work.dart';
+import 'package:video/services/subtitle_session.dart';
 
 // Exercise the real browser widget and callbacks without launching a native
 // browser or depending on external websites.
@@ -85,9 +87,13 @@ class FakeWebController extends PlatformInAppWebViewController {
     events.onLoadStop?.call(facade, WebUri(url));
   }
 
-  void reportVideo() => handlers['vsub']!([
+  void reportVideo({
+    String source = 'https://cdn.example/video.mp4',
+    String element = '',
+  }) => handlers['vsub']!([
     {
-      'src': 'https://cdn.example/video.mp4',
+      'src': source,
+      'element': element,
       't': 1,
       'dur': 30,
       'page': entries[index].url.toString(),
@@ -382,9 +388,10 @@ void main() {
       await tester.runAsync(
         () => SubtitleStore.save(
           SavedSubs(
-            id: SubtitleStore.idFor(page),
+            id: SubtitleStore.idForVideo(page, 'https://cdn.example/video.mp4'),
             title: 'Phim',
             page: page,
+            source: 'https://cdn.example/video.mp4',
             language: 'ko',
             updated: DateTime.now(),
             duration: 30,
@@ -415,6 +422,120 @@ void main() {
         await tester.pumpAndSettle();
       }
       await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'a reused video element loads only subtitles for its new source',
+    (tester) async {
+      const page = 'https://phim.example/two';
+      final dir = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('two_video_test'),
+      ))!;
+      SubtitleStore.overrideDir = dir;
+      addTearDown(() async {
+        SubtitleStore.overrideDir = null;
+        await dir.delete(recursive: true);
+      });
+      await tester.runAsync(() async {
+        for (final label in ['A', 'B']) {
+          final source = 'https://cdn.example/$label.mp4';
+          await SubtitleStore.save(
+            SavedSubs(
+              id: SubtitleStore.idForVideo(page, source),
+              page: page,
+              source: source,
+              title: label,
+              language: 'en',
+              updated: DateTime.now(),
+              cues: [Cue(start: 1, end: 3, text: 'Only $label', source: label)],
+              covered: [(0, 30)],
+              duration: 30,
+              complete: true,
+              imported: true,
+            ),
+          );
+        }
+      });
+      await open(tester);
+      final controller = platform.views.single.controller;
+      controller.visit(page, 'Two');
+      await tester.pumpAndSettle();
+      for (final label in ['A', 'B']) {
+        final before = controller.scripts.length;
+        await tester.runAsync(() async {
+          controller.reportVideo(
+            source: 'https://cdn.example/$label.mp4',
+            element: 'same-player',
+          );
+          final until = DateTime.now().add(const Duration(seconds: 2));
+          while (!controller.scripts
+              .skip(before)
+              .any((js) => js.contains('Only $label'))) {
+            if (DateTime.now().isAfter(until)) fail('Missing $label');
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+        });
+        await tester.pumpAndSettle();
+        final other = label == 'A' ? 'B' : 'A';
+        expect(
+          controller.scripts
+              .skip(before)
+              .any((js) => js.contains('Only $other')),
+          isFalse,
+        );
+        expect(
+          controller.scripts
+              .skip(before)
+              .any((js) => js.contains('"element":"same-player"')),
+          isTrue,
+        );
+      }
+      ScaffoldMessenger.of(
+        tester.element(find.byType(BrowserScreen)),
+      ).removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'closing the browser keeps work and reopening attaches the same video session',
+    (tester) async {
+      const page = 'https://phim.example/keep';
+      const source = 'https://cdn.example/video.mp4';
+      final id = SubtitleStore.idForVideo(page, source);
+      final session = SubtitleSession(
+        input: source,
+        videoId: id,
+        language: 'ko',
+        initialCues: [
+          const Cue(start: 1, end: 3, text: 'Kept session', source: '안녕'),
+        ],
+      )..finished = true;
+      ActiveWork.begin(id, 'Kept', session);
+      addTearDown(() => ActiveWork.stop(session));
+      for (var i = 0; i < 2; i++) {
+        await open(tester);
+        final controller = platform.views.last.controller;
+        controller.visit(page, 'Kept');
+        await tester.pumpAndSettle();
+        await tester.runAsync(() async {
+          controller.reportVideo();
+          final until = DateTime.now().add(const Duration(seconds: 2));
+          while (!controller.scripts.any((js) => js.contains('Kept session'))) {
+            if (DateTime.now().isAfter(until)) fail('Session not attached');
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+        });
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const SizedBox());
+        expect(ActiveWork.find(id)!.session, same(session));
+        expect(session.stopped, isFalse);
+      }
+      await ActiveWork.stop(session);
+      expect(ActiveWork.find(id), isNull);
     },
   );
 

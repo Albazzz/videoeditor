@@ -33,6 +33,60 @@ void main() {
     ]);
     expect((await SubtitleStore.load('same'))?.title, 'Film 11');
   });
+  test('a new signed video address keeps the subtitles of the film', () async {
+    const page = 'https://phim.example/xem/1';
+    const oldSrc = 'https://cdn.example/v.m3u8?hash=AAA&expires=1';
+    const newSrc = 'https://cdn.example/v.m3u8?hash=BBB&expires=2';
+    await SubtitleStore.save(
+      SavedSubs(
+        id: SubtitleStore.idForVideo(page, oldSrc),
+        title: 'Phim',
+        page: page,
+        source: oldSrc,
+        language: 'zh',
+        updated: DateTime(2026, 11, 1),
+        cues: const [Cue(start: 1, end: 2, text: 'Xin chào', source: '你好')],
+        covered: const [(0, 600)],
+        duration: 5400,
+      ),
+    );
+    // Same page, same length, new address: found, moved, no duplicate.
+    final found = await SubtitleStore.loadVideo(page, newSrc, duration: 5401);
+    expect(found?.cues.single.text, 'Xin chào');
+    expect(found?.source, newSrc);
+    expect(found?.id, SubtitleStore.idForVideo(page, newSrc));
+    expect((await SubtitleStore.list()).length, 1);
+    // Another film on the page (other length) is not taken for it.
+    expect(
+      await SubtitleStore.loadVideo(
+        page,
+        'https://cdn.example/b.m3u8',
+        duration: 1200,
+      ),
+      isNull,
+    );
+    // Entries saved per page before videos had their own key still match.
+    const oldPage = 'https://phim.example/xem/2';
+    await SubtitleStore.save(
+      SavedSubs(
+        id: SubtitleStore.idFor(oldPage),
+        title: 'Cũ',
+        page: oldPage,
+        language: 'ja',
+        updated: DateTime(2026, 10, 1),
+        cues: const [Cue(start: 1, end: 2, text: 'Cũ')],
+        covered: const [],
+        duration: 3000,
+      ),
+    );
+    final legacy = await SubtitleStore.loadVideo(
+      oldPage,
+      'https://cdn.example/c.mp4',
+      duration: 3000,
+    );
+    expect(legacy?.cues.single.text, 'Cũ');
+  });
+
   test('the same page always maps to the same entry', () {
     final a = SubtitleStore.idFor('https://phim.example.com/xem/tap-1#t=30');
     final b = SubtitleStore.idFor('https://phim.example.com/xem/tap-1');

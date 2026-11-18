@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../services/active_work.dart';
 import '../services/open_page.dart';
 import '../widgets/activity_icon.dart';
-import '../widgets/session_progress.dart';
 
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
@@ -13,7 +12,10 @@ import '../services/translator.dart';
 import '../services/video_library.dart';
 import '../widgets/common.dart';
 import 'downloads_screen.dart';
+import 'retained_audio_screen.dart';
 import '../widgets/subtitle_details.dart';
+import '../widgets/subtitle_revision.dart';
+import '../widgets/video_language.dart';
 
 /// Every subtitle the app has made: for web videos and for library videos.
 /// Hidden videos are left out on purpose.
@@ -76,6 +78,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     required List<Cue> cues,
     required Future<void> Function() onDelete,
     SavedSubs? saved,
+    VideoItem? item,
   }) async {
     await Navigator.push(
       context,
@@ -85,6 +88,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
           subtitle: subtitle,
           cues: cues,
           saved: saved,
+          item: item,
           onDelete: onDelete,
         ),
       ),
@@ -115,6 +119,14 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const DownloadsScreen()),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Âm thanh lưu riêng',
+            icon: const Icon(Icons.audio_file_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const RetainedAudioScreen()),
             ),
           ),
         ],
@@ -203,12 +215,25 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      subtitle: Text('Đủ cả video · ${cues.length} dòng'),
+                      subtitle: Text('${cues.length} dòng phụ đề'),
                       onTap: () => _open(
                         title: item.name,
                         subtitle: 'Video trong Thư viện',
+                        item: item,
                         cues: cues,
-                        onDelete: () => item.srtFile.delete(),
+                        onDelete: () async {
+                          await ActiveWork.stop(
+                            ActiveWork.find(
+                              'file:${item.file.absolute.path}',
+                            )?.session,
+                          );
+                          if (await item.srtFile.exists()) {
+                            await item.srtFile.delete();
+                          }
+                          if (await item.subtitleDataFile.exists()) {
+                            await item.subtitleDataFile.delete();
+                          }
+                        },
                       ),
                     ),
                 ],
@@ -242,6 +267,7 @@ class _SubtitleView extends StatefulWidget {
     required this.cues,
     required this.onDelete,
     this.saved,
+    this.item,
   });
 
   final String title;
@@ -251,6 +277,7 @@ class _SubtitleView extends StatefulWidget {
 
   /// Web entries can be renamed, translated again and edited.
   final SavedSubs? saved;
+  final VideoItem? item;
 
   @override
   State<_SubtitleView> createState() => _SubtitleViewState();
@@ -305,12 +332,12 @@ class _SubtitleViewState extends State<_SubtitleView> {
     if (s == null) return;
     final name = await _ask('Đổi tên', title);
     if (name == null || name.isEmpty) return;
-    await _store(s.withTitle(name));
+    final latest = await SubtitleStore.load(s.id) ?? s;
+    await _store(latest.withTitle(name));
   }
 
   Future<void> _editLine(int i) async {
-    final s = saved;
-    if (s == null) return;
+    if (saved == null && widget.item == null) return;
     final c = cues[i];
     final text = await _ask(
       'Sửa dòng ${formatTime(c.start)}'
@@ -321,92 +348,89 @@ class _SubtitleViewState extends State<_SubtitleView> {
     if (text == null || text.isEmpty || text == c.text) return;
     final next = List.of(cues)
       ..[i] = Cue(start: c.start, end: c.end, text: text, source: c.source);
-    await _store(s.withCues(next));
+    await _storeCues(next);
   }
 
-  /// Translates the lines still in the original language.
-  Future<void> _retranslate() async {
-    final s = saved;
-    if (s == null) return;
-    final todo = [
-      for (var i = 0; i < cues.length; i++)
-        if (cues[i].source.isNotEmpty && cues[i].text == cues[i].source) i,
-    ];
-    if (todo.isEmpty) return;
-    final translator = Translator.create(force: true);
-    final done = ValueNotifier(0);
-    var cancelled = false;
-    showDialog<void>(
+  Future<void> _storeCues(List<Cue> next) async {
+    if (saved case final SavedSubs s) {
+      ActiveWork.find(s.id)?.session.applyCues(next);
+      await _store(s.withCues(next));
+    } else if (widget.item case final VideoItem item) {
+      ActiveWork.find(
+        'file:${item.file.absolute.path}',
+      )?.session.applyCues(next);
+      await VideoLibrary.saveCues(item, next);
+      if (mounted) setState(() => cues = next);
+    }
+  }
+
+  Future<void> _revise({int? index}) async {
+    final selected = index == null ? null : cues[index];
+    final id = saved?.id ?? 'file:${widget.item!.file.absolute.path}';
+    final language =
+        saved?.language ?? await VideoLibrary.subtitleLanguage(widget.item!);
+    if (!mounted) return;
+    await showSubtitleRevision(
+      context,
+      videoId: id,
+      language: language,
+      initialIndex: index,
+      initialCue: selected,
+      currentCues: () => List.of(ActiveWork.find(id)?.session.cues ?? cues),
+      onApply: _storeCues,
+    );
+  }
+
+  Future<void> _changeLanguage() async {
+    final current =
+        saved?.language ?? await VideoLibrary.subtitleLanguage(widget.item!);
+    if (!mounted) return;
+    final code = await chooseVideoLanguage(context, current);
+    if (code == null || !mounted) return;
+    final id = saved?.id ?? 'file:${widget.item!.file.absolute.path}';
+    final running = ActiveWork.find(id);
+    if (running != null) {
+      await running.session.selectLanguage(code);
+      await ActiveWork.persist(id);
+      if (mounted) setState(() => cues = List.of(running.session.cues));
+    }
+    if (saved case final SavedSubs s) {
+      await _store(s.withLanguage(code).withCues(cues));
+    } else {
+      await VideoLibrary.saveCues(widget.item!, cues, language: code);
+    }
+  }
+
+  Future<void> _lineActions(int index) async {
+    final action = await showModalBottomSheet<String>(
       context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Dịch lại'),
-        content: ValueListenableBuilder(
-          valueListenable: done,
-          builder: (context, n, _) => Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('${Translator.label}\n$n / ${todo.length} câu'),
-              const SizedBox(height: 12),
-              LinearProgressIndicator(value: n / todo.length),
-            ],
-          ),
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(
+                'Câu ${index + 1} · ${formatTime(cues[index].start)}',
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.translate),
+              title: const Text('Yêu cầu dịch lại câu này…'),
+              onTap: () => Navigator.pop(context, 'revise'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Sửa bằng tay'),
+              onTap: () => Navigator.pop(context, 'edit'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              cancelled = true;
-              // Stops the requests still queued or running (and their cost).
-              translator.dispose();
-              Navigator.pop(context);
-            },
-            child: const Text('Huỷ'),
-          ),
-        ],
       ),
     );
-    try {
-      await translator.prepare(s.language);
-      final out = await translator.translateBatch(
-        [for (final i in todo) cues[i].source],
-        s.language,
-        onProgress: (n) => done.value = n,
-      );
-      if (cancelled || !mounted) return;
-      Navigator.pop(context);
-      final next = List.of(cues);
-      var got = 0;
-      for (var k = 0; k < todo.length; k++) {
-        final t = out[k];
-        if (t == null || t.isEmpty) continue;
-        final c = next[todo[k]];
-        next[todo[k]] = Cue(
-          start: c.start,
-          end: c.end,
-          text: t,
-          source: c.source,
-        );
-        got++;
-      }
-      await _store(s.withCues(next));
-      if (mounted) {
-        toast(
-          context,
-          got == todo.length
-              ? 'Đã dịch $got câu'
-              : 'Đã dịch $got/${todo.length} câu, bấm lại để thử tiếp',
-        );
-      }
-    } catch (e) {
-      if (!cancelled && mounted) {
-        Navigator.pop(context);
-        toast(context, 'Dịch lỗi: $e');
-      }
-    } finally {
-      await translator.dispose();
-      done.dispose();
-    }
+    if (!mounted) return;
+    if (action == 'revise') await _revise(index: index);
+    if (action == 'edit') await _editLine(index);
   }
 
   Future<void> _export(BuildContext context) async {
@@ -454,6 +478,18 @@ class _SubtitleViewState extends State<_SubtitleView> {
           child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
         actions: [
+          if (saved != null || widget.item != null) ...[
+            IconButton(
+              tooltip: 'Yêu cầu dịch lại',
+              icon: const Icon(Icons.translate),
+              onPressed: () => _revise(),
+            ),
+            IconButton(
+              tooltip: 'Ngôn ngữ của video',
+              icon: const Icon(Icons.language),
+              onPressed: _changeLanguage,
+            ),
+          ],
           if (saved?.page.startsWith('http') ?? false)
             IconButton(
               tooltip: 'Mở trang này để xem',
@@ -500,22 +536,25 @@ class _SubtitleViewState extends State<_SubtitleView> {
               ),
               actions: [
                 TextButton(
-                  onPressed: _retranslate,
+                  onPressed: () => _revise(),
                   child: const Text('Dịch lại'),
                 ),
               ],
             ),
-          if (saved != null)
+          if (saved != null || widget.item != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
               child: Text(
-                'Chạm vào một dòng để sửa',
+                'Chạm vào một dòng để sửa hoặc yêu cầu dịch lại',
                 style: Theme.of(context).textTheme.labelSmall,
               ),
             ),
           const Divider(height: 1),
           Expanded(
-            child: CueList(cues: cues, onTap: saved == null ? null : _editLine),
+            child: CueList(
+              cues: cues,
+              onTap: saved == null && widget.item == null ? null : _lineActions,
+            ),
           ),
         ],
       ),
@@ -523,70 +562,77 @@ class _SubtitleViewState extends State<_SubtitleView> {
   }
 }
 
-/// The subtitles being made right now, with their live progress.
+/// All independent video pipelines, including those whose pages were closed.
 class _ActiveCard extends StatelessWidget {
   const _ActiveCard();
-
   @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder(
-      valueListenable: ActiveWork.current,
-      builder: (context, work, _) {
-        if (work == null) return const SizedBox.shrink();
-        final s = work.session;
-        return ListenableBuilder(
-          listenable: s,
-          builder: (context, _) => Card(
-            margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () => showSessionProgress(context, s, title: work.title),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        ActivityIcon(session: s, title: work.title),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Đang làm: ${work.title}',
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleSmall,
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right),
-                      ],
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: ActiveWork.all,
+    builder: (context, works, _) => Column(
+      children: [
+        for (final work in works.where((work) => !work.hidden))
+          _WorkCard(work: work),
+      ],
+    ),
+  );
+}
+
+class _WorkCard extends StatelessWidget {
+  const _WorkCard({required this.work});
+  final ActiveWork work;
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: work.session,
+    builder: (context, _) {
+      final session = work.session;
+      return Card(
+        margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  ActivityIcon(session: session, title: work.title),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      work.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(height: 6),
-                    if (s.duration > 0)
-                      CoverageBar(
-                        covered: s.covered,
-                        duration: s.duration,
-                        done: coversWholeVideo(
-                          s.covered,
-                          s.duration,
-                          reachedEnd: s.reachedEnd,
-                        ),
-                      ),
-                    Text(
-                      '${s.stage} · ${s.cues.length} dòng',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                    Text(
-                      'Chạm để xem từng bước',
-                      style: Theme.of(context).textTheme.labelSmall,
-                    ),
-                  ],
-                ),
+                  ),
+                  IconButton(
+                    tooltip: 'Chi tiết phụ đề',
+                    icon: const Icon(Icons.info_outline),
+                    onPressed: () => showSessionDetails(context, session),
+                  ),
+                  TextButton(
+                    onPressed: () => ActiveWork.stop(session),
+                    child: const Text('Dừng dịch'),
+                  ),
+                ],
               ),
-            ),
+              Text(session.languageNotice),
+              if (session.duration > 0)
+                CoverageBar(
+                  covered: session.covered,
+                  duration: session.duration,
+                  done: coversWholeVideo(
+                    session.covered,
+                    session.duration,
+                    reachedEnd: session.reachedEnd,
+                  ),
+                ),
+              Text(
+                '${session.stage} · ${session.cues.length} dòng',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  );
 }

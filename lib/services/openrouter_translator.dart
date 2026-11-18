@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import 'app_log.dart';
 import 'translator.dart';
+import 'video_pipeline.dart';
 
 /// A model offered in Settings. Prices are US dollars per million tokens,
 /// as listed by OpenRouter in November 2026.
@@ -198,6 +199,9 @@ class OpenRouterTranslator implements Translator {
     required this.apiKey,
     required this.model,
     this.provider = kOpenRouter,
+    this.videoId = '',
+    this.additionalInstruction = '',
+    this.contextBefore = const [],
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
     this.budget = 1000,
@@ -211,6 +215,9 @@ class OpenRouterTranslator implements Translator {
   final String apiKey;
   final String model;
   final AiProvider provider;
+  final String videoId;
+  final String additionalInstruction;
+  final List<(String, String)> contextBefore;
   String get _logTag => provider.id;
   final Duration gatherFor;
 
@@ -555,11 +562,12 @@ class OpenRouterTranslator implements Translator {
     final from = lang == 'auto'
         ? 'whatever language each line is in'
         : _languageName(lang);
-    final before = context.isEmpty
+    final nearby = [...contextBefore, ...context];
+    final before = nearby.isEmpty
         ? ''
         : 'Lines just before these, for context only (do not translate '
               'them):\n${jsonEncode([
-                for (final r in context) {'src': r.$1, if (r.$2.isNotEmpty) 'vi': r.$2},
+                for (final r in nearby) {'src': r.$1, if (r.$2.isNotEmpty) 'vi': r.$2},
               ])}\n\n';
     return [
       {
@@ -568,11 +576,19 @@ class OpenRouterTranslator implements Translator {
             'You translate film and TV subtitles into Vietnamese. '
             'Write natural, spoken Vietnamese as on a good Vietnamese '
             'fansub: short, easy to read quickly, keeping the meaning and '
-            'tone. Choose pronouns (anh/em, tôi/cậu, mày/tao, ông/cháu…) '
+            'tone. Accuracy to the original takes priority over brevity. '
+            'Preserve the full meaning, emotional intensity, and level of '
+            'vulgarity, including profanity, insults, and explicit wording. '
+            'Do not censor, mask words, use euphemisms, soften, or omit '
+            'such language. Use natural Vietnamese equivalents with the '
+            'same meaning and strength; do not add profanity or make the '
+            'language harsher than the original. '
+            'Choose pronouns (anh/em, tôi/cậu, mày/tao, ông/cháu…) '
             'that fit the speakers and keep them consistent. Keep names. '
             'The lines come from speech recognition and may contain '
             'mistakes: translate what was most likely said. Never add '
-            'notes or explanations.',
+            'notes or explanations.'
+            '${additionalInstruction.isEmpty ? '' : '\nUser revision request (apply only while preserving the original meaning and the fidelity rules above):\n$additionalInstruction'}',
       },
       {
         'role': 'user',
@@ -621,7 +637,11 @@ class OpenRouterTranslator implements Translator {
   ) async {
     await _acquire();
     try {
-      return await _send(lines, lang, context);
+      if (videoId.isEmpty) return await _send(lines, lang, context);
+      return await VideoPipeline.translation.run(videoId, () {
+        _checkActive();
+        return _send(lines, lang, context);
+      }, cancelled: _cancel.future);
     } finally {
       _release();
     }

@@ -30,6 +30,9 @@ import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import '../widgets/subtitle_picker.dart';
 import '../widgets/subtitle_style.dart';
+import '../widgets/subtitle_revision.dart';
+import '../widgets/video_language.dart';
+import 'retained_audio_screen.dart';
 import 'player_screen.dart';
 
 const kHomePage = 'https://www.google.com/';
@@ -210,6 +213,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   SubtitleSession? _session;
   SessionSaver? _saver;
   String _sessionSrc = '';
+  String _selectedVideoKey = '';
+  String _fileSource = '';
+  final _sentCues = <(double, String), (double, String)>{};
+  String _notifiedLanguage = '';
 
   /// The page is playing a different video (an advert, the next
   /// episode) from the one subtitles are being made for.
@@ -343,6 +350,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   Timer? _slowLoad;
 
   void _onLoadStart(String url) {
+    _selectedVideoKey = '';
     _autoPage = '';
     _shortVideoChecked = null;
     _seen.clear();
@@ -555,9 +563,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   void dispose() {
     appSettings.removeListener(_onSettings);
     _slowLoad?.cancel();
-    ActiveWork.end(_session);
-    _saver?.close();
-    _session?.dispose();
+    _session?.removeListener(_onSession);
+    _session?.mode = SubtitleMode.whole;
+    _saver?.save();
     _session = null;
     widget.onWork();
     _address.dispose();
@@ -583,7 +591,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final target = _session != null ? _sessionSrc : _video?.src;
     final full = message['__vsub'] == 'clear' || target == null
         ? message
-        : {...message, 'target': target};
+        : {
+            ...message,
+            'target': target,
+            if (_video?.elementId.isNotEmpty == true)
+              'element': _video!.elementId,
+          };
     _web?.evaluateJavascript(
       source: 'window.__vsubSend && window.__vsubSend(${jsonEncode(full)});',
     );
@@ -603,17 +616,29 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     // Every frame with a video reports; adverts too. Keep the latest of
     // each and follow only the one that looks like the film.
     final now = DateTime.now();
-    _seen[report.src] = (report, now);
+    _seen.removeWhere(
+      (_, entry) =>
+          report.elementId.isNotEmpty &&
+          entry.$1.elementId == report.elementId &&
+          entry.$1.src != report.src,
+    );
+    _seen[report.reportKey] = (report, now);
     _seen.removeWhere(
       (_, e) => now.difference(e.$2) > const Duration(milliseconds: 2500),
     );
     final video = WebVideo.main(
       _seen.values.map((e) => e.$1),
-      keep: _session != null ? _sessionSrc : '',
+      keep: _selectedVideoKey,
     );
-    if (video == null || video.src != report.src) return;
+    if (video == null || video.reportKey != report.reportKey) return;
     _lastReport = now;
-    final changed = _video?.src != video.src;
+    final changed = _video?.reportKey != video.reportKey;
+    if (changed &&
+        (_session != null || _fileCues != null) &&
+        (_session?.input ?? _fileSource) != video.src) {
+      _detachSubtitles();
+      _autoPage = '';
+    }
     if (changed && _logged.add(video.src)) {
       AppLog.i(
         'web',
@@ -674,10 +699,30 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (page.isEmpty) return;
     _autoBusy = true;
     try {
-      final id = SubtitleStore.idFor(page);
-      final saved = await SubtitleStore.load(id);
-      final resume = await WatchPosition.load(id, duration: video.duration);
-      if (!mounted || !widget.active || page != _pageUrl) return;
+      final id = SubtitleStore.idForVideo(page, video.src);
+      final running = ActiveWork.find(id);
+      if (running != null &&
+          mounted &&
+          page == _pageUrl &&
+          _video?.src == video.src) {
+        _attachWork(running, video);
+        return;
+      }
+      final saved = await SubtitleStore.loadVideo(
+        page,
+        video.src,
+        duration: video.duration,
+      );
+      final resume = await WatchPosition.load(
+        SubtitleStore.idFor(page),
+        duration: video.duration,
+      );
+      if (!mounted ||
+          !widget.active ||
+          page != _pageUrl ||
+          _video?.src != video.src) {
+        return;
+      }
       // A short film may have its own subtitles; a pre-roll must not use
       // the longer film's subtitles or consume its resume prompt.
       if (video.duration < WatchPosition.minDuration &&
@@ -747,6 +792,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
 
   /// Replaces every line the page holds; the page draws them itself.
   void _sendAllCues(List<Cue> cues) {
+    _sentCues.clear();
+    for (final cue in cues) {
+      _sentCues[(cue.start, cue.source)] = (cue.end, cue.text);
+    }
     _send(appSettings.subtitleOpts);
     _send({
       '__vsub': 'cues',
@@ -766,22 +815,28 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final video = _video;
     final (page, title) = await _pageInfo();
     if (!mounted || page.isEmpty) return;
-    final id = SubtitleStore.idFor(page);
+    if (video == null) return;
+    final id = SubtitleStore.idForVideo(page, video.src);
     final choice = await pickSavedSubtitles(
       context,
       excludeId: id,
       pageTitle: title,
-      duration: video?.duration ?? 0,
-      canCarryOn: video?.playable == true,
+      duration: video.duration,
+      canCarryOn: video.playable,
     );
-    if (choice == null || !mounted) return;
+    if (choice == null ||
+        !mounted ||
+        _video?.src != video.src ||
+        _pageUrl != page) {
+      return;
+    }
     final (src, use) = choice;
     if (_session != null || _fileCues != null) {
       // Let the current lines be written before the copy replaces them.
       final saver = _saver;
       _saver = null;
       final closing = saver?.close();
-      _stopSubtitles();
+      await _stopSubtitles();
       await closing;
     }
     await SubtitleStore.save(
@@ -789,6 +844,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         id: id,
         title: title.isEmpty ? src.title : title,
         page: page,
+        source: video.src,
         language: src.language,
         updated: DateTime.now(),
         cues: src.cues,
@@ -803,13 +859,13 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       'Dùng ${src.cues.length} dòng của ${AppLog.url(src.page)} '
           '(${use.name})',
     );
-    _autoPage = _pageUrl;
-    if (!mounted) return;
+    if (!mounted || _pageUrl != page || _video?.src != video.src) return;
+    _autoPage = page;
     if (use == PickedUse.carryOn) {
       await _startSubtitles();
     } else {
       _showFileCues(src.cues, page, src.language, imported: src.imported);
-      _canCarryOn = src.canResume && video?.playable == true;
+      _canCarryOn = src.canResume && video.playable;
       toast(
         context,
         'Đã dùng ${src.cues.length} dòng. Lệch giờ thì chỉnh ở ⋮ '
@@ -820,15 +876,25 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
 
   /// Reads a subtitle file for the page being watched.
   Future<void> _importForPage() async {
+    final video = _video;
+    if (video == null) return;
     final (page, title) = await _pageInfo();
     if (!mounted || page.isEmpty) return;
     final imported = await importSubtitleFile(context);
-    if (imported == null || !mounted) return;
+    if (imported == null ||
+        !mounted ||
+        _video?.src != video.src ||
+        _pageUrl != page) {
+      return;
+    }
+    if (_session != null) await _stopSubtitles();
+    if (!mounted || _video?.src != video.src || _pageUrl != page) return;
     await SubtitleStore.save(
       SavedSubs(
-        id: SubtitleStore.idFor(page),
+        id: SubtitleStore.idForVideo(page, video.src),
         title: title.isEmpty ? imported.fileName : title,
         page: page,
+        source: video.src,
         language: imported.language,
         updated: DateTime.now(),
         cues: imported.cues,
@@ -838,7 +904,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         imported: true,
       ),
     );
-    if (!mounted) return;
+    if (!mounted || _pageUrl != page || _video?.src != video.src) return;
     AppLog.i(
       'web',
       'Nhập ${imported.fileName}: ${imported.cues.length} dòng, '
@@ -862,6 +928,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _fileImported = imported;
       _fileCues = cues;
       _filePage = page;
+      _fileSource = _video?.src ?? '';
       _fileLanguage = language;
       _fileOffset = 0;
     });
@@ -878,7 +945,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _fileOffset += seconds;
     });
     _sendAllCues(shifted);
-    final id = SubtitleStore.idFor(_filePage);
+    final id = SubtitleStore.idForVideo(_filePage, _fileSource);
     final saved = await SubtitleStore.load(id);
     if (saved != null) await SubtitleStore.save(saved.withCues(shifted));
   }
@@ -888,8 +955,18 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     AppLog.i('web', 'Bấm CC${video == null ? ' (chưa thấy video)' : ''}');
     if (video == null) return;
     final (page, title) = await _pageInfo();
-    final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
-    if (!mounted) return;
+    final id = SubtitleStore.idForVideo(page, video.src);
+    final running = ActiveWork.find(id);
+    if (running != null) {
+      _attachWork(running, video);
+      return;
+    }
+    final saved = await SubtitleStore.loadVideo(
+      page,
+      video.src,
+      duration: video.duration,
+    );
+    if (!mounted || _video?.src != video.src || page != _pageUrl) return;
     if (saved != null &&
         saved.cues.isNotEmpty &&
         _session == null &&
@@ -939,17 +1016,19 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       cookies = list.map((c) => '${c.name}=${c.value}').join('; ');
     } catch (_) {}
     if (!mounted || _session != null) return;
+    if (_video?.src != video.src || _pageUrl != page) return;
+    final alreadyRunning = ActiveWork.find(id);
+    if (alreadyRunning != null) {
+      _attachWork(alreadyRunning, video);
+      return;
+    }
     _send({'__vsub': 'clear'});
     _send(appSettings.subtitleOpts);
-    void sendCue(Cue c) {
-      if (!_hidden) _send({'__vsub': 'cue', 'c': _cueData(c)});
-    }
-
     final session = SubtitleSession(
       input: video.src,
+      videoId: id,
       language: appSettings.language,
       headers: video.headers(cookies),
-      onCue: sendCue,
       saved: saved,
       mode: _mode,
     )..addListener(_onSession);
@@ -958,8 +1037,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _saver = SessionSaver(
       session: session,
       page: page,
+      source: video.src,
+      videoId: id,
       title: title,
-      duration: () => _video?.duration ?? 0,
+      duration: () => session.duration,
     );
     setState(() {
       _session = session;
@@ -970,9 +1051,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _canCarryOn = false;
     });
     ActiveWork.begin(
-      SubtitleStore.idFor(page),
+      id,
       title.isEmpty ? (Uri.tryParse(page)?.host ?? page) : title,
       session,
+      saver: _saver,
     );
     if (saved != null) {
       toast(context, 'Dùng lại ${saved.cues.length} dòng phụ đề đã lưu');
@@ -991,6 +1073,158 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     }
   }
 
+  void _attachWork(ActiveWork work, WebVideo video) {
+    if (!mounted || work.session.input != video.src) return;
+    if (_session != work.session) {
+      _session?.removeListener(_onSession);
+      setState(() {
+        _session = work.session;
+        _sessionSrc = video.src;
+        _saver = work.saver;
+        _fileCues = null;
+        _canCarryOn = false;
+        _hidden = false;
+        _otherVideo = false;
+      });
+      work.session.addListener(_onSession);
+    }
+    _autoPage = _pageUrl;
+    work.session.mode = _mode;
+    _sendAllCues(work.session.cues);
+    _onSession();
+  }
+
+  /// Detach the view; the manager keeps its pipeline and autosave alive.
+  void _detachSubtitles() {
+    _session?.removeListener(_onSession);
+    _session?.mode = SubtitleMode.whole;
+    _saver?.save();
+    _send({'__vsub': 'clear'});
+    _session = null;
+    _saver = null;
+    _sessionSrc = '';
+    _fileCues = null;
+    _fileSource = '';
+    _otherVideo = false;
+    _canCarryOn = false;
+    _sentCues.clear();
+    _notifiedLanguage = '';
+    widget.onWork();
+  }
+
+  Future<void> _chooseVideo() async {
+    final candidates = _seen.values
+        .map((e) => e.$1)
+        .where((v) => !v.isAdvertisement)
+        .toList();
+    final choice = await showModalBottomSheet<WebVideo>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Chọn video để gắn phụ đề')),
+            for (var i = 0; i < candidates.length; i++)
+              ListTile(
+                leading: Icon(
+                  candidates[i].paused
+                      ? Icons.pause_circle_outline
+                      : Icons.play_circle_outline,
+                ),
+                title: Text(
+                  'Video ${i + 1} · ${formatTime(candidates[i].duration)}',
+                ),
+                subtitle: Text(
+                  candidates[i].src,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                selected: candidates[i].reportKey == _video?.reportKey,
+                onTap: () => Navigator.pop(context, candidates[i]),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    _detachSubtitles();
+    setState(() {
+      _selectedVideoKey = choice.reportKey;
+      _video = choice;
+      _autoPage = '';
+    });
+    await _autoForPage(choice);
+  }
+
+  Future<void> _revise() async {
+    final video = _video;
+    final page = _pageUrl;
+    if (video == null) return;
+    final id = SubtitleStore.idForVideo(page, video.src);
+    await showSubtitleRevision(
+      context,
+      videoId: id,
+      language: _session?.language ?? _fileLanguage,
+      currentCues: () => _video?.src == video.src && _pageUrl == page
+          ? List.of(_session?.cues ?? _fileCues ?? [])
+          : [],
+      onApply: (next) async {
+        if (!mounted || _video?.src != video.src || _pageUrl != page) {
+          throw StateError('Bạn đã chuyển sang video khác');
+        }
+        if (_session case final SubtitleSession s) {
+          s.applyCues(next);
+          await ActiveWork.persist(id);
+        } else {
+          final saved = await SubtitleStore.loadVideo(
+            page,
+            video.src,
+            duration: video.duration,
+          );
+          if (saved == null) throw StateError('Không còn phụ đề của video này');
+          await SubtitleStore.save(saved.withCues(next));
+          if (mounted && _video?.src == video.src && _pageUrl == page) {
+            setState(() => _fileCues = next);
+          }
+        }
+        if (mounted && _pageUrl == page && _video?.src == video.src) {
+          _sendAllCues(next);
+        }
+      },
+    );
+  }
+
+  Future<void> _changeLanguage() async {
+    final video = _video;
+    final page = _pageUrl;
+    if (video == null) return;
+    final language = await chooseVideoLanguage(
+      context,
+      _session?.language ?? _fileLanguage,
+    );
+    if (language == null ||
+        !mounted ||
+        _video?.src != video.src ||
+        page != _pageUrl) {
+      return;
+    }
+    if (_session case final SubtitleSession session) {
+      await session.selectLanguage(language);
+      await ActiveWork.persist(session.videoId);
+    } else {
+      final saved = await SubtitleStore.loadVideo(
+        page,
+        video.src,
+        duration: video.duration,
+      );
+      if (saved != null) await SubtitleStore.save(saved.withLanguage(language));
+      if (mounted && _video?.src == video.src && _pageUrl == page) {
+        setState(() => _fileLanguage = language);
+      }
+    }
+  }
+
   /// Stops making subtitles but keeps the lines made so far on screen;
   /// "Làm tiếp" carries on later.
   Future<void> _stopMaking() async {
@@ -1006,26 +1240,53 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final (page, _) = await _pageInfo();
     if (!mounted || _session != session) return;
     AppLog.i('web', 'Dừng làm phụ đề (${cues.length} dòng)');
-    _stopSubtitles();
+    await _stopSubtitles();
     _showFileCues(cues, page, language, imported: false);
     _canCarryOn = !whole && (_video?.playable ?? false);
   }
 
   void _onSession() {
+    final session = _session;
+    if (mounted && session?.stopped == true) {
+      session!.removeListener(_onSession);
+      setState(() {
+        _fileCues = List.of(session.cues);
+        _fileSource = session.input;
+        _filePage = _pageUrl;
+        _fileLanguage = session.language;
+        _fileImported = false;
+        _session = null;
+        _saver = null;
+        _canCarryOn = true;
+      });
+      return;
+    }
+    if (!mounted || session == null || _video?.src != session.input) return;
+    if (!_hidden) {
+      for (final cue in session.cues) {
+        final key = (cue.start, cue.source);
+        if (_sentCues[key] != (cue.end, cue.text)) {
+          _send({'__vsub': 'cue', 'c': _cueData(cue)});
+          _sentCues[key] = (cue.end, cue.text);
+        }
+      }
+    }
+    if (session.languageLocked && _notifiedLanguage != session.language) {
+      _notifiedLanguage = session.language;
+      toast(context, 'Đã nhận diện ${session.languageNotice}');
+    }
     widget.onWork();
     if (mounted) setState(() {});
   }
 
-  void _stopSubtitles() {
+  Future<void> _stopSubtitles() async {
+    final stopping = ActiveWork.stop(_session);
     _hidden = false;
     _ackLogged = false;
-    ActiveWork.end(_session);
     _canCarryOn = false;
     _session?.removeListener(_onSession);
     // Takes its copy of the lines before the session is disposed.
-    _saver?.close();
     _saver = null;
-    _session?.dispose();
     _send({'__vsub': 'clear'});
     setState(() {
       _session = null;
@@ -1035,6 +1296,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _fileOffset = 0;
     });
     widget.onWork();
+    await stopping;
   }
 
   void _setSpeed(double speed) {
@@ -1044,6 +1306,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
 
   Future<void> _openInPlayer() async {
     final video = _video;
+    final originalPage = _pageUrl;
     if (video == null || !video.playable) return;
     var cookies = '';
     try {
@@ -1054,12 +1317,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     } catch (_) {}
     final page = (await _web?.getUrl())?.toString() ?? video.page;
     final title = (await _web?.getTitle()) ?? '';
-    if (!mounted) return;
+    if (!mounted || _pageUrl != originalPage || _video?.src != video.src) {
+      return;
+    }
     _send({'__vsub': 'pause'});
     // The player carries on making subtitles only if they were being made
     // here; it never starts on its own.
     final making = _session != null;
-    _stopSubtitles();
+    _detachSubtitles();
     await Navigator.push(
       context,
       MaterialPageRoute(
@@ -1180,7 +1445,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     onLoadStart: (_, url) {
       // A new page: whatever video we knew about is gone.
       if (_session != null || _fileCues != null) {
-        _stopSubtitles();
+        _detachSubtitles();
       }
       setState(() => _video = null);
       _onLoadStart('${url ?? ''}');
@@ -1648,6 +1913,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         ),
       ],
       Text(session.stage, style: style),
+      Text(session.languageNotice, style: style),
     ];
   }
 
@@ -1757,6 +2023,20 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                     tooltip: 'Thêm',
                     icon: const Icon(Icons.more_vert, size: 20),
                     onSelected: (v) => switch (v) {
+                      'audio' => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => RetainedAudioScreen(
+                            videoId: SubtitleStore.idForVideo(
+                              _pageUrl,
+                              video.src,
+                            ),
+                          ),
+                        ),
+                      ),
+                      'language' => _changeLanguage(),
+                      'revise' => _revise(),
+                      'chooseVideo' => _chooseVideo(),
                       'import' => _importForPage(),
                       'library' => _useFromLibrary(),
                       'player' => _openInPlayer(),
@@ -1772,6 +2052,24 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                       _ => null,
                     },
                     itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'audio',
+                        child: Text('Âm thanh lưu riêng…'),
+                      ),
+                      if (active)
+                        const PopupMenuItem(
+                          value: 'language',
+                          child: Text('Ngôn ngữ của video…'),
+                        ),
+                      if (active)
+                        const PopupMenuItem(
+                          value: 'revise',
+                          child: Text('Yêu cầu dịch lại…'),
+                        ),
+                      const PopupMenuItem(
+                        value: 'chooseVideo',
+                        child: Text('Chọn video để gắn phụ đề…'),
+                      ),
                       const PopupMenuItem(
                         value: 'import',
                         child: Text('Nhập phụ đề từ file…'),
@@ -1816,7 +2114,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                       if (active)
                         const PopupMenuItem(
                           value: 'remove',
-                          child: Text('Bỏ phụ đề khỏi trang'),
+                          child: Text('Dừng dịch và bỏ phụ đề khỏi trang'),
                         ),
                     ],
                   ),

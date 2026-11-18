@@ -18,6 +18,9 @@ import 'model_store.dart';
 import 'openrouter_translator.dart';
 import 'subtitle_store.dart';
 import 'translator.dart';
+import 'video_language.dart';
+import 'video_pipeline.dart';
+import 'retained_audio.dart';
 
 /// How far ahead of the viewer subtitles are made.
 enum SubtitleMode {
@@ -150,10 +153,16 @@ class _Run {
   StreamSubscription<AsrEvent>? sub;
   AudioFeed? feed;
   Directory? dir;
+  Directory? audioDir;
   Timer? poll;
   DateTime lastChunk = DateTime.now();
   int pending = 0, nextChunk = 0;
   bool lastSent = false;
+  void Function()? releaseRecognition;
+  void Function()? releaseModel;
+  void Function()? releaseExtraction;
+  Timer? extractionPoll;
+  final cancelled = Completer<void>();
 }
 
 /// Recognises disjoint stretches of one film, with one shared subtitle list
@@ -162,6 +171,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   SubtitleSession({
     required this.input,
     required String language,
+    String? videoId,
     this.headers = const {},
     Translator? translator,
     this.onCue,
@@ -173,12 +183,22 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     Future<AsrWorker> Function(String)? createWorker,
     AudioFeed Function()? createFeed,
     Future<Directory> Function()? temporaryDirectory,
-  }) : language = saved?.language ?? language,
+    RetainedAudioStore? retainedAudio,
+  }) : videoId = videoId ?? input,
+       _language = VideoLanguage(
+         saved?.language.isNotEmpty == true ? saved!.language : language,
+       ),
        _parallel = parallel ?? appSettings.parallelSubtitles,
-       _translator = translator ?? Translator.create(),
+       _translator = translator ?? Translator.create(videoId: videoId ?? input),
        _createWorker = createWorker ?? _spawn,
        _createFeed = createFeed ?? AudioFeed.new,
+       audioStore = retainedAudio ?? RetainedAudioStore.instance,
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory {
+    if (saved != null &&
+        saved.source.isNotEmpty &&
+        (saved.source != input || saved.id != this.videoId)) {
+      throw ArgumentError('Phụ đề đã lưu thuộc video khác');
+    }
     cues.addAll(saved?.cues ?? initialCues);
     _covered.addAll(saved?.covered ?? initialCovered);
   }
@@ -186,7 +206,40 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   static Future<AsrWorker> _spawn(String lang) async =>
       AsrWorker.spawn(await ModelStore.config(lang));
 
-  final String input, language;
+  final String input, videoId;
+  final RetainedAudioStore audioStore;
+  String audioTitle = '';
+  bool audioHidden = false;
+  AudioArchive? _audioArchive;
+  Future<AudioArchive>? _audioOpening;
+  Future<void>? _audioClosing;
+  bool _audioCompleted = false;
+
+  Future<void> markAudioCompleted() async {
+    if (_audioCompleted || _audioArchive == null) return;
+    _audioCompleted = true;
+    await _audioArchive!.update(completed: true);
+  }
+
+  Future<void> closeAudio() => _audioClosing ??= () async {
+    await Future.wait(_retiring.toList());
+    final opening = _audioOpening;
+    if (opening == null) return;
+    AudioArchive archive;
+    try {
+      archive = await opening;
+    } catch (_) {
+      return;
+    }
+    await archive.close();
+  }();
+  final VideoLanguage _language;
+  String get language => _language.code;
+  bool get languageLocked => _language.locked;
+  String get languageNotice => languageLocked
+      ? '${kLanguages[language] ?? language} — dùng cho toàn bộ video'
+      : 'Đang nhận diện ngôn ngữ từ lời thoại…';
+  int _translationEpoch = 0;
   final Map<String, String> headers;
   final void Function(Cue cue)? onCue;
   final Future<AsrWorker> Function(String) _createWorker;
@@ -207,6 +260,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   bool _parallel, _lowMemory = false, _started = false, _disposed = false;
   bool _translatorReady = false, _changingEngine = false;
   bool finished = false, reachedEnd = false, paused = false;
+  bool stopped = false;
   double duration = 0, _position = 0, _seekTarget = -100, _lastProcessed = 0;
   int _outOfRange = 0, _nextGen = 0, _epoch = 0;
   int _chunksFed = 0, _linesHeard = 0, _fillers = 0, _translateFailures = 0;
@@ -238,7 +292,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   ]);
   int get _slots =>
       _mode == SubtitleMode.whole && _parallel && !_lowMemory ? 2 : 1;
-  bool _owns(_Run r) => !_disposed && identical(_runs[r.slot], r);
+  bool _owns(_Run r) => !_disposed && !stopped && identical(_runs[r.slot], r);
 
   SessionActivity get activity {
     if (error != null) return SessionActivity.failed;
@@ -321,6 +375,16 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       _root = root;
+      _audioOpening = audioStore.create(
+        videoId,
+        title: audioTitle,
+        hidden: audioHidden,
+      );
+      _audioArchive = await _audioOpening;
+      if (_disposed || stopped) {
+        await closeAudio();
+        return;
+      }
       _schedule();
     } catch (e, st) {
       _fail('$e', st);
@@ -329,16 +393,21 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   void _prepareTranslator() {
     final engine = _translator;
+    final epoch = _translationEpoch;
     Future<void> prepare() async {
       try {
         if (language != 'auto') {
           await engine.prepare(language).timeout(const Duration(minutes: 5));
         }
-        if (_disposed || engine != _translator) return;
+        if (_disposed || engine != _translator || epoch != _translationEpoch) {
+          return;
+        }
         _translatorReady = true;
         _retranslate();
       } catch (e) {
-        if (_disposed || engine != _translator) return;
+        if (_disposed || engine != _translator || epoch != _translationEpoch) {
+          return;
+        }
         _prepareError = _lastTranslateError = 'Không chuẩn bị được bộ dịch: $e';
         AppLog.e('dịch', _lastTranslateError);
       }
@@ -349,7 +418,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _retranslate() {
-    if (!_translatorReady ||
+    if (stopped ||
+        !languageLocked ||
+        !_translatorReady ||
         _translator.status.state == TranslationState.disabled) {
       return;
     }
@@ -362,30 +433,35 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       ...remaining.where(near),
       ...remaining.where((c) => !near(c)),
     ]) {
-      _queueCue(c, _cueLanguages[(c.start, c.source)] ?? language);
+      _queueCue(c, language);
     }
   }
 
   void _queueCue(Cue cue, String lang) {
     final key = '$lang|${cue.source}';
     final id = (cue.start, cue.source);
-    if (!_translatorReady ||
+    if (stopped ||
+        !languageLocked ||
+        !_translatorReady ||
         _translator.status.state == TranslationState.disabled ||
         _blockedTranslations.contains(key) ||
         !_pendingCues.add(id)) {
       return;
     }
     final engine = _translator;
+    final translationEpoch = _translationEpoch;
     final future = _translations.putIfAbsent(
       key,
       () => _doTranslate(engine, cue, lang).whenComplete(() {
-        _translations.remove(key);
+        if (translationEpoch == _translationEpoch) _translations.remove(key);
       }),
     );
     unawaited(
       future.then((text) {
+        if (_disposed || stopped || translationEpoch != _translationEpoch) {
+          return;
+        }
         _pendingCues.remove(id);
-        if (_disposed) return;
         if (text != null && text != cue.source) {
           _replaceText(cue.start, cue.source, text);
         }
@@ -472,7 +548,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   bool _fileRelay = false;
 
   void _schedule() {
-    if (_disposed || _root == null || error != null || paused) return;
+    if (_disposed || stopped || _root == null || error != null || paused) {
+      return;
+    }
     final occupied = [
       ...covered,
       for (final r in _runs.values) (r.base, r.end ?? double.infinity),
@@ -548,22 +626,26 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       // In particular, release the old native workers before reallocating on a seek.
       await Future.wait(_retiring.toList());
       if (!_owns(r)) return;
-      final worker = await _createWorker(language);
-      if (!_owns(r)) {
-        await worker.dispose();
-        return;
-      }
-      r.worker = worker;
-      r.sub = worker.events.listen((e) => _onEvent(r, e));
-      worker.reset(r.gen, r.base);
       final dir = await Directory(p.join(_root!.path, 'g${r.gen}')).create();
       if (!_owns(r)) {
         await _deleteDir(dir);
         return;
       }
       r.dir = dir;
+      final audioDir = await _audioArchive!.createRun(r.gen, r.base);
+      r.audioDir = audioDir;
+      if (!_owns(r)) return;
       final source = await (_resolving ??= _audioSource());
       if (!_owns(r)) return;
+      final releaseExtraction = await VideoPipeline.extraction.acquire(
+        videoId,
+        cancelled: r.cancelled.future,
+      );
+      if (!_owns(r)) {
+        releaseExtraction();
+        return;
+      }
+      r.releaseExtraction = releaseExtraction;
       final feed = r.feed = _createFeed();
       final end = r.end;
       final stop = end == null
@@ -577,7 +659,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       );
       await feed.start(
         input: source,
-        outDir: dir.path,
+        outDir: audioDir.path,
         headers: _hls && !_noRelay ? const {} : headers,
         hls: _hls,
         startSec: r.base,
@@ -587,6 +669,34 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         await feed.stop();
         return;
       }
+      r.extractionPoll = Timer.periodic(const Duration(milliseconds: 400), (
+        timer,
+      ) {
+        if (feed.done || !_owns(r)) {
+          timer.cancel();
+          r.releaseExtraction?.call();
+          r.releaseExtraction = null;
+        }
+      });
+      // Audio extraction can run while another film occupies recognition.
+      // Limit native model allocations as well as simultaneous decoding.
+      final releaseModel = await VideoPipeline.recognizers.acquire(
+        videoId,
+        cancelled: r.cancelled.future,
+      );
+      if (!_owns(r)) {
+        releaseModel();
+        return;
+      }
+      r.releaseModel = releaseModel;
+      final worker = await _createWorker(language);
+      if (!_owns(r)) {
+        await worker.dispose();
+        return;
+      }
+      r.worker = worker;
+      r.sub = worker.events.listen((e) => _onEvent(r, e));
+      worker.reset(r.gen, r.base);
       lastActivity = r.lastChunk = DateTime.now();
       r.poll = Timer.periodic(
         const Duration(milliseconds: 400),
@@ -617,9 +727,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       _finish(r, 'Không nhận thêm âm thanh trong 60 giây');
       return;
     }
-    while (r.pending < 3) {
-      final current = File(p.join(r.dir!.path, chunkName(r.nextChunk)));
-      final next = File(p.join(r.dir!.path, chunkName(r.nextChunk + 1)));
+    while (r.pending < 1) {
+      final current = File(p.join(r.audioDir!.path, chunkName(r.nextChunk)));
+      final next = File(p.join(r.audioDir!.path, chunkName(r.nextChunk + 1)));
       if (!next.existsSync()) {
         if (!feed.done) return;
         r.lastSent = true;
@@ -628,11 +738,37 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
       }
-      r.worker!.feed(r.gen, current.path, last: r.lastSent);
       r.pending++;
       r.nextChunk++;
       _chunksFed++;
       r.lastChunk = DateTime.now();
+      unawaited(() async {
+        final release = await VideoPipeline.recognition.acquire(
+          videoId,
+          cancelled: r.cancelled.future,
+        );
+        if (!_owns(r)) {
+          release();
+          return;
+        }
+        r.releaseRecognition = release;
+        try {
+          // The worker may delete its input. It receives a disposable copy;
+          // the original audio remains private until explicit confirmation.
+          final working = await current.copy(
+            p.join(r.dir!.path, p.basename(current.path)),
+          );
+          if (!_owns(r)) {
+            release();
+            return;
+          }
+          r.worker!.feed(r.gen, working.path, last: r.lastSent);
+        } catch (e, st) {
+          release();
+          r.releaseRecognition = null;
+          if (_owns(r)) _fail('$e', st);
+        }
+      }());
       if (r.lastSent) return;
     }
   }
@@ -645,6 +781,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         _fillers++;
       case AsrSegment():
         _linesHeard++;
+        final detected = _language.observe(event.lang, event.end - event.start);
+        if (detected) {
+          _translationEpoch++;
+          _translatorReady = false;
+        }
         final c = Cue(
           start: event.start,
           end: event.end + 0.4,
@@ -652,11 +793,18 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
           source: event.text,
         );
         if (_addCue(c)) {
-          final lang = _langOf(event);
+          final lang = language;
           _cueLanguages[(c.start, c.source)] = lang;
           _queueCue(c, lang);
         }
+        if (detected) {
+          AppLog.i('phụ đề', 'Đã nhận diện $languageNotice');
+          _prepareTranslator();
+          unawaited(_replan());
+        }
       case AsrProgress():
+        r.releaseRecognition?.call();
+        r.releaseRecognition = null;
         r.pending--;
         r.processedUntil = event.until;
         if (event.last || (r.lastSent && r.pending <= 0)) {
@@ -679,6 +827,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void _finish(_Run r, String failure) {
     if (!_owns(r)) return;
     r.poll?.cancel();
+    r.extractionPoll?.cancel();
     final at = r.processedUntil;
     final tail =
         duration > 0 && r.end == duration && at > r.base && at >= duration - 15;
@@ -742,6 +891,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _lastProcessed = r.processedUntil;
     if (r.processedUntil > r.base) _covered.add((r.base, r.processedUntil));
     r.poll?.cancel();
+    if (!r.cancelled.isCompleted) r.cancelled.complete();
+    r.releaseRecognition?.call();
+    r.releaseRecognition = null;
     r.sub?.cancel();
     final workerStopped = r.worker?.dispose();
     final stopping =
@@ -751,6 +903,10 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
             await workerStopped;
             await r.opening;
           } finally {
+            r.releaseExtraction?.call();
+            r.releaseExtraction = null;
+            r.releaseModel?.call();
+            r.releaseModel = null;
             if (r.dir != null) await _deleteDir(r.dir!);
           }
         })().catchError((Object e) {
@@ -813,8 +969,57 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     onCue?.call(cues[i]);
   }
 
-  String _langOf(AsrSegment s) =>
-      language == 'auto' ? (s.lang.isEmpty ? 'ja' : s.lang) : language;
+  /// A manual correction invalidates translations still returning under the
+  /// old language. Original words and timestamps remain available to revise.
+  Future<void> selectLanguage(String code) async {
+    if (_disposed) return;
+    _language.select(code);
+    cueRevision++;
+    _translationEpoch++;
+    _translations.clear();
+    _pendingCues.clear();
+    _blockedTranslations.clear();
+    _cueLanguages.clear();
+    for (final cue in List.of(cues)) {
+      if (cue.source.isNotEmpty) {
+        _replaceText(cue.start, cue.source, cue.source);
+      }
+    }
+    _translatorReady = false;
+    _prepareTranslator();
+    if (_root != null) await _replan();
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Used by revision UI; pending automatic translations must not overwrite
+  /// a revision accepted by the viewer.
+  void applyCues(List<Cue> replacement) {
+    if (_disposed) return;
+    _translationEpoch++;
+    _pendingCues.clear();
+    _translations.clear();
+    cues
+      ..clear()
+      ..addAll(replacement);
+    cueRevision++;
+    for (final c in cues) {
+      onCue?.call(c);
+    }
+    _retranslate();
+    notifyListeners();
+  }
+
+  void requestStop() {
+    if (_disposed || stopped) return;
+    stopped = true;
+    _tick?.cancel();
+    _translationEpoch++;
+    for (final run in _runs.values.toList()) {
+      _retire(run);
+    }
+    unawaited(_translator.dispose());
+    notifyListeners();
+  }
 
   bool _addCue(Cue cue) {
     // After seeking back, the same speech can be recognised twice.
@@ -1057,7 +1262,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   String get details => [
     stage,
-    'Ngôn ngữ: $language',
+    languageNotice,
+    'Video: $videoId',
     'Nguồn video: ${AppLog.url(input)}',
     for (final step in steps) '${step.title}: ${step.detail}',
     'Bỏ qua $_fillers tiếng đệm',
@@ -1087,6 +1293,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     if (root != null) {
       Future.wait(_retiring.toList()).then((_) => _deleteDir(root));
     }
+    unawaited(closeAudio());
     super.dispose();
   }
 }

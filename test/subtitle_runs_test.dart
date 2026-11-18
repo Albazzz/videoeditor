@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video/models/cue.dart';
 import 'package:video/services/asr_worker.dart';
 import 'package:video/services/audio_feed.dart';
+import 'package:video/services/retained_audio.dart';
 import 'package:video/services/subtitle_session.dart';
 import 'package:video/services/subtitle_store.dart';
 import 'package:video/services/translator.dart';
@@ -101,6 +102,9 @@ void main() {
     translator: translator,
     mode: mode,
     temporaryDirectory: () async => root,
+    retainedAudio: RetainedAudioStore(
+      baseDirectory: () async => Directory('${root.path}/audio'),
+    ),
     createFeed: () {
       final f = _Feed();
       feeds.add(f);

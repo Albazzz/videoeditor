@@ -34,6 +34,7 @@ class AudioFeed {
   int? _sessionId;
   Process? _process;
   bool _stopped = false;
+  final _closed = Completer<void>();
 
   Future<void> start({
     required String input,
@@ -108,6 +109,7 @@ class AudioFeed {
       final session = await CrashTrail.guard(
         'Khởi động ffmpeg để lấy âm thanh',
         () => FFmpegKit.executeWithArgumentsAsync(args, (s) async {
+          if (!_closed.isCompleted) _closed.complete();
           if (_stopped) return;
           final rc = await s.getReturnCode();
           AppLog.i('ffmpeg', 'Lấy âm thanh kết thúc, mã $rc');
@@ -132,6 +134,7 @@ class AudioFeed {
       p.stderr.transform(const SystemEncoding().decoder).listen(err.write);
       unawaited(
         p.exitCode.then((code) {
+          if (!_closed.isCompleted) _closed.complete();
           if (_stopped) return;
           if (code != 0) error = err.toString().trim();
           done = true;
@@ -146,6 +149,9 @@ class AudioFeed {
     final id = _sessionId;
     if (id != null) await FFmpegKit.cancel(id);
     _process?.kill();
+    if (id != null || _process != null) {
+      await _closed.future.timeout(const Duration(seconds: 10));
+    }
   }
 }
 

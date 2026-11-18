@@ -80,7 +80,12 @@ abstract class Translator {
 
   /// The translator chosen in Settings. [force] ignores the "translate"
   /// switch, for when the user asked for a translation there and then.
-  static Translator create({bool force = false}) {
+  static Translator create({
+    bool force = false,
+    String videoId = '',
+    String additionalInstruction = '',
+    List<(String, String)> contextBefore = const [],
+  }) {
     if (!force && !appSettings.translate) return PassthroughTranslator();
     final cloud = appSettings.aiProvider;
     if (cloud != null && appSettings.useCloud) {
@@ -88,6 +93,9 @@ abstract class Translator {
         provider: cloud,
         apiKey: appSettings.keyFor(cloud),
         model: appSettings.modelFor(cloud),
+        videoId: videoId,
+        additionalInstruction: additionalInstruction,
+        contextBefore: contextBefore,
       );
     }
     return TranslatorPacks.supported

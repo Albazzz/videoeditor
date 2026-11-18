@@ -18,6 +18,32 @@ import UIKit
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "VsubNet") {
       installNetChannel(registrar.messenger())
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "VsubPrivateAudio") {
+      installPrivateAudioChannel(registrar.messenger())
+    }
+  }
+}
+
+private func installPrivateAudioChannel(_ messenger: FlutterBinaryMessenger) {
+  let channel = FlutterMethodChannel(name: "vsub/private_audio", binaryMessenger: messenger)
+  channel.setMethodCallHandler { call, result in
+    guard call.method == "directory" else { result(FlutterMethodNotImplemented); return }
+    do {
+      let manager = FileManager.default
+      let support = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                    appropriateFor: nil, create: true)
+      var directory = support.appendingPathComponent("retained_audio", isDirectory: true)
+      try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [
+        .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+        .posixPermissions: 0o700
+      ])
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try directory.setResourceValues(values)
+      result(directory.path)
+    } catch {
+      result(FlutterError(code: "private_audio", message: "Không mở được kho âm thanh riêng", details: nil))
+    }
   }
 }
 

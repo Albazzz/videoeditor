@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/cue.dart';
+import 'subtitle_store.dart';
+import 'active_work.dart';
 
 const _videoExt = {'.mp4', '.mov', '.m4v', '.mkv', '.webm', '.avi', '.ts'};
 
@@ -14,6 +17,7 @@ class VideoItem {
 
   String get name => p.basename(file.path);
   File get srtFile => File('${p.withoutExtension(file.path)}.srt');
+  File get subtitleDataFile => File('${file.path}.subs.json');
 }
 
 /// Videos live inside the app's private storage. Hidden ones sit in a
@@ -77,6 +81,9 @@ class VideoLibrary {
 
   /// Moves a video (and its subtitles) into or out of the vault.
   static Future<void> setHidden(VideoItem item, bool hidden) async {
+    await ActiveWork.stop(
+      ActiveWork.find('file:${item.file.absolute.path}')?.session,
+    );
     final dir = await _dir(hidden);
     final target = await _freePath(dir, item.name);
     final srt = item.srtFile;
@@ -84,18 +91,118 @@ class VideoLibrary {
     if (await srt.exists()) {
       await _move(srt, '${p.withoutExtension(target)}.srt');
     }
+    if (await item.subtitleDataFile.exists()) {
+      await _move(item.subtitleDataFile, '$target.subs.json');
+    }
   }
 
   static Future<void> delete(VideoItem item) async {
+    await ActiveWork.stop(
+      ActiveWork.find('file:${item.file.absolute.path}')?.session,
+    );
     if (await item.srtFile.exists()) await item.srtFile.delete();
+    if (await item.subtitleDataFile.exists()) {
+      await item.subtitleDataFile.delete();
+    }
     if (await item.file.exists()) await item.file.delete();
   }
 
-  static Future<List<Cue>> loadCues(VideoItem item) async =>
-      await item.srtFile.exists()
-      ? parseSrt(await item.srtFile.readAsString())
-      : <Cue>[];
+  static Future<Map<String, dynamic>?> _subtitleData(VideoItem item) async {
+    try {
+      return jsonDecode(await item.subtitleDataFile.readAsString())
+          as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
 
-  static Future<void> saveCues(VideoItem item, List<Cue> cues) =>
-      item.srtFile.writeAsString(toSrt(cues));
+  static Future<String> subtitleLanguage(VideoItem item) async =>
+      (await _subtitleData(item))?['language'] as String? ?? '';
+
+  static Future<SavedSubs?> loadSubtitleState(VideoItem item) async {
+    final data = await _subtitleData(item);
+    if (data == null) return null;
+    return SavedSubs(
+      id: 'file:${item.file.absolute.path}',
+      title: item.name,
+      page: item.file.uri.toString(),
+      source: item.file.path,
+      language: data['language'] as String? ?? 'auto',
+      updated: DateTime.now(),
+      cues: await loadCues(item),
+      covered: [
+        for (final pair in data['covered'] as List? ?? const [])
+          ((pair[0] as num).toDouble(), (pair[1] as num).toDouble()),
+      ],
+      duration: (data['duration'] as num?)?.toDouble() ?? 0,
+      complete: data['complete'] as bool? ?? true,
+      imported: data['imported'] == true,
+    );
+  }
+
+  static Future<List<Cue>> loadCues(VideoItem item) async {
+    final data = await _subtitleData(item);
+    if (data?['cues'] case final List lines) {
+      return [
+        for (final c in lines)
+          Cue(
+            start: (c[0] as num).toDouble(),
+            end: (c[1] as num).toDouble(),
+            text: c[2] as String,
+            source: c[3] as String,
+          ),
+      ];
+    }
+    return await item.srtFile.exists()
+        ? parseSrt(await item.srtFile.readAsString())
+        : <Cue>[];
+  }
+
+  static final _writes = <String, Future<void>>{};
+  static Future<void> saveCues(
+    VideoItem item,
+    List<Cue> cues, {
+    String language = '',
+    List<(double, double)>? covered,
+    double? duration,
+    bool? complete,
+    bool? imported,
+  }) {
+    final copy = List.of(cues);
+    final ranges = covered == null
+        ? null
+        : [
+            for (final pair in covered) [pair.$1, pair.$2],
+          ];
+    final task = (_writes[item.file.path] ?? Future<void>.value()).then((
+      _,
+    ) async {
+      if (!await item.file.exists()) return;
+      final old = await _subtitleData(item);
+      final tmp = File('${item.subtitleDataFile.path}.tmp');
+      await tmp.writeAsString(
+        jsonEncode({
+          'language': language.isEmpty ? (old?['language'] ?? '') : language,
+          'covered': ranges ?? old?['covered'] ?? [],
+          'duration': duration ?? old?['duration'] ?? 0,
+          'complete': complete ?? old?['complete'] ?? true,
+          'imported': imported ?? old?['imported'] ?? false,
+          'cues': [
+            for (final c in copy) [c.start, c.end, c.text, c.source],
+          ],
+        }),
+        flush: true,
+      );
+      await tmp.rename(item.subtitleDataFile.path);
+      await item.srtFile.writeAsString(toSrt(copy));
+    });
+    final tail = task.then<void>((_) {}, onError: (_) {});
+    _writes[item.file.path] = tail;
+    tail.then((_) {
+      if (identical(_writes[item.file.path], tail)) {
+        _writes.remove(item.file.path);
+      }
+    });
+    return task;
+  }
 }

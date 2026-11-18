@@ -20,7 +20,10 @@ import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import '../widgets/subtitle_style.dart';
+import '../widgets/subtitle_revision.dart';
+import '../widgets/video_language.dart';
 import 'export_sheet.dart';
+import 'retained_audio_screen.dart';
 
 /// Plays a library video or a stream found in the browser, with subtitles
 /// drawn by the app (so they also show in full screen) and speed up to 2.5x.
@@ -68,10 +71,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Cue? _cue;
   double? _dragging;
   DateTime _lastPositionSave = DateTime(0);
+  String _notifiedLanguage = '';
 
   /// Where the watch position of this video is kept.
   String? get _positionKey => widget.item != null
-      ? 'file:${widget.item!.name}'
+      ? 'file:${widget.item!.file.absolute.path}'
+      : widget.page == null
+      ? null
+      : SubtitleStore.idForVideo(widget.page!, _input);
+
+  /// Where the place in the film is kept: per page for web videos (with
+  /// the length check WatchPosition does), like the browser, so a new
+  /// signed video address does not lose it.
+  String? get _watchKey => widget.item != null
+      ? _positionKey
       : widget.page == null
       ? null
       : SubtitleStore.idFor(widget.page!);
@@ -99,7 +112,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         'Mở video bằng trình phát',
         () => _player.initialize(),
       );
-      final key = _positionKey;
+      final key = _watchKey;
       final resume = widget.startAt > 1 || key == null
           ? null
           : await WatchPosition.load(key, duration: _duration);
@@ -115,14 +128,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final page = widget.page;
       if (item != null) {
         final saved = await VideoLibrary.loadCues(item);
+        final state = await VideoLibrary.loadSubtitleState(item);
         if (saved.isNotEmpty && mounted) {
           setState(() {
             _cues = saved;
-            _saved = true;
+            _saved = state?.isWholeVideo ?? true;
+            _canResume = state?.canResume ?? false;
+            _fromFile = state?.imported ?? false;
           });
         }
       } else if (page != null) {
-        final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
+        final saved = await SubtitleStore.loadVideo(
+          page,
+          _input,
+          duration: _duration,
+        );
         if (saved != null && saved.cues.isNotEmpty && mounted) {
           setState(() {
             _cues = saved.cues;
@@ -132,8 +152,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
           });
         }
       }
+      final running = ActiveWork.find(_positionKey ?? _input);
+      if (running != null && mounted) _attachWork(running);
       if (mounted) setState(() {});
-      if (widget.autoSubtitles && _cues.isEmpty) _startSubtitles();
+      if (widget.autoSubtitles && (_cues.isEmpty || _canResume)) {
+        _startSubtitles();
+      }
       if (!mounted) return;
       _scheduleHide();
     } catch (e, st) {
@@ -154,7 +178,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _savePosition({bool now = false}) {
-    final key = _positionKey;
+    final key = _watchKey;
     if (key == null || !_player.value.isInitialized) return;
     final time = DateTime.now();
     if (!now && time.difference(_lastPositionSave).inSeconds < 5) return;
@@ -173,10 +197,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _startSubtitles() async {
     if (_session != null) return;
+    final running = ActiveWork.find(_positionKey ?? _input);
+    if (running != null) {
+      _attachWork(running);
+      return;
+    }
     final page = widget.item == null ? widget.page : null;
     final saved = page == null
-        ? null
-        : await SubtitleStore.load(SubtitleStore.idFor(page));
+        ? await VideoLibrary.loadSubtitleState(widget.item!)
+        : await SubtitleStore.loadVideo(page, _input, duration: _duration);
     if (!mounted || _session != null) return;
     if (saved != null && saved.imported) {
       setState(() {
@@ -189,11 +218,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     if (!await ensureModels(context)) return;
     if (!mounted || _session != null) return;
+    final storedLanguage = widget.item == null
+        ? ''
+        : await VideoLibrary.subtitleLanguage(widget.item!);
+    if (!mounted || _session != null) return;
+    final alreadyRunning = ActiveWork.find(_positionKey ?? _input);
+    if (alreadyRunning != null) {
+      _attachWork(alreadyRunning);
+      return;
+    }
     final session = SubtitleSession(
       input: _input,
-      language: appSettings.language,
+      videoId: _positionKey ?? _input,
+      language: storedLanguage.isEmpty ? appSettings.language : storedLanguage,
       headers: widget.headers,
       saved: saved,
+      initialCues: page == null ? _cues : const [],
       // A library file is local: making all of it costs no data.
       mode: appSettings.subWhole || widget.item != null
           ? SubtitleMode.whole
@@ -204,8 +244,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _saver = SessionSaver(
         session: session,
         page: page,
+        source: _input,
+        videoId: _positionKey ?? _input,
         title: widget.title,
-        duration: () => _duration,
+        duration: () => session.duration,
       );
     }
     setState(() {
@@ -215,21 +257,70 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _saved = false;
       _showSubs = true;
     });
-    ActiveWork.begin(_positionKey ?? _input, widget.title, session);
+    final item = widget.item;
+    ActiveWork.begin(
+      _positionKey ?? _input,
+      widget.title,
+      session,
+      saver: _saver,
+      hidden: item?.hidden ?? false,
+      onSave: item == null
+          ? null
+          : (s) => VideoLibrary.saveCues(
+              item,
+              List.of(s.cues),
+              language: s.language,
+              covered: s.covered,
+              duration: s.duration,
+              complete: coversWholeVideo(
+                s.covered,
+                s.duration,
+                reachedEnd: s.reachedEnd,
+              ),
+              imported: false,
+            ),
+    );
     session.start(_position);
   }
 
   void _onSession() {
     final session = _session;
+    if (mounted && session?.stopped == true) {
+      session!.removeListener(_onSession);
+      setState(() {
+        _cues = List.of(session.cues);
+        _session = null;
+        _saver = null;
+        _canResume = true;
+      });
+      KeepAwake.hold(this, false);
+      return;
+    }
     KeepAwake.hold(this, KeepAwake.needed(session));
     if (session == null || !mounted) return;
+    if (session.languageLocked && _notifiedLanguage != session.language) {
+      _notifiedLanguage = session.language;
+      toast(context, 'Ngôn ngữ: ${session.languageNotice}');
+    }
     final item = widget.item;
     if (session.activity == SessionActivity.done &&
         !_saved &&
         item != null &&
         session.cues.isNotEmpty) {
       _saved = true;
-      VideoLibrary.saveCues(item, session.cues);
+      VideoLibrary.saveCues(
+        item,
+        session.cues,
+        language: session.language,
+        covered: session.covered,
+        duration: session.duration,
+        complete: coversWholeVideo(
+          session.covered,
+          session.duration,
+          reachedEnd: session.reachedEnd,
+        ),
+        imported: false,
+      );
     }
     setState(() {});
   }
@@ -239,6 +330,87 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _startSubtitles();
     } else {
       setState(() => _showSubs = !_showSubs);
+    }
+  }
+
+  void _attachWork(ActiveWork work) {
+    if (work.session.input != _input) return;
+    _session?.removeListener(_onSession);
+    setState(() {
+      _session = work.session;
+      _saver = work.saver;
+      _cues = work.session.cues;
+      _canResume = false;
+      _showSubs = true;
+    });
+    work.session.addListener(_onSession);
+    work.session.updatePosition(_position, duration: _duration);
+  }
+
+  Future<void> _stopMaking() async {
+    final session = _session;
+    if (session == null) return;
+    session.removeListener(_onSession);
+    setState(() {
+      _cues = List.of(session.cues);
+      _session = null;
+      _saver = null;
+      _canResume = true;
+    });
+    await ActiveWork.stop(session);
+  }
+
+  Future<void> _revise() async {
+    final id = _positionKey ?? _input;
+    final language =
+        _session?.language ??
+        (widget.item == null
+            ? (await SubtitleStore.loadVideo(
+                    widget.page ?? '',
+                    _input,
+                  ))?.language ??
+                  'auto'
+            : await VideoLibrary.subtitleLanguage(widget.item!));
+    if (!mounted) return;
+    await showSubtitleRevision(
+      context,
+      videoId: id,
+      language: language,
+      currentCues: () => List.of(_session?.cues ?? _cues),
+      onApply: (next) async {
+        if (!mounted) return;
+        if (_session case final SubtitleSession s) {
+          s.applyCues(next);
+          await ActiveWork.persist(id);
+        } else {
+          setState(() => _cues = next);
+          await _keepCues(language: language);
+        }
+      },
+    );
+  }
+
+  Future<void> _changeLanguage() async {
+    final code = await chooseVideoLanguage(
+      context,
+      _session?.language ?? 'auto',
+    );
+    if (code == null || !mounted) return;
+    if (_session case final SubtitleSession session) {
+      await session.selectLanguage(code);
+      await ActiveWork.persist(session.videoId);
+    } else {
+      final page = widget.page;
+      if (page != null) {
+        final saved = await SubtitleStore.loadVideo(
+          page,
+          _input,
+          duration: _duration,
+        );
+        if (saved != null) await SubtitleStore.save(saved.withLanguage(code));
+      } else if (widget.item case final VideoItem item) {
+        await VideoLibrary.saveCues(item, _cues, language: code);
+      }
     }
   }
 
@@ -268,10 +440,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final imported = await importSubtitleFile(context);
     if (imported == null || !mounted) return;
     _session?.removeListener(_onSession);
-    _saver?.close();
+    await ActiveWork.stop(_session);
+    if (!mounted) return;
     _saver = null;
-    ActiveWork.end(_session);
-    _session?.dispose();
     setState(() {
       _session = null;
       _cues = imported.cues;
@@ -280,7 +451,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _fromFile = true;
       _showSubs = true;
     });
-    await _keepCues();
+    await _keepCues(language: imported.language);
     if (mounted) {
       toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
     }
@@ -292,15 +463,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final item = widget.item;
     final page = widget.page;
     if (item != null) {
-      await VideoLibrary.saveCues(item, _cues);
+      await VideoLibrary.saveCues(
+        item,
+        _cues,
+        language: language ?? _session?.language ?? '',
+        complete: _fromFile ? true : null,
+        imported: _fromFile ? true : null,
+      );
     } else if (page != null) {
-      final id = SubtitleStore.idFor(page);
+      final id = SubtitleStore.idForVideo(page, _input);
       final old = await SubtitleStore.load(id);
       await SubtitleStore.save(
         SavedSubs(
           id: id,
           title: widget.title,
           page: page,
+          source: _input,
           language: language ?? old?.language ?? '',
           updated: DateTime.now(),
           cues: _cues,
@@ -353,9 +531,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.removeListener(_onTick);
     _player.dispose();
     _session?.removeListener(_onSession);
-    _saver?.close();
-    ActiveWork.end(_session);
-    _session?.dispose();
+    _session?.mode = SubtitleMode.whole;
+    _saver?.save();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
@@ -449,8 +626,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                   if (session != null)
                     Text(
-                      session.stage,
-                      maxLines: 1,
+                      '${session.stage}\n${session.languageNotice}',
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white60,
@@ -479,6 +656,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
               tooltip: 'Phụ đề',
               icon: const Icon(Icons.subtitles_outlined, color: Colors.white),
               onSelected: (v) => switch (v) {
+                'audio' => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => RetainedAudioScreen(
+                      videoId: _positionKey ?? _input,
+                      includeHidden: widget.item?.hidden ?? false,
+                    ),
+                  ),
+                ),
+                'language' => _changeLanguage(),
+                'revise' => _revise(),
+                'stop' => _stopMaking(),
                 'resume' => _startSubtitles(),
                 'import' => _importFile(),
                 'style' => showSubtitleStyle(context),
@@ -491,6 +680,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 _ => null,
               },
               itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'audio',
+                  child: Text('Âm thanh lưu riêng…'),
+                ),
+                const PopupMenuItem(
+                  value: 'language',
+                  child: Text('Ngôn ngữ của video…'),
+                ),
+                if (_cues.isNotEmpty)
+                  const PopupMenuItem(
+                    value: 'revise',
+                    child: Text('Yêu cầu dịch lại…'),
+                  ),
+                if (session != null)
+                  const PopupMenuItem(value: 'stop', child: Text('Dừng dịch')),
                 if (_canResume)
                   const PopupMenuItem(value: 'resume', child: Text('Làm tiếp')),
                 const PopupMenuItem(

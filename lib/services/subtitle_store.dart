@@ -56,6 +56,7 @@ class SavedSubs {
     this.duration = 0,
     this.complete = false,
     this.imported = false,
+    this.source = '',
   });
 
   final String id;
@@ -63,6 +64,9 @@ class SavedSubs {
 
   /// Address of the page the video was on.
   final String page;
+
+  /// Exact media source. Old page-only entries require manual selection.
+  final String source;
   final String language;
   final DateTime updated;
   final List<Cue> cues;
@@ -83,6 +87,7 @@ class SavedSubs {
     id: id,
     title: newTitle,
     page: page,
+    source: source,
     language: language,
     updated: updated,
     cues: cues,
@@ -101,6 +106,7 @@ class SavedSubs {
     id: id,
     title: title,
     page: page,
+    source: source,
     language: language,
     updated: DateTime.now(),
     cues: newCues,
@@ -111,6 +117,20 @@ class SavedSubs {
   );
 
   bool get canResume => !imported && (!isWholeVideo || untranslated > 0);
+
+  SavedSubs withLanguage(String value) => SavedSubs(
+    id: id,
+    title: title,
+    page: page,
+    source: source,
+    language: value,
+    updated: DateTime.now(),
+    cues: cues,
+    covered: covered,
+    duration: duration,
+    complete: complete,
+    imported: imported,
+  );
 
   bool get isWholeVideo =>
       imported || coversWholeVideo(covered, duration, reachedEnd: complete);
@@ -127,6 +147,7 @@ class SavedSubs {
     'id': id,
     'title': title,
     'page': page,
+    'source': source,
     'language': language,
     'updated': updated.millisecondsSinceEpoch,
     'duration': duration,
@@ -151,6 +172,7 @@ class SavedSubs {
       id: j['id'] as String,
       title: (j['title'] as String?) ?? '',
       page: (j['page'] as String?) ?? '',
+      source: (j['source'] as String?) ?? '',
       language: (j['language'] as String?) ?? '',
       updated: DateTime.fromMillisecondsSinceEpoch((j['updated'] as int?) ?? 0),
       duration: (j['duration'] as num?)?.toDouble() ?? 0,
@@ -190,6 +212,64 @@ class SubtitleStore {
     final uri = Uri.tryParse(page);
     final key = uri == null ? page : uri.removeFragment().toString();
     return sha1.convert(utf8.encode(key)).toString().substring(0, 20);
+  }
+
+  /// Keep query parameters: they may identify different episodes. A signed
+  /// URL changing is safer to select manually than to match the wrong film.
+  static String idForVideo(String page, String source) =>
+      idFor('${Uri.tryParse(page)?.removeFragment() ?? page}\n$source');
+
+  static String _pageKey(String page) =>
+      Uri.tryParse(page)?.removeFragment().toString() ?? page;
+
+  static Future<SavedSubs?> loadVideo(
+    String page,
+    String source, {
+    double duration = 0,
+  }) async {
+    final id = idForVideo(page, source);
+    final saved = await load(id);
+    if (saved != null && saved.source == source && saved.page == page) {
+      if (duration > 0 &&
+          saved.duration > 0 &&
+          (saved.duration - duration).abs() > 5) {
+        return null;
+      }
+      return saved;
+    }
+    // Streams usually get a new signed address on every visit (tokens,
+    // expiry, IP). The same page with a film of the same length is the same
+    // film: carry its subtitles over to the new address instead of starting
+    // again (and leaving a duplicate in the store). Entries saved before
+    // videos had their own key (no source) are matched the same way. Both
+    // lengths must be known and agree: a page can hold several videos, and
+    // a guess would put one film's lines on another.
+    final key = _pageKey(page);
+    SavedSubs? best;
+    for (final s in await list()) {
+      if (s.id == id || _pageKey(s.page) != key) continue;
+      final sameLength =
+          duration > 0 && s.duration > 0 && (s.duration - duration).abs() <= 5;
+      if (!sameLength) continue;
+      if (best == null || s.updated.isAfter(best.updated)) best = s;
+    }
+    if (best == null) return null;
+    final moved = SavedSubs(
+      id: id,
+      title: best.title,
+      page: page,
+      source: source,
+      language: best.language,
+      updated: best.updated,
+      cues: best.cues,
+      covered: best.covered,
+      duration: best.duration > 0 ? best.duration : duration,
+      complete: best.complete,
+      imported: best.imported,
+    );
+    await save(moved);
+    await delete(best.id);
+    return moved;
   }
 
   /// Entries are gzip-compressed JSON (a film's lines shrink to about a
@@ -323,7 +403,17 @@ class SessionSaver {
     required this.page,
     required this.title,
     this.duration,
-  }) : id = SubtitleStore.idFor(page) {
+    this.source = '',
+    String? videoId,
+  }) : id =
+           videoId ??
+           (source.isEmpty
+               ? SubtitleStore.idFor(page)
+               : SubtitleStore.idForVideo(page, source)) {
+    if (source.isNotEmpty &&
+        (source != session.input || id != session.videoId)) {
+      throw ArgumentError('Phiên dịch và nơi lưu không cùng video');
+    }
     _epoch = SubtitleStore.epochOf(id);
     session.addListener(_changed);
   }
@@ -337,6 +427,7 @@ class SessionSaver {
 
   final SubtitleSession session;
   final String page;
+  final String source;
   final String title;
   final String id;
   int _savedRevision = -1;
@@ -366,16 +457,18 @@ class SessionSaver {
 
   Future<void> _save() async {
     if (session.cues.isEmpty) return;
-    // Copy everything first: the session may be disposed while we wait.
+    final previous = await SubtitleStore.load(id);
+    // Snapshot after the disk lookup so a user revision accepted during that
+    // lookup cannot be overwritten by an older background snapshot.
     final cues = List.of(session.cues);
     final covered = session.covered;
     final finished = session.finished;
     final reachedEnd = session.reachedEnd;
     final length = duration?.call() ?? 0;
+    final language = session.language;
     _savedRevision = session.cueRevision;
     _savedFinished = finished;
     _savedCovered = coveredSeconds(covered);
-    final previous = await SubtitleStore.load(id);
     try {
       await SubtitleStore.save(
         ifEpoch: _epoch,
@@ -384,7 +477,8 @@ class SessionSaver {
           // A name the user gave the entry meanwhile is kept.
           title: previous?.title.isNotEmpty == true ? previous!.title : title,
           page: page,
-          language: session.language,
+          source: source,
+          language: language,
           updated: DateTime.now(),
           cues: cues,
           covered: covered,
