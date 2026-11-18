@@ -9,6 +9,7 @@ import UIKit
   ) -> Bool {
     let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
     installCrashLog()
+    installPrivacyCover()
     return launched
   }
 
@@ -43,6 +44,14 @@ private final class NetDownload {
 // request map has one owner. Check limits before buffering movie data.
 private final class NetDelegate: NSObject, URLSessionDataDelegate {
   var downloads: [Int: NetDownload] = [:]
+
+  // Dart resolves redirects and scopes credentials before the next request.
+  func urlSession(_ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
+  }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
     didReceive response: URLResponse,
@@ -174,6 +183,39 @@ private func onCrashSignal(
   sigaction(sig, previousActions + Int(sig), nil)
 }
 
+// MARK: - Privacy cover
+//
+// iOS photographs the screen for the app switcher as the app leaves the
+// foreground; the lock screen (Dart) comes too late for that picture, so
+// films, pages and the hidden vault could show there. Cover the window as
+// soon as the scene stops being active, uncover when it is active again.
+
+private let privacyCoverTag = 0x5653_5542
+
+private func installPrivacyCover() {
+  let center = NotificationCenter.default
+  _ = center.addObserver(
+    forName: UIScene.willDeactivateNotification, object: nil, queue: .main
+  ) { note in
+    guard let scene = note.object as? UIWindowScene else { return }
+    for window in scene.windows where window.viewWithTag(privacyCoverTag) == nil {
+      let cover = UIView(frame: window.bounds)
+      cover.tag = privacyCoverTag
+      cover.backgroundColor = .black
+      cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      window.addSubview(cover)
+    }
+  }
+  _ = center.addObserver(
+    forName: UIScene.didActivateNotification, object: nil, queue: .main
+  ) { note in
+    guard let scene = note.object as? UIWindowScene else { return }
+    for window in scene.windows {
+      window.viewWithTag(privacyCoverTag)?.removeFromSuperview()
+    }
+  }
+}
+
 private func installCrashLog() {
   guard
     let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -186,10 +228,10 @@ private func installCrashLog() {
 
   previousExceptionHandler = NSGetUncaughtExceptionHandler()
   NSSetUncaughtExceptionHandler { exception in
-    var text = "\n\(Date()) NSException \(exception.name.rawValue): \(exception.reason ?? "")\n"
-    if let info = exception.userInfo, !info.isEmpty {
-      text += "userInfo: \(info)\n"
-    }
+    // The reason says what broke (the app cleans links and keys out of it
+    // when moving it into its log); userInfo can hold request data, so no.
+    let reason = String((exception.reason ?? "").prefix(300))
+    var text = "\n\(Date()) NSException \(exception.name.rawValue): \(reason)\n"
     text += exception.callStackSymbols.prefix(60).joined(separator: "\n") + "\n"
     writeCrash(text)
     previousExceptionHandler?(exception)

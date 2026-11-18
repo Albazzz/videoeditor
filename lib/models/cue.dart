@@ -68,6 +68,8 @@ List<Cue> parseSrt(String content) {
     if (s == null || e == null) continue;
     cues.add(Cue(start: s, end: e, text: lines.sublist(ti + 1).join('\n')));
   }
+  // Files are not always in time order; lookups need them sorted.
+  cues.sort((a, b) => a.start.compareTo(b.start));
   return cues;
 }
 
@@ -83,9 +85,10 @@ Cue? cueAt(List<Cue> cues, double t) {
       hi = mid - 1;
     }
   }
-  // Lines that started up to a minute earlier may still be on (a long
-  // line from a file with short ones inside it); the latest one wins.
-  for (var i = found; i >= 0 && cues[i].start > t - 60; i--) {
+  // Any earlier line may still be on (a long line from a file with short
+  // ones inside it); the latest one wins. No subtitle lasts ten minutes,
+  // which bounds the walk back.
+  for (var i = found; i >= 0 && cues[i].start > t - 600; i--) {
     if (t < cues[i].end) return cues[i];
   }
   return null;

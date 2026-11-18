@@ -35,6 +35,17 @@ Future<ImportedSubtitles?> importSubtitleFile(BuildContext context) async {
 
   List<Cue> cues;
   try {
+    // Subtitle files are small; a film picked by mistake must not be read
+    // into memory.
+    if (await File(path).length() > 20 * 1024 * 1024) {
+      if (context.mounted) {
+        toast(
+          context,
+          'File quá lớn, không phải file phụ đề (.srt, .vtt, .ass)',
+        );
+      }
+      return null;
+    }
     final text = decodeSubtitleBytes(await File(path).readAsBytes());
     cues = parseSubtitleFile(text);
   } catch (e) {

@@ -144,6 +144,7 @@ class OpenRouterError implements Exception {
     this.message, {
     this.account = false,
     this.blocked = false,
+    this.permanent = false,
   });
   final String message;
 
@@ -151,6 +152,7 @@ class OpenRouterError implements Exception {
   /// the user fixes it.
   final bool account;
   final bool blocked;
+  final bool permanent;
   @override
   String toString() => message;
 }
@@ -240,6 +242,41 @@ class OpenRouterTranslator implements Translator {
   DateTime _nextRequest = DateTime(0);
   Duration _requestSpacing = Duration.zero;
   bool _structured = true;
+  double position = 0;
+  int _doneCount = 0, _failedCount = 0, _blockedCount = 0;
+  @override
+  TranslatorStatus get status {
+    final limited = _nextRequest.isAfter(DateTime.now()) && _rateWaiters > 0;
+    return TranslatorStatus(
+      _fatal != null
+          ? TranslationState.unavailable
+          : limited
+          ? TranslationState.cooldown
+          : _active.isNotEmpty
+          ? TranslationState.sending
+          : _waiting.isNotEmpty
+          ? TranslationState.gathering
+          : TranslationState.ready,
+      queued: _waiting.length,
+      linesInFlight: _active.length,
+      inFlight: _inFlight,
+      done: _doneCount,
+      failed: _failedCount,
+      blocked: _blockedCount,
+      cooldownUntil: limited ? _nextRequest : null,
+      note: _fatal?.message ?? provider.name,
+    );
+  }
+
+  int _rateWaiters = 0;
+  Future<void> _rateWait(Duration delay) async {
+    _rateWaiters++;
+    try {
+      await _wait(delay);
+    } finally {
+      _rateWaiters--;
+    }
+  }
 
   void _checkActive() {
     if (_disposed) throw const TranslationCancelled();
@@ -269,7 +306,7 @@ class OpenRouterTranslator implements Translator {
       _checkActive();
       final delay = _nextRequest.difference(DateTime.now());
       if (delay > Duration.zero) {
-        await _wait(delay);
+        await _rateWait(delay);
         continue;
       }
       _nextRequest = DateTime.now().add(_requestSpacing);
@@ -290,12 +327,12 @@ class OpenRouterTranslator implements Translator {
   Future<void> prepare(String lang) async {}
 
   @override
-  Future<String> translate(String text, String lang) {
+  Future<String> translate(String text, String lang, {double? start}) {
     if (_disposed) return Future.error(const TranslationCancelled());
     if (_fatal != null) return Future.error(_fatal!);
     final known = _done['$lang|$text'];
     if (known != null) return Future.value(known);
-    final w = _Waiting(text, lang);
+    final w = _Waiting(text, lang, start);
     _waiting.add(w);
     _waitingChars += text.length;
     _dispatch();
@@ -316,21 +353,26 @@ class OpenRouterTranslator implements Translator {
     while (_waiting.isNotEmpty && _liveRequests < parallel && !_disposed) {
       final full = _waitingChars >= budget || _waiting.length >= maxLines;
       final age = DateTime.now().difference(_waiting.first.since);
-      if (!full && age < gatherFor) {
-        _gather = Timer(gatherFor - age, _dispatch);
+      const firstWait = Duration(milliseconds: 300);
+      final idle = _liveRequests == 0;
+      final wait = idle && gatherFor > firstWait ? firstWait : gatherFor;
+      if (!full && !(idle && _waiting.length >= 4) && age < wait) {
+        _gather = Timer(wait - age, _dispatch);
         return;
       }
+      final urgent = _waiting.where((w) => w.near(position)).toList();
+      final ordered = [...urgent, ..._waiting.where((w) => !w.near(position))];
       final batch = <_Waiting>[];
       var chars = 0;
-      while (_waiting.isNotEmpty) {
-        final next = _waiting.first;
+      for (final next in ordered) {
         if (batch.isNotEmpty &&
             (chars + next.text.length > budget || batch.length >= maxLines)) {
           break;
         }
-        batch.add(_waiting.removeAt(0));
+        batch.add(next);
         chars += next.text.length;
       }
+      _waiting.removeWhere(batch.toSet().contains);
       _waitingChars -= chars;
       _sendLive(batch);
     }
@@ -347,19 +389,29 @@ class OpenRouterTranslator implements Translator {
       _active.addAll(items);
       final context = List.of(_recent);
       _liveRequests++;
-      _translateChunk([for (final w in items) w.text], entry.key, context)
-          .then(
+      _translateChunk(
+            [for (final w in items) w.text],
+            entry.key,
+            context,
+            onLineError: (i, e) => _failLine(items[i], e),
+          )
+          .then<void>(
             (out) {
               for (var i = 0; i < items.length; i++) {
                 if (items[i].done.isCompleted) continue;
                 final t = out[i];
                 if (t == null) {
+                  _failedCount++;
                   items[i].done.completeError(
-                    const OpenRouterError('Model không trả câu này'),
+                    const OpenRouterError(
+                      'Model không trả câu này',
+                      permanent: true,
+                    ),
                   );
                 } else {
                   if (_done.length > 3000) _done.clear();
                   _done['${items[i].lang}|${items[i].text}'] = t;
+                  _doneCount++;
                   _recent.add((items[i].text, t));
                   items[i].done.complete(t);
                 }
@@ -370,7 +422,7 @@ class OpenRouterTranslator implements Translator {
             },
             onError: (Object e) {
               for (final w in items) {
-                if (!w.done.isCompleted) w.done.completeError(e);
+                _failLine(w, e);
               }
             },
           )
@@ -380,6 +432,16 @@ class OpenRouterTranslator implements Translator {
             _dispatch();
           });
     }
+  }
+
+  void _failLine(_Waiting w, Object failure) {
+    if (w.done.isCompleted) return;
+    if (failure is OpenRouterError && failure.blocked) {
+      _blockedCount++;
+    } else if (failure is! TranslationCancelled) {
+      _failedCount++;
+    }
+    w.done.completeError(failure);
   }
 
   @override
@@ -427,9 +489,34 @@ class OpenRouterTranslator implements Translator {
   Future<List<String?>> _translateChunk(
     List<String> lines,
     String lang,
-    List<(String, String)> context,
-  ) async {
-    final out = await _request(lines, lang, context);
+    List<(String, String)> context, {
+    void Function(int, OpenRouterError)? onLineError,
+  }) async {
+    final List<String?> out;
+    try {
+      out = await _request(lines, lang, context);
+    } on OpenRouterError catch (e) {
+      if (!e.blocked || lines.length == 1) rethrow;
+      // A rejected batch doesn't identify the offending line. Keep each
+      // single-line decision, and let the remaining subtitles through.
+      final isolated = List<String?>.filled(lines.length, null);
+      await Future.wait([
+        for (var i = 0; i < lines.length; i++)
+          () async {
+            try {
+              isolated[i] = (await _request([lines[i]], lang, const [])).single;
+            } on OpenRouterError catch (lineError) {
+              if (lineError.account || lineError is TranslationCancelled) {
+                rethrow;
+              }
+              onLineError?.call(i, lineError);
+            }
+          }(),
+      ]);
+      if (isolated.every((v) => v == null) && onLineError == null) rethrow;
+      return isolated;
+    }
+
     final missing = [
       for (var i = 0; i < lines.length; i++)
         if (out[i] == null) i,
@@ -644,6 +731,7 @@ class OpenRouterTranslator implements Translator {
                 ? '${provider.name}: nhà cung cấp chặn nội dung ($code), tạm hiện câu gốc'
                 : '${provider.name} từ chối ($code): $detail',
             blocked: blocked,
+            permanent: true,
           );
         }
         if (code == 429) {
@@ -734,7 +822,11 @@ class OpenRouterTranslator implements Translator {
           _logTag,
           'Lần $attempt lỗi ($e), thử lại sau ${wait.inSeconds} giây',
         );
-        await _wait(wait);
+        if (cooldown > Duration.zero) {
+          await _rateWait(wait);
+        } else {
+          await _wait(wait);
+        }
       }
     }
   }
@@ -862,7 +954,10 @@ List<String?> parseTranslations(String content, int count) {
 }
 
 class _Waiting {
-  _Waiting(this.text, this.lang);
+  _Waiting(this.text, this.lang, this.start);
+  final double? start;
+  bool near(double position) =>
+      start != null && start! >= position - 2 && start! < position + 20;
   final String text;
   final String lang;
   final since = DateTime.now();

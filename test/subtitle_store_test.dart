@@ -17,6 +17,22 @@ void main() {
     await dir.delete(recursive: true);
   });
 
+  test('overlapping saves to one ID finish in order', () async {
+    final item = SavedSubs(
+      id: 'same',
+      page: 'page',
+      title: 'start',
+      language: 'ja',
+      updated: DateTime(2026),
+      cues: [],
+      covered: [],
+    );
+    await Future.wait([
+      for (var i = 0; i < 12; i++)
+        SubtitleStore.save(item.withTitle('Film $i')),
+    ]);
+    expect((await SubtitleStore.load('same'))?.title, 'Film 11');
+  });
   test('the same page always maps to the same entry', () {
     final a = SubtitleStore.idFor('https://phim.example.com/xem/tap-1#t=30');
     final b = SubtitleStore.idFor('https://phim.example.com/xem/tap-1');

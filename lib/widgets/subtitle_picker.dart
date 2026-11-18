@@ -74,7 +74,7 @@ Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
         _PickerSheet(entries: rankByTitle(all, pageTitle), duration: duration),
   );
   if (picked == null || !context.mounted) return null;
-  final unfinished = !picked.isWholeVideo && !picked.imported;
+  final unfinished = picked.canResume;
   if (!canCarryOn || !unfinished) return (picked, PickedUse.watch);
   final use = await showDialog<PickedUse>(
     context: context,

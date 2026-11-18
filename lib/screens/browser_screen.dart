@@ -70,9 +70,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
-  void _newTab({String? url, int? windowId}) {
+  void _newTab({String? url, int? windowId, bool select = true}) {
     if (_disposing) return;
-    _tabs.add(url: url, windowId: windowId);
+    final tab = _tabs.add(url: url, windowId: windowId, select: select);
+    if (!select) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: const Text('Đã mở trong tab mới'),
+            action: SnackBarAction(
+              label: 'Xem',
+              onPressed: () {
+                if (mounted && !_disposing) _tabs.select(tab.id);
+              },
+            ),
+          ),
+        );
+    }
   }
 
   void _closeTab(int id) {
@@ -92,7 +107,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _updateWork() {
     if (_disposing) return;
-    KeepAwake.set(
+    KeepAwake.hold(
+      this,
       _pages.values.any((key) => KeepAwake.needed(key.currentState?._session)),
     );
   }
@@ -102,7 +118,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _disposing = true;
     openPageRequest.removeListener(_openRequested);
     _tabs.dispose();
-    KeepAwake.set(false);
+    KeepAwake.hold(this, false);
     super.dispose();
   }
 
@@ -168,7 +184,7 @@ class _BrowserTabView extends StatefulWidget {
   final bool active;
   final int tabCount;
   final VoidCallback onTabs;
-  final void Function({String? url, int? windowId}) onNewTab;
+  final void Function({String? url, int? windowId, bool select}) onNewTab;
   final VoidCallback onClose;
   final void Function({String? url, String? title, bool? canGoBack}) onPage;
   final VoidCallback onWork;
@@ -224,6 +240,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
 
   /// Page already checked for saved subtitles and a resume point.
   String _autoPage = '';
+  (String, String)? _shortVideoChecked;
   bool _autoBusy = false;
   DateTime _lastPositionSave = DateTime(0);
 
@@ -251,14 +268,32 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       await Bookmarks.remove(page);
       if (mounted) toast(context, 'Đã bỏ lưu trang');
     } else {
-      await Bookmarks.add(page, title);
-      if (mounted) toast(context, 'Đã lưu trang, mở lại ở ⋮ → Trang đã lưu');
+      final bookmark = await Bookmarks.add(page, title);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                'Đã lưu vào ${bookmark.folder.isEmpty ? 'Ngoài cùng' : bookmark.folder}',
+              ),
+              action: SnackBarAction(
+                label: 'Đổi',
+                onPressed: () {
+                  if (mounted) editBookmark(context, bookmark);
+                },
+              ),
+            ),
+          );
+      }
     }
     await _checkBookmark();
   }
 
   Future<void> _openBookmarks() async {
     final url = await showBookmarks(context);
+    if (!mounted) return;
+    await _checkBookmark();
     if (url == null || !mounted) return;
     _address.text = url;
     _go(url);
@@ -296,6 +331,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   Timer? _slowLoad;
 
   void _onLoadStart(String url) {
+    _autoPage = '';
+    _shortVideoChecked = null;
     _seen.clear();
     _logged.clear();
     _loadStarted = DateTime.now();
@@ -360,8 +397,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     }
   }
 
-  /// Tells the user something was stopped and lets them open it anyway,
-  /// because a real link to another site looks the same as an advert.
+  bool _openWindow(URLRequest request, {int? windowId}) {
+    final target = request.url;
+    if (target == null || !{'https', 'http'}.contains(target.scheme)) {
+      return false;
+    }
+    final url = target.toString();
+    if (!mounted || !widget.active) return false;
+    if (appSettings.backgroundLinks) {
+      widget.onNewTab(url: url, windowId: windowId, select: false);
+      return windowId != null;
+    }
+    _web?.loadUrl(urlRequest: request);
+    return false;
+  }
+
   void _onBlocked(String url) {
     if (!mounted || !widget.active) return;
     final now = DateTime.now();
@@ -369,7 +419,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _lastBlockNotice = now;
     final target = Uri.tryParse(url);
     final canOpen =
-        target != null && target.hasScheme && !isAdHost(target.host);
+        target != null &&
+        {'https', 'http'}.contains(target.scheme) &&
+        !isAdHost(target.host);
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -385,7 +437,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
           action: canOpen
               ? SnackBarAction(
                   label: 'Vẫn mở',
-                  onPressed: () => widget.onNewTab(url: url),
+                  onPressed: () => _openWindow(URLRequest(url: WebUri(url))),
                 )
               : null,
         ),
@@ -407,6 +459,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _addressFocus.unfocus();
       _pauseBackground();
     } else if (!oldWidget.active && widget.active) {
+      _checkBookmark();
       _web?.evaluateJavascript(
         source:
             'window.__vsubSend && window.__vsubSend({"__vsub":"background","value":false});',
@@ -463,6 +516,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       unawaited(_syncAdBlock());
     }
     _session?.mode = _mode;
+    _session?.parallel = appSettings.parallelSubtitles;
     if (_session != null || _fileCues != null) {
       _send(appSettings.subtitleOpts);
     }
@@ -590,9 +644,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       }
     }
     _rememberPosition(video);
+    final short = video.duration < WatchPosition.minDuration;
     if (_autoPage != _pageUrl &&
         !_autoBusy &&
-        video.duration >= WatchPosition.minDuration) {
+        video.duration > 0 &&
+        (!short || _shortVideoChecked != (_pageUrl, video.src))) {
+      if (short) _shortVideoChecked = (_pageUrl, video.src);
       _autoForPage(video);
     }
     if (changed || !wasVisible) setState(() {});
@@ -609,6 +666,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       final saved = await SubtitleStore.load(id);
       final resume = await WatchPosition.load(id, duration: video.duration);
       if (!mounted || !widget.active || page != _pageUrl) return;
+      // A short film may have its own subtitles; a pre-roll must not use
+      // the longer film's subtitles or consume its resume prompt.
+      if (video.duration < WatchPosition.minDuration &&
+          (saved == null ||
+              saved.duration > 0 &&
+                  (saved.duration - video.duration).abs() > 5)) {
+        return;
+      }
       _autoPage = page;
       if (resume != null && video.time < 10) _offerResume(resume);
       if (saved == null || saved.cues.isEmpty) return;
@@ -617,12 +682,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã nhập');
         _showFileCues(saved.cues, page, saved.language);
         toast(context, 'Đã bật phụ đề đã nhập cho phim này');
-      } else if (saved.language == appSettings.language) {
+      } else {
         // Shown as they are; making more waits for the user ("Làm tiếp").
         if (!mounted) return;
         AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã làm');
         _showFileCues(saved.cues, page, saved.language, imported: false);
-        _canCarryOn = !saved.isWholeVideo && video.playable;
+        _canCarryOn = saved.canResume && video.playable;
         toast(
           context,
           _canCarryOn
@@ -729,16 +794,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _autoPage = _pageUrl;
     if (!mounted) return;
     if (use == PickedUse.carryOn) {
-      // The saved lines are reused only for the same spoken language.
-      if (src.language != appSettings.language &&
-          kLanguages.containsKey(src.language)) {
-        appSettings.setLanguage(src.language);
-      }
       await _startSubtitles();
     } else {
       _showFileCues(src.cues, page, src.language, imported: src.imported);
-      _canCarryOn =
-          !src.imported && !src.isWholeVideo && video?.playable == true;
+      _canCarryOn = src.canResume && video?.playable == true;
       toast(
         context,
         'Đã dùng ${src.cues.length} dòng. Lệch giờ thì chỉnh ở ⋮ '
@@ -819,8 +878,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final (page, title) = await _pageInfo();
     final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
     if (!mounted) return;
+    if (saved != null &&
+        saved.cues.isNotEmpty &&
+        _session == null &&
+        _fileCues == null) {
+      _showFileCues(saved.cues, page, saved.language, imported: saved.imported);
+      _canCarryOn = saved.canResume && video.playable;
+    }
     if (saved != null && saved.imported) {
-      _showFileCues(saved.cues, page, saved.language);
       toast(context, 'Dùng phụ đề đã nhập từ file');
       return;
     }
@@ -861,7 +926,6 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       );
       cookies = list.map((c) => '${c.name}=${c.value}').join('; ');
     } catch (_) {}
-    final reuse = saved != null && saved.language == appSettings.language;
     if (!mounted || _session != null) return;
     _send({'__vsub': 'clear'});
     _send(appSettings.subtitleOpts);
@@ -874,12 +938,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       language: appSettings.language,
       headers: video.headers(cookies),
       onCue: sendCue,
-      initialCues: reuse ? saved.cues : const [],
-      initialCovered: reuse ? saved.covered : const [],
+      saved: saved,
       mode: _mode,
     )..addListener(_onSession);
     session.duration = video.duration;
-    if (reuse) _sendAllCues(saved.cues);
+    if (saved != null) _sendAllCues(saved.cues);
     _saver = SessionSaver(
       session: session,
       page: page,
@@ -899,7 +962,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       title.isEmpty ? (Uri.tryParse(page)?.host ?? page) : title,
       session,
     );
-    if (reuse) {
+    if (saved != null) {
       toast(context, 'Dùng lại ${saved.cues.length} dòng phụ đề đã lưu');
     }
     session.start(_video?.time ?? video.time);
@@ -981,6 +1044,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final title = (await _web?.getTitle()) ?? '';
     if (!mounted) return;
     _send({'__vsub': 'pause'});
+    // The player carries on making subtitles only if they were being made
+    // here; it never starts on its own.
+    final making = _session != null;
     _stopSubtitles();
     await Navigator.push(
       context,
@@ -991,7 +1057,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
           url: video.src,
           headers: video.headers(cookies),
           startAt: video.time,
-          autoSubtitles: true,
+          autoSubtitles: making,
         ),
       ),
     );
@@ -1081,15 +1147,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       if (!widget.active) return false;
       final page = await _web?.getUrl();
       if (!mounted || !widget.active) return false;
-      // Pop-unders fire on the very tap that starts the film, so a tap does
-      // not make another site's window welcome. It is stopped with a "Vẫn
-      // mở" offer (a new tab); windows of the same site open as tabs.
       if (appSettings.adBlock && shouldBlockPopup(target, page)) {
         _onBlocked('${target ?? ''}');
         return false;
       }
-      widget.onNewTab(url: target?.toString(), windowId: action.windowId);
-      return true;
+      return _openWindow(action.request, windowId: action.windowId);
     },
     onCloseWindow: (_) => widget.onClose(),
     onWebViewCreated: (c) {
@@ -1429,6 +1491,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               color: appSettings.adBlock ? null : Colors.orange,
             ),
             onSelected: (v) => switch (v) {
+              'currentLinks' => appSettings.setBackgroundLinks(false),
+              'backgroundLinks' => appSettings.setBackgroundLinks(true),
               'adblock' => _toggleAdBlock(),
               'home' => _go(kHomePage),
               'save' => _toggleBookmark(),
@@ -1502,6 +1566,20 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                 ),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                enabled: false,
+                child: Text('Liên kết mở cửa sổ mới'),
+              ),
+              CheckedPopupMenuItem(
+                value: 'currentLinks',
+                checked: !appSettings.backgroundLinks,
+                child: const Text('Tab hiện tại'),
+              ),
+              CheckedPopupMenuItem(
+                value: 'backgroundLinks',
+                checked: appSettings.backgroundLinks,
+                child: const Text('Tab mới (chạy nền)'),
+              ),
               CheckedPopupMenuItem(
                 value: 'adblock',
                 checked: appSettings.adBlock,
@@ -1558,10 +1636,6 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         ),
       ],
       Text(session.stage, style: style),
-      if (session.translatorNote.isNotEmpty) ...[
-        const SizedBox(height: 3),
-        Text(session.translatorNote, style: style),
-      ],
     ];
   }
 
@@ -1637,7 +1711,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                   ),
                 ],
               ),
-              Row(
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   IconButton(
                     tooltip: 'Lùi 10 giây',
@@ -1649,7 +1725,6 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                     icon: const Icon(Icons.forward_10, size: 22),
                     onPressed: () => _send({'__vsub': 'skip', 'by': 10}),
                   ),
-                  const Spacer(),
                   PopupMenuButton<double>(
                     tooltip: 'Tốc độ',
                     initialValue: _speed,

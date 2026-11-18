@@ -1,8 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:video/models/cue.dart';
+import 'package:video/services/subtitle_store.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video/screens/browser_screen.dart';
+import 'package:video/services/app_settings.dart';
 
 // Exercise the real browser widget and callbacks without launching a native
 // browser or depending on external websites.
@@ -92,6 +97,15 @@ class FakeWebController extends PlatformInAppWebViewController {
   ]);
 
   @override
+  Future<void> loadUrl({
+    required URLRequest urlRequest,
+    Uri? iosAllowingReadAccessTo,
+    WebUri? allowingReadAccessTo,
+  }) async {
+    visit(urlRequest.url.toString(), 'Liên kết');
+  }
+
+  @override
   Future<WebUri?> getUrl() async => entries[index].url;
   @override
   Future<String?> getTitle() async => entries[index].title;
@@ -147,6 +161,7 @@ void main() {
   late FakeBrowserPlatform platform;
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    appSettings.setBackgroundLinks(false);
     platform = FakeBrowserPlatform();
     InAppWebViewPlatform.instance = platform;
   });
@@ -228,7 +243,7 @@ void main() {
   });
 
   testWidgets(
-    'same-site new windows get their own tab; other sites and ads are stopped',
+    'popup stays in the current tab by default, background links wait for Xem',
     (tester) async {
       await open(tester);
       final first = platform.views.single;
@@ -268,16 +283,70 @@ void main() {
       );
       expect(
         await first.params.onCreateWindow!(first.controller.facade, link),
+        false,
+      );
+      await tester.pumpAndSettle();
+      expect(platform.views.length, 1);
+      expect(await first.controller.getUrl(), link.request.url);
+      appSettings.setBackgroundLinks(true);
+      expect(
+        await first.params.onCreateWindow!(first.controller.facade, link),
         true,
       );
       await tester.pumpAndSettle();
       expect(platform.views.length, 2);
+      expect(
+        first.controller.scripts.where((s) => s.contains('"value":true')),
+        isEmpty,
+      );
+      expect(find.text('Xem'), findsOneWidget);
+      await tester.tap(find.text('Xem'));
+      await tester.pumpAndSettle();
+      expect(
+        first.controller.scripts.any((s) => s.contains('"value":true')),
+        true,
+      );
       expect(platform.views.last.params.windowId, 10);
       expect(platform.views.last.params.initialUrlRequest, isNull);
       expect(first.disposed, false);
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('Vẫn mở honours the destination selected in the browser menu', (
+    tester,
+  ) async {
+    await open(tester);
+    final first = platform.views.single;
+    first.controller.visit('https://a.example/x', 'A');
+    await tester.pumpAndSettle();
+    final popup = CreateWindowAction(
+      windowId: 1,
+      request: URLRequest(url: WebUri('https://b.example/y')),
+      isForMainFrame: true,
+    );
+    expect(
+      await first.params.onCreateWindow!(first.controller.facade, popup),
+      false,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Vẫn mở'));
+    await tester.pumpAndSettle();
+    expect(await first.controller.getUrl(), popup.request.url);
+    expect(platform.views.length, 1);
+    await tester.tap(find.byType(PopupMenuButton<String>).first);
+    await tester.pumpAndSettle();
+    final destination = find.widgetWithText(
+      CheckedPopupMenuItem<String>,
+      'Tab mới (chạy nền)',
+    );
+    await tester.ensureVisible(destination);
+    await tester.pumpAndSettle();
+    await tester.tap(destination);
+    await tester.pumpAndSettle();
+    expect(appSettings.backgroundLinks, true);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('closing the final tab opens a fresh home tab', (tester) async {
     await open(tester);
@@ -295,6 +364,59 @@ void main() {
     expect(find.text('1 tab đang mở'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
+
+  testWidgets(
+    'partial subtitles in a different language appear on a short film and on reload',
+    (tester) async {
+      const page = 'https://phim.example/ngan';
+      await open(tester);
+      final c = platform.views.single.controller;
+      final dir = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('booked_sub_test'),
+      ))!;
+      SubtitleStore.overrideDir = dir;
+      addTearDown(() async {
+        SubtitleStore.overrideDir = null;
+        await dir.delete(recursive: true);
+      });
+      await tester.runAsync(
+        () => SubtitleStore.save(
+          SavedSubs(
+            id: SubtitleStore.idFor(page),
+            title: 'Phim',
+            page: page,
+            language: 'ko',
+            updated: DateTime.now(),
+            duration: 30,
+            covered: [(0, 8)],
+            cues: [const Cue(start: 1, end: 3, text: 'Xin chào', source: '안녕')],
+          ),
+        ),
+      );
+      for (var i = 0; i < 2; i++) {
+        c.visit(page, 'Phim');
+        await tester.pumpAndSettle();
+        final before = c.scripts.length;
+        await tester.runAsync(() async {
+          c.reportVideo();
+          final limit = DateTime.now().add(const Duration(seconds: 2));
+          while (!c.scripts.skip(before).any((js) => js.contains('Xin chào'))) {
+            if (DateTime.now().isAfter(limit)) {
+              fail('Chưa hiện phụ đề trong WebView');
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+        });
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('Làm tiếp phần còn thiếu'), findsOneWidget);
+        ScaffoldMessenger.of(
+          tester.element(find.byType(BrowserScreen)),
+        ).removeCurrentSnackBar();
+        await tester.pumpAndSettle();
+      }
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 
   testWidgets('video controls can be hidden and restored without reloading', (
     tester,

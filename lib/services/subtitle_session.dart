@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'dart:math' as math;
+
+import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/cue.dart';
 import 'app_log.dart';
+import 'app_settings.dart';
 import 'asr_worker.dart';
 import 'audio_feed.dart';
 import 'hls.dart';
@@ -94,137 +97,195 @@ class SessionStep {
 /// What a session is doing, for the icon on the CC bar.
 enum SessionActivity { working, stuck, paused, done, failed }
 
-/// Generates Vietnamese subtitles for one video while it plays.
-///
-/// Audio is decoded ahead of the playback position, recognised, translated
-/// and appended to [cues]. Seeking outside what is already covered restarts
-/// the work from the new position.
-class SubtitleSession extends ChangeNotifier {
+/// Disjoint reservations; the audio reader adds at most two seconds at a seam.
+List<(double, double)> planRuns({
+  required List<(double, double)> covered,
+  required double duration,
+  required double position,
+  required int slots,
+}) {
+  if (duration <= 0 || slots <= 0) return [];
+  final gaps = <(double, double)>[];
+  var at = 0.0;
+  for (final r in mergeRanges(covered)) {
+    final end = math.min(duration, r.$1);
+    if (end - at > 3) gaps.add((at, end));
+    at = math.max(at, r.$2);
+  }
+  if (duration - at > 3) gaps.add((at, duration));
+  if (gaps.isEmpty) return [];
+  final viewer = position.clamp(0.0, duration);
+  final first = gaps.firstWhere(
+    (g) => g.$2 > viewer + 1,
+    orElse: () => gaps.first,
+  );
+  final start = viewer > first.$1 && viewer < first.$2 - 1 ? viewer : first.$1;
+  final runs = [(start, first.$2)];
+  if (slots == 1) return runs;
+  // A short gap costs more to split than to finish with one worker.
+  if (gaps.length == 1 && first.$2 - first.$1 <= 2 * kSeekJump) return [first];
+  for (final gap in gaps) {
+    if (gap == first) {
+      if (start - gap.$1 > 3) runs.add((gap.$1, start));
+    } else {
+      runs.add(gap);
+    }
+    if (runs.length == math.min(slots, 2)) return runs;
+  }
+  if (runs.length == 1 && first.$2 - start > 2 * kSeekJump) {
+    final mid = (start + first.$2) / 2;
+    return [(start, mid), (mid, first.$2)];
+  }
+  return runs;
+}
+
+class _Run {
+  _Run(this.slot, this.gen, this.base, this.end) : processedUntil = base;
+  final int slot, gen;
+  final double base;
+  final double? end;
+  double processedUntil;
+  AsrWorker? worker;
+  Future<void>? opening;
+  StreamSubscription<AsrEvent>? sub;
+  AudioFeed? feed;
+  Directory? dir;
+  Timer? poll;
+  DateTime lastChunk = DateTime.now();
+  int pending = 0, nextChunk = 0;
+  bool lastSent = false;
+}
+
+/// Recognises disjoint stretches of one film, with one shared subtitle list
+/// and translation queue for both workers.
+class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   SubtitleSession({
     required this.input,
-    required this.language,
+    required String language,
     this.headers = const {},
     Translator? translator,
     this.onCue,
+    SavedSubs? saved,
     List<Cue> initialCues = const [],
     List<(double, double)> initialCovered = const [],
     this._mode = SubtitleMode.whole,
-  }) : _translator = translator ?? Translator.create() {
-    cues.addAll(initialCues);
-    _covered.addAll(initialCovered);
+    bool? parallel,
+    Future<AsrWorker> Function(String)? createWorker,
+    AudioFeed Function()? createFeed,
+    Future<Directory> Function()? temporaryDirectory,
+  }) : language = saved?.language ?? language,
+       _parallel = parallel ?? appSettings.parallelSubtitles,
+       _translator = translator ?? Translator.create(),
+       _createWorker = createWorker ?? _spawn,
+       _createFeed = createFeed ?? AudioFeed.new,
+       _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory {
+    cues.addAll(saved?.cues ?? initialCues);
+    _covered.addAll(saved?.covered ?? initialCovered);
   }
 
-  /// Local file path or http(s) URL (mp4, m3u8, ...).
-  final String input;
-  final String language;
+  static Future<AsrWorker> _spawn(String lang) async =>
+      AsrWorker.spawn(await ModelStore.config(lang));
+
+  final String input, language;
   final Map<String, String> headers;
-  Translator _translator;
-
-  /// Called for every new subtitle line.
   final void Function(Cue cue)? onCue;
-
-  /// Sorted by start time.
+  final Future<AsrWorker> Function(String) _createWorker;
+  final AudioFeed Function() _createFeed;
+  final Future<Directory> Function() _temporaryDirectory;
   final List<Cue> cues = [];
-  String status = 'Đang chuẩn bị…';
+  final _covered = <(double, double)>[];
+  final _runs = <int, _Run>{};
+  final _retiring = <Future<void>>{};
+  final _retryCount = <int, int>{};
+  final _translations = <String, Future<String?>>{};
+  final _blockedTranslations = <String>{};
+  final _pendingCues = <(double, String)>{};
+  final _cueLanguages = <(double, String), String>{};
+
+  Translator _translator;
+  SubtitleMode _mode;
+  bool _parallel, _lowMemory = false, _started = false, _disposed = false;
+  bool _translatorReady = false, _changingEngine = false;
+  bool finished = false, reachedEnd = false, paused = false;
+  double duration = 0, _position = 0, _seekTarget = -100, _lastProcessed = 0;
+  int _outOfRange = 0, _nextGen = 0, _epoch = 0;
+  int _chunksFed = 0, _linesHeard = 0, _fillers = 0, _translateFailures = 0;
+  int cueRevision = 0;
+  String status = 'Đang chuẩn bị…',
+      translatorNote = '',
+      _lastTranslateError = '';
   String? error;
-
-  /// True once the audio has been processed to the end of the video.
-  bool finished = false;
-
-  /// Speech is recognised up to this second in the current run.
-  double processedUntil = 0;
-
-  /// What the translator is doing, empty when it is simply working.
-  String translatorNote = '';
-
-  /// Length of the video, once the player knows it.
-  double duration = 0;
-
-  /// The audio was followed to its real end, without errors. With an
-  /// unknown [duration] this is the only proof the whole film was done.
-  bool reachedEnd = false;
-  double? _runEnd;
-
-  /// Work is resting ([SubtitleMode.follow], far enough ahead).
-  bool paused = false;
+  String? _prepareError;
+  DateTime lastActivity = DateTime.now(), _lastSeekRestart = DateTime(0);
+  Directory? _root;
+  Timer? _tick;
+  Future<String>? _resolving;
+  String? _source;
+  String _feedError = '';
   double? _resumeAt;
-  double _position = 0;
-  int _autoRuns = 0;
-  double? _lastAutoStart;
-  int _fillers = 0;
+  double? _audioEnd;
+  double get _planDuration => _audioEnd ?? duration;
 
-  /// Last time audio was heard, a line came in or work restarted.
-  DateTime lastActivity = DateTime.now();
+  int get waitingTranslation => _pendingCues.length;
+  double get processedUntil =>
+      _runs[0]?.processedUntil ??
+      _runs.values.firstOrNull?.processedUntil ??
+      _lastProcessed;
+  List<(double, double)> get covered => mergeRanges([
+    ..._covered,
+    for (final r in _runs.values)
+      if (r.processedUntil > r.base) (r.base, r.processedUntil),
+  ]);
+  int get _slots =>
+      _mode == SubtitleMode.whole && _parallel && !_lowMemory ? 2 : 1;
+  bool _owns(_Run r) => !_disposed && identical(_runs[r.slot], r);
 
   SessionActivity get activity {
     if (error != null) return SessionActivity.failed;
-    if (finished && waitingTranslation == 0) return SessionActivity.done;
+    if (finished &&
+        waitingTranslation == 0 &&
+        (_translatorReady ||
+            _prepareError != null ||
+            _translator.status.state == TranslationState.disabled)) {
+      return SessionActivity.done;
+    }
     if (paused) return SessionActivity.paused;
+    if (waitingTranslation > 0 ||
+        _translator.status.state == TranslationState.downloading) {
+      return SessionActivity.working;
+    }
     return DateTime.now().difference(lastActivity) > const Duration(seconds: 20)
         ? SessionActivity.stuck
         : SessionActivity.working;
   }
 
-  /// Lines heard whose translation has not arrived yet.
-  int waitingTranslation = 0;
-  int _lateTranslations = 0;
-  int _feedRetries = 0;
-  double _seekTarget = -100;
-  DateTime _lastSeekRestart = DateTime(0);
-  DateTime _lastChunkAt = DateTime.now();
-
-  SubtitleMode _mode;
   SubtitleMode get mode => _mode;
   set mode(SubtitleMode value) {
-    if (value == _mode) return;
+    if (_mode == value) return;
     _mode = value;
-    AppLog.i('phụ đề', 'Chế độ: ${value.name}');
-    if (_disposed) return;
-    if (paused && value == SubtitleMode.whole) {
-      unawaited(_restart(_resumeAt ?? processedUntil));
-    } else if (finished && value == SubtitleMode.whole) {
-      _carryOn();
-    } else {
-      _maybePause();
-    }
-    notifyListeners();
+    if (_root != null) unawaited(_replan());
   }
 
-  AsrWorker? _worker;
-  StreamSubscription<AsrEvent>? _sub;
-  AudioFeed? _feed;
-  Timer? _poll;
-  Directory? _root;
-  Directory? _dir;
-  int _gen = 0;
-  double _base = 0;
-  int _nextChunk = 0;
-  int _pending = 0;
-  bool _lastSent = false;
-  int _outOfRange = 0;
-  bool _disposed = false;
-  String? _source;
-  Future<void> _translating = Future.value();
-  bool _translatorReady = false;
+  set parallel(bool value) {
+    if (_parallel == value) return;
+    _parallel = value;
+    if (_root != null && _mode == SubtitleMode.whole && !_lowMemory) {
+      unawaited(_replan());
+    }
+  }
 
-  // Counters for the "what is going on" panel.
-  int _chunksFed = 0;
-  int _linesHeard = 0;
-  int _translateFailures = 0;
-  String _lastTranslateError = '';
-  String _feedError = '';
-  final _translations = <String, Future<String?>>{};
-  final _blockedTranslations = <String>{};
-  final DateTime _created = DateTime.now();
-
-  /// Ranges [from, to] already transcribed by earlier runs.
-  final List<(double, double)> _covered = [];
-
-  /// Every range transcribed so far, including the one in progress.
-  List<(double, double)> get covered => [
-    ..._covered,
-    if (processedUntil > _base) (_base, processedUntil),
-  ];
+  @override
+  void didHaveMemoryPressure() {
+    if (_lowMemory || _disposed) return;
+    _lowMemory = true;
+    final second = _runs[1];
+    if (second != null) {
+      AppLog.i('phụ đề', 'Thiếu bộ nhớ, dừng lượt 2 và làm tiếp bằng một lượt');
+      _retire(second);
+      _schedule();
+      notifyListeners();
+    }
+  }
 
   /// Removes audio left behind when the app was killed mid-session. Call
   /// once at launch, before any session exists.
@@ -237,169 +298,139 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   Future<void> start(double at) async {
-    if (_disposed) return;
-    _position = at;
+    if (_disposed || _started) return;
+    _started = true;
+    _position = math.max(0, at);
+    WidgetsBinding.instance.addObserver(this);
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!finished || waitingTranslation > 0) notifyListeners();
+    });
     AppLog.i(
       'phụ đề',
-      'Bắt đầu: ${AppLog.url(input)} · tiếng $language · từ giây '
-          '${at.toStringAsFixed(1)} · ${cues.length} dòng có sẵn · '
-          'dịch: ${_translator is OpenRouterTranslator ? '${(_translator as OpenRouterTranslator).provider.name} · ${(_translator as OpenRouterTranslator).model}' : _translator.runtimeType}',
+      'Bắt đầu ${AppLog.url(input)} · tiếng $language · ${cues.length} dòng có sẵn',
     );
+    _prepareTranslator();
     try {
-      _set('Đang nạp mô hình nhận dạng…');
-      final config = await ModelStore.config(language);
-      if (_disposed) return;
-      final worker = await AsrWorker.spawn(config);
-      if (_disposed) {
-        worker.dispose();
-        return;
-      }
-      _worker = worker;
-      AppLog.i('phụ đề', 'Đã nạp bộ nhận dạng');
-      if (_disposed) return;
-      _sub ??= _worker!.events.listen(_onEvent);
-      _prepareTranslator();
-      final tmp = await getTemporaryDirectory();
-      if (_disposed) return;
-      _root ??= await Directory(
+      final tmp = await _temporaryDirectory();
+      final parent = await Directory(
         p.join(tmp.path, 'vsub'),
-      ).create(recursive: true).then((d) => d.createTemp('s'));
+      ).create(recursive: true);
+      final root = await parent.createTemp('s');
       if (_disposed) {
-        await _root?.delete(recursive: true);
+        await root.delete(recursive: true);
         return;
       }
-      await _restart(at);
+      _root = root;
+      _schedule();
     } catch (e, st) {
-      if (_disposed) return;
-      AppLog.e('phụ đề', 'Không khởi động được: $e', st);
-      error = '$e';
-      _set('Lỗi: $e');
+      _fail('$e', st);
     }
   }
 
-  /// The translator may need a download. Recognition must not wait for it:
-  /// lines appear in the original language first and are translated once it
-  /// is ready.
   void _prepareTranslator() {
-    if (language == 'auto') {
-      _translatorReady = true;
+    final engine = _translator;
+    Future<void> prepare() async {
+      try {
+        if (language != 'auto') {
+          await engine.prepare(language).timeout(const Duration(minutes: 5));
+        }
+        if (_disposed || engine != _translator) return;
+        _translatorReady = true;
+        _retranslate();
+      } catch (e) {
+        if (_disposed || engine != _translator) return;
+        _prepareError = _lastTranslateError = 'Không chuẩn bị được bộ dịch: $e';
+        AppLog.e('dịch', _lastTranslateError);
+      }
+      notifyListeners();
+    }
+
+    unawaited(prepare());
+  }
+
+  void _retranslate() {
+    if (!_translatorReady ||
+        _translator.status.state == TranslationState.disabled) {
       return;
     }
-    translatorNote = 'Đang tải bộ dịch, tạm hiện câu gốc';
-    _translator
-        .prepare(language)
-        .timeout(const Duration(minutes: 5))
-        .then((_) {
-          if (_disposed) return;
-          _translatorReady = true;
-          translatorNote = '';
-          AppLog.i('dịch', 'Bộ dịch $language → vi sẵn sàng');
-          _retranslate();
-          notifyListeners();
-        })
-        .catchError((Object e) {
-          if (_disposed) return;
-          AppLog.e('dịch', 'Không chuẩn bị được bộ dịch $language: $e');
-          translatorNote = 'Bộ dịch chưa dùng được, đang hiện câu gốc';
-          _lastTranslateError = '$e';
-          notifyListeners();
-        });
+    final remaining = [
+      for (final c in cues)
+        if (c.source.isNotEmpty && c.source == c.text) c,
+    ];
+    bool near(Cue c) => c.end >= _position && c.start < _position + 20;
+    for (final c in [
+      ...remaining.where(near),
+      ...remaining.where((c) => !near(c)),
+    ]) {
+      _queueCue(c, _cueLanguages[(c.start, c.source)] ?? language);
+    }
   }
 
-  Future<String?> _translate(String text, String lang) {
-    if (_disposed) return Future.value();
-    final key = '$lang|$text';
-    if (_blockedTranslations.contains(key)) return Future.value();
-    return _translations.putIfAbsent(
+  void _queueCue(Cue cue, String lang) {
+    final key = '$lang|${cue.source}';
+    final id = (cue.start, cue.source);
+    if (!_translatorReady ||
+        _translator.status.state == TranslationState.disabled ||
+        _blockedTranslations.contains(key) ||
+        !_pendingCues.add(id)) {
+      return;
+    }
+    final engine = _translator;
+    final future = _translations.putIfAbsent(
       key,
-      () => _doTranslate(
-        text,
-        lang,
-      ).whenComplete(() => _translations.remove(key)),
+      () => _doTranslate(engine, cue, lang).whenComplete(() {
+        _translations.remove(key);
+      }),
+    );
+    unawaited(
+      future.then((text) {
+        _pendingCues.remove(id);
+        if (_disposed) return;
+        if (text != null && text != cue.source) {
+          _replaceText(cue.start, cue.source, text);
+        }
+        if (engine != _translator && _translatorReady) _queueCue(cue, lang);
+        lastActivity = DateTime.now();
+        notifyListeners();
+      }),
     );
   }
 
-  Future<String?> _doTranslate(String text, String lang) async {
-    final translator = _translator;
+  Future<String?> _doTranslate(Translator engine, Cue c, String lang) async {
     try {
-      // Cloud requests have their own bounded attempts and abortable timeout.
-      // Time spent waiting in the batch queue must not expire each line and
-      // create a second, duplicate request while the first is still running.
-      final result = translator.translate(text, lang);
-      return await (translator is OpenRouterTranslator
-          ? result
-          : result.timeout(translator.timeout));
+      if (engine is OpenRouterTranslator) {
+        engine.position = _position;
+        return await engine.translate(c.source, lang, start: c.start);
+      }
+      if (engine is MlKitTranslator) {
+        engine.position = _position;
+        return await engine.translate(c.source, lang, start: c.start);
+      }
+      return await engine.translate(c.source, lang).timeout(engine.timeout);
     } catch (e) {
-      if (_disposed || e is TranslationCancelled || translator != _translator) {
+      if (_disposed || e is TranslationCancelled || engine != _translator) {
         return null;
       }
-      if (e is OpenRouterError && e.blocked) {
-        _blockedTranslations.add('$lang|$text');
+      if (e is OpenRouterError && (e.blocked || e.permanent)) {
+        _blockedTranslations.add('$lang|${c.source}');
       }
       _translateFailures++;
       _lastTranslateError = '$e';
-      if (e is OpenRouterError && e.account) _fallBackToDevice(e.message);
-      // The first few say what is wrong; after that only now and then.
       if (_translateFailures <= 3 || _translateFailures % 25 == 0) {
-        AppLog.e('dịch', 'Lần lỗi thứ $_translateFailures ($lang): $e');
+        AppLog.e('dịch', _lastTranslateError);
+      }
+      if (e is OpenRouterError && e.account && !_changingEngine) {
+        _changingEngine = true;
+        translatorNote = '${e.message} · tạm dùng bộ dịch trên máy';
+        AppLog.e('dịch', translatorNote);
+        _translator = TranslatorPacks.supported
+            ? MlKitTranslator()
+            : PassthroughTranslator();
+        _translatorReady = false;
+        unawaited(engine.dispose());
+        _prepareTranslator();
       }
       return null;
-    }
-  }
-
-  /// OpenRouter will not work until the user fixes the key or the
-  /// balance: carry on with the translator on the phone, once.
-  void _fallBackToDevice(String why) {
-    if (_translator is! OpenRouterTranslator || _disposed) return;
-    final old = _translator;
-    _translator = TranslatorPacks.supported
-        ? MlKitTranslator()
-        : PassthroughTranslator();
-    unawaited(old.dispose());
-    translatorNote = '$why · tạm dịch bằng bộ dịch trên máy';
-    AppLog.e(
-      'dịch',
-      'Bộ dịch AI không dùng được ($why), chuyển sang dịch trên máy',
-    );
-    _translatorReady = false;
-    _translator
-        .prepare(language)
-        .then((_) {
-          if (_disposed) return;
-          _translatorReady = true;
-          _retranslate();
-          notifyListeners();
-        })
-        .catchError((Object e) {
-          AppLog.e('dịch', 'Bộ dịch trên máy cũng lỗi: $e');
-        });
-    notifyListeners();
-  }
-
-  /// Translates lines that were shown in the original language.
-  void _retranslate() {
-    if (_disposed) return;
-    for (final c in List.of(cues)) {
-      if (c.source.isEmpty || c.text != c.source) continue;
-      // Started at once so a cloud translator can send them together.
-      final pending = _translate(c.source, language);
-      _translating = _translating.then((_) async {
-        if (_disposed) return;
-        final text = await pending;
-        if (text == null || _disposed) return;
-        final i = cues.indexWhere(
-          (x) => x.start == c.start && x.source == c.source,
-        );
-        if (i < 0) return;
-        cues[i] = Cue(
-          start: cues[i].start,
-          end: cues[i].end,
-          text: text,
-          source: c.source,
-        );
-        onCue?.call(cues[i]);
-        notifyListeners();
-      });
     }
   }
 
@@ -440,355 +471,331 @@ class SubtitleSession extends ChangeNotifier {
   /// A plain file is fetched through the relay (ffmpeg was turned away).
   bool _fileRelay = false;
 
-  Future<void> _restart(double at) async {
-    if (_disposed) return;
-    final gen = ++_gen;
-    try {
-      if (_feed != null && processedUntil > _base) {
-        _covered.add((_base, processedUntil));
+  void _schedule() {
+    if (_disposed || _root == null || error != null || paused) return;
+    final occupied = [
+      ...covered,
+      for (final r in _runs.values) (r.base, r.end ?? double.infinity),
+    ];
+    final free = [
+      for (var i = 0; i < _slots; i++)
+        if (!_runs.containsKey(i)) i,
+    ];
+    if (free.isEmpty) return;
+    late final List<(double, double?)> plan;
+    final length = _planDuration;
+    if (length <= 0) {
+      if (_runs.isNotEmpty) return;
+      var from = _position;
+      for (final r in mergeRanges(occupied)) {
+        if (from >= r.$1 && from < r.$2) from = r.$2;
       }
-      paused = false;
-      _resumeAt = null;
-      _poll?.cancel();
-      await _feed?.stop();
-      final old = _dir;
-      if (old != null) {
-        unawaited(old.delete(recursive: true).catchError((_) => old));
+      plan = reachedEnd ? [] : [(from, runEnd(occupied, from))];
+    } else if (_mode == SubtitleMode.follow) {
+      final next = nextStart(
+        covered: occupied,
+        duration: length,
+        position: _position,
+        mode: _mode,
+      );
+      if (next != null && next - _position > kFollowAhead) {
+        _pauseAt(next);
+        return;
       }
-      if (_disposed || gen != _gen) return;
-
-      // Do not redo a stretch that already has subtitles.
-      var from = at < 0 ? 0.0 : at;
-      for (final r in _covered) {
-        if (from >= r.$1 - 1 && from < r.$2 - 5) from = r.$2 - 2;
+      plan = next == null
+          ? []
+          : [
+              (
+                next,
+                planRuns(
+                  covered: occupied,
+                  duration: length,
+                  position: next,
+                  slots: 1,
+                ).first.$2,
+              ),
+            ];
+    } else {
+      plan = planRuns(
+        covered: occupied,
+        duration: length,
+        position: _position,
+        slots: free.length,
+      );
+    }
+    if (plan.isEmpty && _runs.isEmpty) {
+      if (!finished) {
+        finished = true;
+        _retranslate();
+        _set(
+          cues.isEmpty
+              ? 'Đã nghe hết nhưng không thấy lời thoại'
+              : 'Đã nghe xong',
+        );
       }
-      _base = from;
-      processedUntil = _base;
-      _nextChunk = 0;
-      _pending = 0;
-      _lastSent = false;
-      _lastChunkAt = DateTime.now();
-      lastActivity = DateTime.now();
+      return;
+    }
+    for (var i = 0; i < plan.length; i++) {
+      final r = _Run(free[i], ++_nextGen, plan[i].$1, plan[i].$2);
+      _runs[r.slot] = r;
       finished = false;
-      error = null;
-      _feedError = '';
-      _dir = await Directory(p.join(_root!.path, 'g$gen')).create();
-      if (_disposed || gen != _gen) return;
-      _worker!.reset(gen, _base);
-      // Stop where subtitles already exist, so nothing is made twice.
-      final end = _runEnd = runEnd(_covered, _base);
+      r.opening = _startRun(r);
+    }
+  }
+
+  Future<void> _startRun(_Run r) async {
+    try {
+      // In particular, release the old native workers before reallocating on a seek.
+      await Future.wait(_retiring.toList());
+      if (!_owns(r)) return;
+      final worker = await _createWorker(language);
+      if (!_owns(r)) {
+        await worker.dispose();
+        return;
+      }
+      r.worker = worker;
+      r.sub = worker.events.listen((e) => _onEvent(r, e));
+      worker.reset(r.gen, r.base);
+      final dir = await Directory(p.join(_root!.path, 'g${r.gen}')).create();
+      if (!_owns(r)) {
+        await _deleteDir(dir);
+        return;
+      }
+      r.dir = dir;
+      final source = await (_resolving ??= _audioSource());
+      if (!_owns(r)) return;
+      final feed = r.feed = _createFeed();
+      final end = r.end;
+      final stop = end == null
+          ? null
+          : _planDuration > 0
+          ? math.min(_planDuration, end + 2)
+          : end;
       AppLog.i(
         'phụ đề',
-        'Làm từ giây ${_base.toStringAsFixed(1)}'
-            '${end == null ? ' tới hết' : ' tới giây ${end.toStringAsFixed(1)}'}',
+        'Lượt ${r.slot + 1} từ ${_clock(r.base)} → ${stop == null ? 'hết phim' : _clock(stop)}',
       );
-      final feed = _feed = AudioFeed();
-      final source = await _audioSource();
-      if (_disposed || gen != _gen) return;
       await feed.start(
         input: source,
-        outDir: _dir!.path,
-        // The relay sends the page's headers itself.
+        outDir: dir.path,
         headers: _hls && !_noRelay ? const {} : headers,
         hls: _hls,
-        startSec: _base,
-        lengthSec: end == null ? null : end - _base,
+        startSec: r.base,
+        lengthSec: stop == null ? null : stop - r.base,
       );
-      if (_disposed || gen != _gen) {
+      if (!_owns(r)) {
         await feed.stop();
         return;
       }
+      lastActivity = r.lastChunk = DateTime.now();
+      r.poll = Timer.periodic(
+        const Duration(milliseconds: 400),
+        (_) => _pump(r),
+      );
       _set('Đang nghe và dịch…');
-      _poll = Timer.periodic(const Duration(milliseconds: 400), (_) => _pump());
     } catch (e, st) {
-      if (_disposed || gen != _gen) return;
-      AppLog.e('phụ đề', 'Không lấy được âm thanh: $e', st);
-      error = '$e';
-      _set('Lỗi: $e');
+      if (!_owns(r)) return;
+      if (r.slot == 1 && r.worker == null) {
+        AppLog.e('phụ đề', 'Không nạp được lượt 2: $e', st);
+        didHaveMemoryPressure();
+      } else {
+        _fail('$e', st);
+      }
     }
   }
 
-  void _pump() {
-    if (_disposed) return;
-    final feed = _feed;
-    final dir = _dir;
-    if (feed == null || dir == null || _lastSent) return;
-    // No new audio for a minute while the worker sits idle: the stream
-    // has stalled without ffmpeg noticing.
-    if (!feed.done &&
-        _pending == 0 &&
-        DateTime.now().difference(_lastChunkAt) > const Duration(seconds: 60)) {
-      _poll?.cancel();
-      unawaited(feed.stop());
-      _retryFeed('Không nhận thêm âm thanh trong 60 giây');
+  void _pump(_Run r) {
+    if (!_owns(r) || r.lastSent) return;
+    final feed = r.feed!;
+    if (waitingTranslation >= 160) {
+      r.lastChunk = DateTime.now();
       return;
     }
-    // Keep the worker's queue short so a seek takes effect quickly.
-    while (_pending < 3) {
-      if (waitingTranslation >= 160) return;
-      final current = File(p.join(dir.path, chunkName(_nextChunk)));
-      final next = File(p.join(dir.path, chunkName(_nextChunk + 1)));
-      if (next.existsSync()) {
-        _worker!.feed(_gen, current.path);
-      } else if (feed.done) {
-        _feedError = feed.error ?? '';
-        _lastSent = true;
-        if (current.existsSync()) {
-          _worker!.feed(_gen, current.path, last: true);
-        } else {
-          if (_pending == 0) _finish();
+    if (!feed.done &&
+        r.pending == 0 &&
+        DateTime.now().difference(r.lastChunk).inSeconds >= 60) {
+      _finish(r, 'Không nhận thêm âm thanh trong 60 giây');
+      return;
+    }
+    while (r.pending < 3) {
+      final current = File(p.join(r.dir!.path, chunkName(r.nextChunk)));
+      final next = File(p.join(r.dir!.path, chunkName(r.nextChunk + 1)));
+      if (!next.existsSync()) {
+        if (!feed.done) return;
+        r.lastSent = true;
+        if (!current.existsSync()) {
+          if (r.pending == 0) _finish(r, feed.error ?? '');
           return;
         }
-      } else {
-        return;
       }
-      _pending++;
-      _nextChunk++;
+      r.worker!.feed(r.gen, current.path, last: r.lastSent);
+      r.pending++;
+      r.nextChunk++;
       _chunksFed++;
-      _lastChunkAt = DateTime.now();
-      if (_lastSent) return;
+      r.lastChunk = DateTime.now();
+      if (r.lastSent) return;
     }
   }
 
-  /// The audio ran out. That is only good news if some of it was heard.
-  void _finish() {
-    if (_disposed) return;
-    _poll?.cancel();
-    final heardNothing = processedUntil - _base < 1 && cues.isEmpty;
-    AppLog.i(
-      'phụ đề',
-      'Hết âm thanh: nghe tới giây ${processedUntil.toStringAsFixed(1)}, '
-          '$_chunksFed đoạn, $_linesHeard câu, ${cues.length} dòng',
-    );
-    if (_feedError.isNotEmpty) {
-      final tail = _feedError.length > 1500
-          ? _feedError.substring(_feedError.length - 1500)
-          : _feedError;
-      AppLog.e('ffmpeg', tail);
-    }
-    // Some servers refuse the relay (a link tied to how the browser
-    // connected, for one) but not ffmpeg: let ffmpeg fetch it directly.
-    // The other way round for a plain file on iOS: ffmpeg was refused (a
-    // server that only answers browsers), so try iOS networking.
-    if (_feedError.isNotEmpty &&
-        !_feedError.contains('127.0.0.1') &&
-        !_hls &&
-        !_fileRelay &&
-        Platform.isIOS &&
-        input.startsWith('http')) {
-      _fileRelay = true;
-      _source = null;
-      AppLog.e('phụ đề', 'ffmpeg bị từ chối, thử tải qua mạng của iOS');
-      _set('Thử cách tải khác…');
-      final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
-      unawaited(_restart(at));
-      return;
-    }
-    if (_feedError.contains('127.0.0.1') && !_noRelay) {
-      _noRelay = true;
-      _source = null;
-      AppLog.e(
-        'phụ đề',
-        'Bộ chuyển tiếp không lấy được luồng (${_proxy?.lastError ?? ''}), '
-            'để ffmpeg tự tải',
-      );
-      _set('Thử cách tải khác…');
-      final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
-      unawaited(_restart(at));
-      return;
-    }
-    // Links often expire near the end of a long film; a few seconds
-    // short of the known length is the end.
-    if (_feedError.isNotEmpty &&
-        duration > 0 &&
-        processedUntil >= duration - 20) {
-      AppLog.i(
-        'phụ đề',
-        'Lỗi ở ${_clock(processedUntil)}, sát cuối phim: coi là xong',
-      );
-      _feedError = '';
-    }
-    if (_feedError.isNotEmpty && _feedRetries < (heardNothing ? 2 : 6)) {
-      // Part way through: links often carry a token that expires. Fetch
-      // the playlist again and carry on from where it stopped.
-      _retryFeed(_feedError);
-      return;
-    }
-    if (_feedError.isNotEmpty && heardNothing) {
-      error = _feedError;
-      _set('Không tải được âm thanh của video này');
-    } else if (_feedError.isEmpty && _carryOn()) {
-      return;
-    } else if (_feedError.isNotEmpty) {
-      // Gave up part way: this is not the end of the film.
-      error = _feedError;
-      _set(
-        'Mất kết nối tới video ở ${_clock(processedUntil)}, bấm CC lại để thử tiếp',
-      );
-    } else {
-      // The audio really ran out (not a stop at existing subtitles).
-      if (_runEnd == null) reachedEnd = true;
-      finished = true;
-      // Lines whose translation failed or timed out get another go.
-      _retranslate();
-      _set(
-        cues.isEmpty
-            ? 'Đã nghe hết nhưng không thấy lời thoại'
-            : 'Đã xong phụ đề',
-      );
-    }
-  }
-
-  void _retryFeed(String why) {
-    _feedRetries++;
-    final at = processedUntil - 2 > _base ? processedUntil - 2 : _base;
-    final short = why.length > 300 ? why.substring(why.length - 300) : why;
-    AppLog.e(
-      'phụ đề',
-      'Âm thanh ngắt ở ${_clock(processedUntil)} (lần $_feedRetries): $short',
-    );
-    if (_feedRetries > 6) {
-      error = why;
-      _set('Mất kết nối tới video, bấm CC lại để thử tiếp');
-      return;
-    }
-    _source = null;
-    _set('Mất kết nối, đang nối lại (lần $_feedRetries)…');
-    final gen = _gen;
-    Future.delayed(Duration(seconds: 2 * _feedRetries), () {
-      if (!_disposed && gen == _gen) unawaited(_restart(at));
-    });
-  }
-
-  /// Plain-language summary of where the work is, for the CC bar.
-  String get stage {
-    final parts = <String>['Đã nghe tới ${_clock(processedUntil)}'];
-    if (duration > 0) parts.last += ' / ${_clock(duration)}';
-    if (waitingTranslation > 0) parts.add('chờ dịch $waitingTranslation câu');
-    return parts.join(' · ');
-  }
-
-  /// Starts on the next missing stretch, or rests until the viewer gets
-  /// near it. False when there is nothing left to do.
-  bool _carryOn() {
-    final next = nextStart(
-      covered: covered,
-      duration: duration,
-      position: _position,
-      mode: _mode,
-    );
-    if (next == null || _autoRuns >= 80) return false;
-    // A run that got nowhere would otherwise be tried for ever.
-    final last = _lastAutoStart;
-    if (last != null && (next - last).abs() < 1) return false;
-    _lastAutoStart = next;
-    _autoRuns++;
-    finished = false;
-    if (_mode == SubtitleMode.follow && next - _position > kFollowAhead) {
-      paused = true;
-      _resumeAt = next;
-      _set('Đã có phụ đề trước chỗ đang xem, tạm nghỉ');
-      return true;
-    }
-    _set('Làm tiếp đoạn còn thiếu từ ${_clock(next)}');
-    unawaited(_restart(next));
-    return true;
-  }
-
-  static String _clock(double s) {
-    final t = s.round();
-    String two(int v) => v.toString().padLeft(2, '0');
-    return t >= 3600
-        ? '${t ~/ 3600}:${two(t ~/ 60 % 60)}:${two(t % 60)}'
-        : '${t ~/ 60}:${two(t % 60)}';
-  }
-
-  /// In follow mode, stops fetching audio once far enough ahead.
-  void _maybePause() {
-    final feed = _feed;
-    if (_mode != SubtitleMode.follow || paused || feed == null) return;
-    if (feed.done || _lastSent) return;
-    if (processedUntil - _position < kFollowAhead) return;
-    paused = true;
-    _resumeAt = null;
-    _poll?.cancel();
-    unawaited(feed.stop());
-    AppLog.i('phụ đề', 'Tạm nghỉ ở giây ${processedUntil.toStringAsFixed(0)}');
-    _set('Đã có phụ đề trước chỗ đang xem, tạm nghỉ');
-  }
-
-  void _onEvent(AsrEvent event) {
-    if (_disposed || event.gen != _gen && event.gen != -1) return;
+  void _onEvent(_Run r, AsrEvent event) {
+    if (!_owns(r) || event.gen != r.gen && event.gen != -1) return;
+    lastActivity = DateTime.now();
     switch (event) {
       case AsrSegment() when isFiller(event.text):
         _fillers++;
       case AsrSegment():
-        final gen = _gen;
         _linesHeard++;
-        // Translations start at once (a cloud translator sends lines heard
-        // close together in one request); lines are added in order.
-        final pending = _translatorReady
-            ? _translate(event.text, _langOf(event))
-            : Future<String?>.value();
-        waitingTranslation++;
-        _translating = _translating.then((_) async {
-          if (_disposed || gen != _gen) {
-            // A seek made this line stale: do not wait for it.
-            waitingTranslation--;
-            return;
-          }
-          // A slow translation must not hold up the lines after it: show
-          // the original for now and swap the translation in later.
-          final quick = await Future.any<Object?>([
-            pending,
-            Future<Object?>.delayed(const Duration(seconds: 8), () => _late),
-          ]);
-          if (identical(quick, _late)) {
-            _lateTranslations++;
-            unawaited(
-              pending.then((text) {
-                waitingTranslation--;
-                if (text != null && !_disposed && gen == _gen) {
-                  _replaceText(event.start, event.text, text);
-                }
-                if (!_disposed) notifyListeners();
-              }),
-            );
-          } else {
-            waitingTranslation--;
-          }
-          final translated = quick is String ? quick : null;
-          if (_disposed || gen != _gen) return;
-          _addCue(
-            Cue(
-              start: event.start,
-              end: event.end + 0.4,
-              text: translated ?? event.text,
-              source: event.text,
-            ),
-          );
-        });
+        final c = Cue(
+          start: event.start,
+          end: event.end + 0.4,
+          text: event.text,
+          source: event.text,
+        );
+        if (_addCue(c)) {
+          final lang = _langOf(event);
+          _cueLanguages[(c.start, c.source)] = lang;
+          _queueCue(c, lang);
+        }
       case AsrProgress():
-        lastActivity = DateTime.now();
-        _pending--;
-        if (event.until > processedUntil + 30) _feedRetries = 0;
-        processedUntil = event.until;
-        if (event.last || (_lastSent && _pending <= 0)) {
-          // Let queued translations land before judging the result.
-          _translating.then((_) {
-            if (!_disposed && event.gen == _gen) _finish();
-          });
-        } else {
-          notifyListeners();
+        r.pending--;
+        r.processedUntil = event.until;
+        if (event.last || (r.lastSent && r.pending <= 0)) {
+          _finish(r, r.feed?.error ?? '');
+          return;
+        }
+        if (_mode == SubtitleMode.follow &&
+            r.processedUntil - _position >= kFollowAhead) {
+          final at = r.processedUntil;
+          _retire(r);
+          _pauseAt(at);
         }
       case AsrError():
-        AppLog.e('nhận dạng', event.message);
-        error = event.message;
-        _set('Lỗi nhận dạng: ${event.message}');
+        _fail(event.message, StackTrace.current);
+        return;
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  void _finish(_Run r, String failure) {
+    if (!_owns(r)) return;
+    r.poll?.cancel();
+    final at = r.processedUntil;
+    final tail =
+        duration > 0 && r.end == duration && at > r.base && at >= duration - 15;
+    if (tail || r.end == null && failure.isEmpty && at > r.base) {
+      // The container can run a few seconds longer than its audio track.
+      _audioEnd = math.min(at, duration > 0 ? duration : at);
+      reachedEnd = true;
+      failure = '';
+    }
+    // A successful but empty/premature EOF should not schedule the same hole forever.
+    if (!tail && failure.isEmpty && r.end != null && r.end! - at > 3) {
+      failure = 'Âm thanh kết thúc sớm ở ${_clock(at)}';
+    }
+    if (failure.isNotEmpty) {
+      _feedError = failure;
+      AppLog.e(
+        'ffmpeg',
+        failure.length > 1500
+            ? failure.substring(failure.length - 1500)
+            : failure,
+      );
+      if (failure.contains('127.0.0.1') && !_noRelay) {
+        _noRelay = true;
+      } else if (!_fileRelay &&
+          !_noRelay &&
+          !_hls &&
+          Platform.isIOS &&
+          input.startsWith('http')) {
+        _fileRelay = true;
+      }
+      final tries = (_retryCount[r.slot] ?? 0) + 1;
+      _retryCount[r.slot] = tries;
+      if (tries > (at - r.base < 1 ? 2 : 6)) {
+        _fail('Mất kết nối ở ${_clock(at)}: $failure', StackTrace.current);
+        return;
+      }
+      _resolving = null;
+      _source = null;
+      _set('Mất kết nối, đang nối lại (lần $tries)…');
+      r.poll = Timer(Duration(seconds: 2 * tries), () {
+        if (!_owns(r)) return;
+        _retire(r);
+        // Reserve this same range during backoff; its sibling keeps working.
+        final retry = _Run(r.slot, ++_nextGen, math.max(r.base, at - 2), r.end);
+        _runs[r.slot] = retry;
+        retry.opening = _startRun(retry);
+      });
+      return;
+    }
+    _feedError = '';
+    _retryCount.remove(r.slot);
+    if (r.end == null || duration > 0 && at >= duration - 1) reachedEnd = true;
+    _retire(r);
+    _schedule();
+    if (!_disposed) notifyListeners();
+  }
+
+  void _retire(_Run r) {
+    if (!identical(_runs[r.slot], r)) return;
+    _runs.remove(r.slot);
+    _lastProcessed = r.processedUntil;
+    if (r.processedUntil > r.base) _covered.add((r.base, r.processedUntil));
+    r.poll?.cancel();
+    r.sub?.cancel();
+    final workerStopped = r.worker?.dispose();
+    final stopping =
+        (() async {
+          try {
+            await r.feed?.stop();
+            await workerStopped;
+            await r.opening;
+          } finally {
+            if (r.dir != null) await _deleteDir(r.dir!);
+          }
+        })().catchError((Object e) {
+          AppLog.e('phụ đề', 'Dừng lượt: $e');
+        });
+    _retiring.add(stopping);
+    stopping.whenComplete(() => _retiring.remove(stopping));
+  }
+
+  static Future<void> _deleteDir(Directory dir) async {
+    try {
+      await dir.delete(recursive: true);
+    } on FileSystemException {
+      /* Already removed or still closing. */
     }
   }
 
-  static final _late = Object();
+  Future<void> _replan() async {
+    final epoch = ++_epoch;
+    for (final r in _runs.values.toList()) {
+      _retire(r);
+    }
+    paused = false;
+    finished = false;
+    _resumeAt = null;
+    _retryCount.clear();
+    await Future.wait(_retiring.toList());
+    if (!_disposed && epoch == _epoch) _schedule();
+  }
+
+  void _pauseAt(double at) {
+    paused = true;
+    _resumeAt = at;
+    _set('Đã có phụ đề trước chỗ đang xem, tạm nghỉ');
+  }
+
+  void _fail(String message, StackTrace st) {
+    if (_disposed) return;
+    error = message;
+    AppLog.e('phụ đề', message, st);
+    for (final r in _runs.values.toList()) {
+      _retire(r);
+    }
+    _set('Lỗi: $message');
+  }
 
   /// Puts a translation that arrived late into the line already shown.
   void _replaceText(double start, String source, String text) {
@@ -802,19 +809,20 @@ class SubtitleSession extends ChangeNotifier {
       text: text,
       source: source,
     );
+    cueRevision++;
     onCue?.call(cues[i]);
   }
 
   String _langOf(AsrSegment s) =>
       language == 'auto' ? (s.lang.isEmpty ? 'ja' : s.lang) : language;
 
-  void _addCue(Cue cue) {
+  bool _addCue(Cue cue) {
     // After seeking back, the same speech can be recognised twice.
     for (final c in cues) {
       final overlap =
           (cue.end < c.end ? cue.end : c.end) -
           (cue.start > c.start ? cue.start : c.start);
-      if (overlap > 0.5 * (cue.end - cue.start)) return;
+      if (overlap > 0.5 * (cue.end - cue.start)) return false;
     }
     var i = cues.length;
     while (i > 0 && cues[i - 1].start > cue.start) {
@@ -830,185 +838,234 @@ class SubtitleSession extends ChangeNotifier {
         source: prev.source,
       );
     }
+    if (i < cues.length && cue.end > cues[i].start) {
+      cue = Cue(
+        start: cue.start,
+        end: cues[i].start,
+        text: cue.text,
+        source: cue.source,
+      );
+    }
     cues.insert(i, cue);
+    cueRevision++;
     lastActivity = DateTime.now();
     onCue?.call(cue);
-    notifyListeners();
+    return true;
   }
 
-  /// Tell the session where playback is; restarts the work after a far seek.
   void updatePosition(double t, {double duration = 0}) {
+    if (_disposed) return;
+    final nowKnown = this.duration <= 0 && duration > 0;
     if (duration > 0) this.duration = duration;
     _position = t;
-    if (_worker == null || _feed == null || _disposed) return;
-    final inOld = _covered.any((r) => t >= r.$1 - 1 && t <= r.$2 - 5);
-    if (paused) {
-      final resumeAt = _resumeAt ?? processedUntil;
-      if (inOld || (t >= _base - 1 && t <= resumeAt + kSeekJump)) {
-        _outOfRange = 0;
-        if (resumeAt - t < kFollowResume) unawaited(_restart(resumeAt));
-        return;
-      }
-    } else {
-      // Close behind the work: it catches up faster than a restart.
-      final inCurrent = t >= _base - 1 && t <= processedUntil + kSeekJump;
-      if (inCurrent || inOld) {
-        _outOfRange = 0;
-        _maybePause();
-        return;
-      }
+    if (_translator case final OpenRouterTranslator cloud) cloud.position = t;
+    if (_translator case final MlKitTranslator local) local.position = t;
+    if (_root == null || error != null) return;
+    if (nowKnown) {
+      unawaited(_replan());
+      return;
     }
-    // A seek to a place without subtitles: work there, once the position
-    // has settled (two reports close together) and not more often than
-    // every 3 s, so dragging the slider does not restart ffmpeg each time.
-    final settled = (t - _seekTarget).abs() < 2;
-    _seekTarget = t;
-    if (!settled) {
+    if (paused &&
+        _resumeAt != null &&
+        t >= _resumeAt! - kFollowResume &&
+        t <= _resumeAt! + kSeekJump) {
+      unawaited(_replan());
+      return;
+    }
+    if (covered.any((r) => t >= r.$1 - 1 && t <= r.$2 - 2) ||
+        _runs.values.any(
+          (r) => t >= r.base - 1 && t <= r.processedUntil + kSeekJump,
+        )) {
       _outOfRange = 0;
       return;
     }
-    if (++_outOfRange < 2) return;
-    final now = DateTime.now();
-    if (now.difference(_lastSeekRestart) < const Duration(seconds: 3)) return;
+    if (finished && _mode == SubtitleMode.whole) return;
+    if ((t - _seekTarget).abs() >= 2) _outOfRange = 0;
+    _seekTarget = t;
+    if (++_outOfRange < 3 ||
+        DateTime.now().difference(_lastSeekRestart).inSeconds < 3) {
+      return;
+    }
     _outOfRange = 0;
-    _lastSeekRestart = now;
+    _lastSeekRestart = DateTime.now();
     AppLog.i('phụ đề', 'Tua tới ${_clock(t)}, làm từ đó');
-    unawaited(_restart(t));
+    unawaited(_replan());
   }
 
   Cue? at(double t) => cueAt(cues, t);
+  double leadOver(double t) {
+    for (final r in covered) {
+      if (r.$1 <= t && t <= r.$2) return r.$2 - t;
+    }
+    return -1;
+  }
 
-  /// How far ahead of [t] subtitles are ready (seconds, may be negative).
-  double leadOver(double t) => processedUntil - t;
+  static String _clock(double s) {
+    final t = s.round();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return t >= 3600
+        ? '${t ~/ 3600}:${two(t ~/ 60 % 60)}:${two(t % 60)}'
+        : '${t ~/ 60}:${two(t % 60)}';
+  }
 
-  /// Plain-text account of every stage, for working out why nothing shows.
-  /// Every stage from pressing CC to translated lines, and where each is.
+  String get _runSummary => [
+    for (final r
+        in _runs.values.toList()..sort((a, b) => a.slot.compareTo(b.slot)))
+      'Lượt ${r.slot + 1}: ${_clock(r.processedUntil)} → ${r.end == null ? 'hết phim' : _clock(r.end!)}',
+  ].join(' · ');
+
+  String get stage {
+    final tr = _translator.status;
+    return [
+      if (error != null || paused || _runs.isEmpty || _feedError.isNotEmpty)
+        status
+      else if (_runs.values.every((r) => r.worker == null))
+        'Đang nạp bộ nhận dạng'
+      else if (_chunksFed == 0)
+        'Đang lấy âm thanh'
+      else
+        'Đang nhận dạng',
+      if (_runs.isNotEmpty) _runSummary,
+      if (tr.state != TranslationState.ready &&
+          tr.state != TranslationState.disabled)
+        tr.description
+      else if (waitingTranslation > 0)
+        'Chờ dịch $waitingTranslation câu',
+      if (tr.blocked > 0) 'Bị chặn ${tr.blocked} câu',
+      if (translatorNote.isNotEmpty) translatorNote,
+      ?_prepareError,
+    ].join(' · ');
+  }
+
   List<SessionStep> get steps {
+    final tr = _translator.status;
+    final disabled = tr.state == TranslationState.disabled;
+    final waitingForPack = !_translatorReady && !disabled
+        ? cues.where((c) => c.source.isNotEmpty && c.source == c.text).length
+        : 0;
+    final translating =
+        waitingTranslation > 0 ||
+        tr.queued > 0 ||
+        tr.inFlight > 0 ||
+        waitingForPack > 0;
+    final unavailable =
+        tr.state == TranslationState.unavailable || _prepareError != null;
+    final translated = cues
+        .where((c) => c.source.isNotEmpty && c.source != c.text)
+        .length;
+    final translationDetail = [
+      'Đã dịch $translated',
+      if (unavailable)
+        tr.note.isEmpty ? _lastTranslateError : tr.note
+      else if (waitingForPack > 0)
+        '$waitingForPack câu chờ bộ dịch sẵn sàng · ${tr.description}'
+      else if (tr.state == TranslationState.ready && !translating)
+        finished ? 'đã hết câu' : 'chờ câu từ bước nhận dạng'
+      else
+        tr.description,
+      if (tr.queued > 0 && tr.state != TranslationState.gathering)
+        'chờ ${tr.queued} câu',
+      if (_translateFailures > 0 || tr.failed > 0)
+        'lỗi ${math.max(_translateFailures, tr.failed)}',
+      if (tr.blocked > 0) 'bị chặn ${tr.blocked} câu',
+      if (translatorNote.isNotEmpty) translatorNote,
+    ].join(' · ');
+    final host = Uri.tryParse(input)?.host ?? '';
+    final workers = _runs.values.where((r) => r.worker != null).length;
     final failed = error != null;
-    final feed = _feed;
-    final running = feed != null && !feed.done && !paused;
-    StageState after(bool done, {bool started = true}) => done
+    StageState progress(bool ready, bool active) => ready
         ? StageState.done
         : failed
         ? StageState.failed
-        : started
+        : active
         ? StageState.active
         : StageState.waiting;
-    final translated = cues
-        .where((c) => c.source.isNotEmpty && c.text != c.source)
-        .length;
-    final host = Uri.tryParse(input)?.host ?? '';
     return [
       SessionStep(
         'Tìm video trên trang',
         StageState.done,
-        host.isEmpty ? 'file trong máy' : host,
+        host.isEmpty ? 'File trong máy' : host,
       ),
       SessionStep(
         'Nạp bộ nhận dạng giọng nói',
-        after(_worker != null),
-        _worker != null ? 'SenseVoice, chạy trên máy' : 'Đang nạp mô hình…',
+        progress(workers > 0 || finished || paused, true),
+        workers > 0
+            ? '$workers bộ nhận dạng SenseVoice'
+            : finished || paused
+            ? 'Đã nạp'
+            : 'Đang nạp mô hình…',
       ),
       SessionStep(
         'Chuẩn bị bộ dịch',
-        language == 'auto' || _translator is PassthroughTranslator
+        disabled
             ? StageState.skipped
-            : _translatorReady
-            ? StageState.done
-            : _lastTranslateError.isNotEmpty
+            : unavailable
             ? StageState.failed
-            : StageState.active,
-        _translator is PassthroughTranslator
-            ? 'Tắt dịch: hiện câu gốc'
+            : tr.state == TranslationState.downloading
+            ? StageState.active
+            : progress(_translatorReady, true),
+        unavailable
+            ? (tr.note.isEmpty ? _lastTranslateError : tr.note)
+            : disabled || tr.state == TranslationState.downloading
+            ? tr.description
             : _translatorReady
-            ? Translator.label
-            : _lastTranslateError.isNotEmpty
-            ? _lastTranslateError
-            : translatorNote,
+            ? 'Bộ dịch sẵn sàng'
+            : 'Đang chuẩn bị bộ dịch',
       ),
       SessionStep(
         'Kết nối luồng âm thanh',
-        after(_source != null, started: _worker != null),
+        progress(_source != null, workers > 0),
         _source == null
-            ? ''
+            ? workers == 0
+                  ? 'Chờ bộ nhận dạng'
+                  : 'Đang mở nguồn âm thanh'
             : _hls
-            ? 'HLS, qua bộ chuyển tiếp${(_proxy?.stripped ?? 0) > 0 ? ' (đã gỡ ${_proxy!.stripped} ảnh giả)' : ''}'
-            : 'Tải trực tiếp',
+            ? 'Luồng HLS'
+            : 'Đã mở nguồn',
       ),
       SessionStep(
         'Lấy âm thanh (ffmpeg)',
-        paused
-            ? StageState.done
-            : finished
-            ? StageState.done
-            : _feedError.isNotEmpty && failed
-            ? StageState.failed
-            : running || _chunksFed > 0
-            ? StageState.active
-            : after(false, started: _source != null),
-        '$_chunksFed đoạn'
-            '${_feedRetries > 0 ? ' · nối lại $_feedRetries lần' : ''}'
-            '${paused ? ' · tạm nghỉ' : ''}',
+        progress(finished || paused, _runs.values.any((r) => r.feed != null)),
+        '$_chunksFed đoạn · ${_feedError.isNotEmpty
+            ? status
+            : _chunksFed == 0
+            ? 'chờ âm thanh từ video'
+            : _runSummary}',
       ),
       SessionStep(
         'Nhận dạng giọng nói',
-        finished
-            ? StageState.done
-            : _chunksFed > 0
-            ? (failed ? StageState.failed : StageState.active)
-            : StageState.waiting,
-        'Nghe tới ${_clock(processedUntil)}'
-            '${duration > 0 ? ' / ${_clock(duration)}' : ''} · $_linesHeard câu'
-            '${_fillers > 0 ? ' · bỏ $_fillers tiếng đệm' : ''}',
+        progress(finished || paused, _chunksFed > 0),
+        '$_linesHeard câu · ${_chunksFed == 0 ? 'chờ đoạn âm thanh' : _runSummary}',
       ),
       SessionStep(
         'Dịch sang tiếng Việt',
-        _translator is PassthroughTranslator
+        disabled
             ? StageState.skipped
-            : finished && waitingTranslation == 0
-            ? StageState.done
-            : _linesHeard > 0
+            : unavailable
+            ? StageState.failed
+            : translating ||
+                  _linesHeard > 0 && !finished ||
+                  tr.state == TranslationState.gathering
             ? StageState.active
+            : finished
+            ? StageState.done
             : StageState.waiting,
-        'Đã dịch $translated · chờ $waitingTranslation'
-            '${_translateFailures > 0 ? ' · lỗi $_translateFailures' : ''}',
+        translationDetail,
       ),
     ];
   }
 
-  String get details {
-    String clip(String s, [int n = 300]) =>
-        s.length > n ? '${s.substring(0, n)}…' : s;
-    final seconds = DateTime.now().difference(_created).inSeconds;
-    return [
-      'Trạng thái: $status',
-      'Chạy được: $seconds giây',
-      'Ngôn ngữ: $language',
-      'Nguồn video: ${clip(input, 160)}',
-      'Nguồn âm thanh: ${clip(_source ?? '(chưa xác định)', 160)}',
-      'Mô hình nhận dạng: ${_worker == null ? 'chưa nạp' : 'đã nạp'}',
-      'Bắt đầu từ giây: ${_base.toStringAsFixed(1)}',
-      'Đã nghe tới giây: ${processedUntil.toStringAsFixed(1)}',
-      'Số đoạn âm thanh đã nhận: $_chunksFed',
-      'Số câu nghe được: $_linesHeard',
-      'Bỏ qua tiếng đệm (嗯, あ…): $_fillers câu',
-      'Đang chờ dịch: $waitingTranslation câu · dịch chậm (hiện câu gốc '
-          'trước): $_lateTranslations câu',
-      'Nối lại âm thanh: $_feedRetries lần',
-      'Chế độ: ${_mode == SubtitleMode.whole ? 'làm hết phim' : 'chỉ làm trước chỗ đang xem'}'
-          '${paused ? ' (đang nghỉ)' : ''}',
-      'Số dòng phụ đề: ${cues.length}',
-      'Bộ dịch: ${Translator.label} · ${_translatorReady ? 'sẵn sàng' : 'chưa sẵn sàng'}'
-          '${translatorNote.isEmpty ? '' : ' ($translatorNote)'}',
-      'Dịch lỗi: $_translateFailures lần'
-          '${_lastTranslateError.isEmpty ? '' : ' · ${clip(_lastTranslateError)}'}',
-      if (_feedError.isNotEmpty) 'Lỗi tải âm thanh: ${clip(_feedError, 600)}',
-      if ((_proxy?.lastError ?? '').isNotEmpty)
-        'Bộ chuyển tiếp: ${clip(_proxy!.lastError)}'
-            '${_noRelay ? ' (đã chuyển sang để ffmpeg tự tải)' : ''}',
-      if (error != null) 'Lỗi: ${clip(error!, 600)}',
-    ].join('\n');
-  }
+  String get details => [
+    stage,
+    'Ngôn ngữ: $language',
+    'Nguồn video: ${AppLog.url(input)}',
+    for (final step in steps) '${step.title}: ${step.detail}',
+    'Bỏ qua $_fillers tiếng đệm',
+    if (_lastTranslateError.isNotEmpty) _lastTranslateError,
+    if (_feedError.isNotEmpty) _feedError,
+    if (_proxy?.lastError case final String why when why.isNotEmpty) why,
+    ?error,
+  ].join('\n');
 
   void _set(String s) {
     status = s;
@@ -1018,22 +1075,17 @@ class SubtitleSession extends ChangeNotifier {
   @override
   void dispose() {
     if (_disposed) return;
-    AppLog.i('phụ đề', 'Dừng (${cues.length} dòng)');
     _disposed = true;
-    _gen++;
-    _poll?.cancel();
-    _sub?.cancel();
-    _feed?.stop();
-    _worker?.dispose();
-    _translator.dispose();
+    if (_started) WidgetsBinding.instance.removeObserver(this);
+    _tick?.cancel();
+    for (final r in _runs.values.toList()) {
+      _retire(r);
+    }
+    unawaited(_translator.dispose());
     _proxy?.close();
     final root = _root;
     if (root != null) {
-      // Give ffmpeg a moment to let go of its output file.
-      Future.delayed(
-        const Duration(seconds: 1),
-        () => root.delete(recursive: true).catchError((_) => root),
-      );
+      Future.wait(_retiring.toList()).then((_) => _deleteDir(root));
     }
     super.dispose();
   }

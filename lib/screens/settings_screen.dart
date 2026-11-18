@@ -206,6 +206,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: const Text('Tải'),
                   ),
           ),
+          SwitchListTile(
+            title: const Text('Làm phụ đề song song'),
+            subtitle: const Text(
+              'Nhanh hơn khi làm hết phim, dùng thêm pin và bộ nhớ',
+            ),
+            value: appSettings.parallelSubtitles,
+            onChanged: appSettings.setParallelSubtitles,
+          ),
+          const _Header('Trình duyệt'),
+          ListTile(
+            title: const Text('Liên kết mở cửa sổ mới'),
+            trailing: DropdownButton<bool>(
+              value: appSettings.backgroundLinks,
+              items: const [
+                DropdownMenuItem(value: false, child: Text('Tab hiện tại')),
+                DropdownMenuItem(
+                  value: true,
+                  child: Text('Tab mới (chạy nền)'),
+                ),
+              ],
+              onChanged: (v) => appSettings.setBackgroundLinks(v!),
+            ),
+          ),
           const _Header('Khoá'),
           ListTile(
             leading: const Icon(Icons.key_outlined),

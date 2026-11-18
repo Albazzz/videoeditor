@@ -357,6 +357,8 @@ class _SubtitleViewState extends State<_SubtitleView> {
           TextButton(
             onPressed: () {
               cancelled = true;
+              // Stops the requests still queued or running (and their cost).
+              translator.dispose();
               Navigator.pop(context);
             },
             child: const Text('Huỷ'),

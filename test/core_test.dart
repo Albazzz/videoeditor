@@ -11,6 +11,15 @@ import 'package:video/services/key_store.dart';
 import 'package:video/services/web_video.dart';
 
 void main() {
+  test('a cue remains visible after its first minute', () {
+    expect(
+      cueAt(const [
+        Cue(start: 0, end: 120, text: 'Long cue'),
+        Cue(start: 62, end: 63, text: 'Short'),
+      ], 90)?.text,
+      'Long cue',
+    );
+  });
   const cues = [
     Cue(start: 1, end: 2.5, text: 'Xin chào'),
     Cue(start: 3, end: 5, text: 'Dòng hai'),

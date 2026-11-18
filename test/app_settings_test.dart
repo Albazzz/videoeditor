@@ -6,6 +6,23 @@ import 'package:video/services/openrouter_translator.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test(
+    'link destination and parallel subtitles persist independently',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final first = AppSettings();
+      await first.load();
+      expect(first.backgroundLinks, false);
+      expect(first.parallelSubtitles, true);
+      first.setBackgroundLinks(true);
+      first.setParallelSubtitles(false);
+      final second = AppSettings();
+      await second.load();
+      expect(second.backgroundLinks, true);
+      expect(second.parallelSubtitles, false);
+    },
+  );
+
   test('Mistral Small is the default for both AI sources', () async {
     SharedPreferences.setMockInitialValues({});
     final s = AppSettings();

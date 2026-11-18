@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:video/services/openrouter_translator.dart';
+import 'package:video/services/translator.dart';
 
 /// A fake OpenRouter that "translates" by tagging each numbered line.
 MockClient fakeServer({
@@ -113,6 +114,9 @@ void main() {
     addTearDown(t.dispose);
     final first = t.translate('a', 'zh');
     await limited.future;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    expect(t.status.state, TranslationState.cooldown);
+    expect(t.status.cooldownUntil, isNotNull);
     final second = t.translate('b', 'zh');
     expect(await Future.wait([first, second]), ['VI:a', 'VI:b']);
     expect(
@@ -349,6 +353,96 @@ void main() {
       ),
     );
     expect(calls, 1);
+  });
+
+  test(
+    'an idle queue sends four immediately or one after the short gather window',
+    () async {
+      final t = OpenRouterTranslator(
+        apiKey: '',
+        model: 'test',
+        gatherFor: const Duration(minutes: 1),
+        client: fakeServer(),
+      );
+      addTearDown(t.dispose);
+      final lines = [for (var i = 0; i < 3; i++) t.translate('line $i', 'en')];
+      expect(t.status.queued, 3);
+      lines.add(t.translate('fourth', 'en'));
+      expect(t.status.linesInFlight, 4);
+      await Future.wait(lines);
+      expect(
+        await t.translate('fifth', 'en').timeout(const Duration(seconds: 2)),
+        'VI:fifth',
+      );
+      expect(t.status.done, 5);
+    },
+  );
+
+  test(
+    'a seek prioritises lines close to the viewer in the next request',
+    () async {
+      final good = fakeServer();
+      final gate = Completer<void>();
+      final batches = <List<String>>[];
+      final t = OpenRouterTranslator(
+        apiKey: '',
+        model: 'test',
+        parallel: 1,
+        maxLines: 2,
+        client: MockClient((req) async {
+          final prompt =
+              (jsonDecode(req.body)['messages'] as List).last['content']
+                  as String;
+          final lines =
+              jsonDecode(
+                    prompt.substring(prompt.lastIndexOf('{"lines"')),
+                  )['lines']
+                  as Map;
+          batches.add(lines.values.cast<String>().toList());
+          if (batches.length == 1) await gate.future;
+          return good.post(req.url, headers: req.headers, body: req.body);
+        }),
+      );
+      addTearDown(t.dispose);
+      final pending = [
+        t.translate('first', 'en'),
+        t.translate('second', 'en'),
+        t.translate('far', 'en', start: 250),
+        t.translate('next', 'en', start: 105),
+        t.translate('near', 'en', start: 110),
+      ];
+      t.position = 100;
+      gate.complete();
+      await Future.wait(pending);
+      expect(batches, [
+        ['first', 'second'],
+        ['next', 'near'],
+        ['far'],
+      ]);
+    },
+  );
+
+  test('a moderated line leaves its neighbours translatable', () async {
+    final good = fakeServer();
+    final t = OpenRouterTranslator(
+      apiKey: '',
+      model: 'test',
+      client: MockClient((req) async {
+        if (req.body.contains('REJECT_THIS')) {
+          return http.Response('{"error":{"message":"content_filter"}}', 400);
+        }
+        return good.post(req.url, headers: req.headers, body: req.body);
+      }),
+    );
+    addTearDown(t.dispose);
+    final goodLine = t.translate('good', 'en');
+    await expectLater(
+      t.translate('REJECT_THIS', 'en'),
+      throwsA(isA<OpenRouterError>()),
+    );
+    expect(await goodLine, 'VI:good');
+    expect(t.status.blocked, 1);
+    expect(t.status.done, 1);
   });
 
   test('live lines heard together go in one request', () async {

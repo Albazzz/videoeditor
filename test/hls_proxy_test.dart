@@ -23,6 +23,39 @@ Uint8List tsPackets(int n) {
 }
 
 void main() {
+  test('byte-range media and init sections keep offsets and status', () async {
+    final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => origin.close(force: true));
+    origin.listen((r) async {
+      if (r.uri.path == '/list') {
+        r.response.write(
+          '#EXTM3U\n#EXT-X-MAP:URI="init",BYTERANGE="3@1"\n#EXT-X-BYTERANGE:3@1\nseg\n',
+        );
+      } else if (r.headers.value('range') == 'bytes=1-3') {
+        r.response.statusCode = 206;
+        r.response.headers.set('Content-Range', 'bytes 1-3/5');
+        r.response.write('bcd');
+      } else {
+        r.response.write('abcde');
+      }
+      await r.response.close();
+    });
+    final relay = await HlsProxy.start({});
+    addTearDown(relay.close);
+    final list = await http.read(
+      Uri.parse(relay.urlFor('http://127.0.0.1:${origin.port}/list')),
+    );
+    final urls = RegExp(
+      r'http[^"\s]+',
+    ).allMatches(list).map((m) => Uri.parse(m[0]!)).toList();
+    expect(urls, hasLength(2));
+    for (final u in urls) {
+      final got = await http.get(u, headers: {'Range': 'bytes=1-3'});
+      expect(got.statusCode, 206);
+      expect(got.headers['content-range'], 'bytes 1-3/5');
+      expect(got.body, 'bcd');
+    }
+  });
   test(
     'MP4 relay preserves seeks and headers across bounded range reads',
     () async {
@@ -218,4 +251,25 @@ void main() {
     skip: hasFfmpeg ? false : 'needs ffmpeg on PATH',
     timeout: const Timeout(Duration(minutes: 2)),
   );
+
+  test('the relay refuses addresses it did not sign (no open proxy)', () async {
+    final relay = await HlsProxy.start({'Cookie': 'session=secret'});
+    addTearDown(relay.close);
+    final signed = Uri.parse(relay.urlFor('https://cdn.example/a.m3u8'));
+    final port = signed.port;
+    Future<int> status(String path) async {
+      final c = HttpClient();
+      try {
+        final req = await c.getUrl(Uri.parse('http://127.0.0.1:$port$path'));
+        return (await req.close()).statusCode;
+      } finally {
+        c.close(force: true);
+      }
+    }
+
+    final other = Uri.encodeQueryComponent('https://evil.example/steal');
+    expect(await status('/p?u=$other'), 403);
+    expect(await status('/p?u=$other&t=${signed.queryParameters['t']}'), 403);
+    expect(await status('/x?u=$other'), 403);
+  });
 }

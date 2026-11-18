@@ -6,7 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 class NetResponse {
-  const NetResponse(this.status, this.bytes, this.headers);
+  const NetResponse(this.status, this.bytes, this.headers, [this.url]);
+  final Uri? url;
   final int status;
   final Uint8List bytes;
   final Map<String, String> headers;
@@ -59,7 +60,68 @@ class Net {
     }
   }
 
+  static Map<String, String> headersFor(
+    Uri origin,
+    Uri target,
+    Map<String, String> headers,
+  ) {
+    if (target.isScheme('http') || target.isScheme('https')) {
+      if (origin.origin == target.origin) return headers;
+    }
+    return {
+      for (final e in headers.entries)
+        if (!{
+          'cookie',
+          'authorization',
+          'proxy-authorization',
+          'referer',
+        }.contains(e.key.toLowerCase()))
+          e.key: e.value
+        else if (e.key.toLowerCase() == 'referer' &&
+            Uri.tryParse(e.value)?.hasAuthority == true &&
+            (e.value.startsWith('https://') || e.value.startsWith('http://')))
+          e.key: '${Uri.parse(e.value).origin}/',
+    };
+  }
+
   static Future<NetResponse> _fetch(
+    Uri url,
+    Map<String, String> headers, {
+    http.Client? client,
+    required Duration timeout,
+    int? maxBytes,
+  }) async {
+    var target = url;
+    var outgoing = headers;
+    for (var hops = 0; hops <= 5; hops++) {
+      if (!target.isScheme('http') && !target.isScheme('https')) {
+        throw const HttpException('Địa chỉ luồng không hợp lệ');
+      }
+      final response = await _single(
+        target,
+        outgoing,
+        client: client,
+        timeout: timeout,
+        maxBytes: maxBytes ?? 32 * 1024 * 1024,
+      );
+      final location = response.headers['location'];
+      if (!{301, 302, 303, 307, 308}.contains(response.status) ||
+          location == null) {
+        return NetResponse(
+          response.status,
+          response.bytes,
+          response.headers,
+          target,
+        );
+      }
+      final next = target.resolve(location);
+      outgoing = headersFor(target, next, outgoing);
+      target = next;
+    }
+    throw const HttpException('Quá nhiều lần chuyển hướng');
+  }
+
+  static Future<NetResponse> _single(
     Uri url,
     Map<String, String> headers, {
     http.Client? client,
@@ -95,7 +157,9 @@ class Net {
     try {
       return await (() async {
         final res = await c.send(
-          http.Request('GET', url)..headers.addAll(headers),
+          http.Request('GET', url)
+            ..followRedirects = false
+            ..headers.addAll(headers),
         );
         if (maxBytes != null && (res.contentLength ?? 0) > maxBytes) {
           throw const HttpException('Máy chủ bỏ qua giới hạn tải từng phần');

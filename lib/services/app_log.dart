@@ -112,9 +112,41 @@ class AppLog {
     final path = _path;
     if (path == null) return;
     try {
-      File(
-        path,
-      ).writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
+      File(path).writeAsStringSync(
+        '${sanitize(line)}\n',
+        mode: FileMode.append,
+        flush: true,
+      );
     } catch (_) {}
   }
+
+  static final _urlQuery = RegExp(
+    r'''(https?://[^\s"'<>?#]+)[?#][^\s"'<>]*''',
+    caseSensitive: false,
+  );
+  static final _bearer = RegExp(
+    r'Bearer\s+[A-Za-z0-9._~+/=-]+',
+    caseSensitive: false,
+  );
+  static final _apiKey = RegExp(r'\b(?:sk-or-v1-|vck_|sk-)[A-Za-z0-9_-]{8,}');
+  static final _header = RegExp(
+    r'\b(cookie|set-cookie|authorization|proxy-authorization)\s*[:=]\s*[^\n,}]*',
+    caseSensitive: false,
+  );
+  static final _secretParam = RegExp(
+    r'\b(auth_key|hash|token|access_token|signature|x-signature|sig|key|'
+    r'api_key|apikey|expires|x-expires|lk3s|password)=[^&\s"\x27]+',
+    caseSensitive: false,
+  );
+
+  /// Removes what must never reach the log, its copy or the screen:
+  /// query strings (links carry access tokens), API keys, Bearer tokens,
+  /// cookie/authorization headers and secret-looking parameters. Applied
+  /// to every line written, so callers cannot forget it.
+  static String sanitize(String text) => text
+      .replaceAllMapped(_urlQuery, (m) => '${m[1]}?…')
+      .replaceAll(_bearer, 'Bearer ***')
+      .replaceAll(_apiKey, '***')
+      .replaceAllMapped(_header, (m) => '${m[1]}: ***')
+      .replaceAllMapped(_secretParam, (m) => '${m[1]}=***');
 }

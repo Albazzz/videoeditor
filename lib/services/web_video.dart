@@ -165,7 +165,7 @@ const String kPageScript = r'''
       var m = (lo + hi) >> 1;
       if (cues[m].s <= t) { f = m; lo = m + 1; } else { hi = m - 1; }
     }
-    for (var i = f; i >= 0 && i >= f - 2; i--) {
+    for (var i = f; i >= 0 && cues[i].s > t - 600; i--) {
       if (t < cues[i].e) return cues[i];
     }
     return null;

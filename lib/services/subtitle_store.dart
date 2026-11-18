@@ -110,6 +110,8 @@ class SavedSubs {
     imported: imported,
   );
 
+  bool get canResume => !imported && (!isWholeVideo || untranslated > 0);
+
   bool get isWholeVideo =>
       imported || coversWholeVideo(covered, duration, reachedEnd: complete);
 
@@ -200,14 +202,47 @@ class SubtitleStore {
   static Future<File> _oldFile(String id) async =>
       File(p.join((await _dir()).path, '$id.json'));
 
-  static Future<void> save(SavedSubs subs) async {
-    final file = await _file(subs.id);
-    final tmp = File('${file.path}.tmp');
-    await tmp.writeAsBytes(gzip.encode(utf8.encode(jsonEncode(subs.toJson()))));
-    await tmp.rename(file.path);
-    final old = await _oldFile(subs.id);
-    if (await old.exists()) await old.delete();
+  /// Writes to one entry go one after another, so overlapping saves
+  /// (autosave, rename, edit, delete) neither share a temporary file nor
+  /// land out of order.
+  static final _queues = <String, Future<void>>{};
+
+  /// Bumped when an entry is deleted; a session's autosave that started
+  /// before must not bring it back.
+  static final _epochs = <String, int>{};
+  static int _tmpCounter = 0;
+
+  static int epochOf(String id) => _epochs[id] ?? 0;
+
+  static Future<T> _serial<T>(String id, Future<T> Function() body) {
+    final result = (_queues[id] ?? Future<void>.value()).then((_) => body());
+    final done = result.then<void>((_) {}, onError: (_) {});
+    _queues[id] = done;
+    done.whenComplete(() {
+      if (identical(_queues[id], done)) _queues.remove(id);
+    });
+    return result;
   }
+
+  /// [ifEpoch]: skip the write if the entry was deleted since (autosave).
+  static Future<void> save(SavedSubs subs, {int? ifEpoch}) =>
+      _serial(subs.id, () async {
+        if (ifEpoch != null && ifEpoch != epochOf(subs.id)) return;
+        final file = await _file(subs.id);
+        final tmp = File('${file.path}.${pid}_${_tmpCounter++}.tmp');
+        try {
+          await tmp.writeAsBytes(
+            gzip.encode(utf8.encode(jsonEncode(subs.toJson()))),
+            flush: true,
+          );
+          await tmp.rename(file.path);
+        } catch (_) {
+          if (await tmp.exists()) await tmp.delete();
+          rethrow;
+        }
+        final old = await _oldFile(subs.id);
+        if (await old.exists()) await old.delete();
+      });
 
   static Future<SavedSubs?> load(String id) async {
     try {
@@ -261,11 +296,12 @@ class SubtitleStore {
     return total;
   }
 
-  static Future<void> delete(String id) async {
+  static Future<void> delete(String id) => _serial(id, () async {
+    _epochs[id] = epochOf(id) + 1;
     for (final file in [await _file(id), await _oldFile(id)]) {
       if (await file.exists()) await file.delete();
     }
-  }
+  });
 
   /// Writes an .srt into the folder the Files app shows. Returns its name.
   static Future<String> exportSrt(String title, List<Cue> cues) async {
@@ -288,8 +324,13 @@ class SessionSaver {
     required this.title,
     this.duration,
   }) : id = SubtitleStore.idFor(page) {
+    _epoch = SubtitleStore.epochOf(id);
     session.addListener(_changed);
   }
+
+  /// The store's epoch for this page when the session began: if the entry
+  /// is deleted meanwhile, autosave stops rather than bring it back.
+  late final int _epoch;
 
   /// Current length of the video, read at every save.
   final double Function()? duration;
@@ -298,14 +339,14 @@ class SessionSaver {
   final String page;
   final String title;
   final String id;
-  int _savedCount = -1;
+  int _savedRevision = -1;
   bool _savedFinished = false;
   double _savedCovered = 0;
   Timer? _timer;
 
   void _changed() {
     final moved = coveredSeconds(session.covered) - _savedCovered > 60;
-    if (session.cues.length == _savedCount &&
+    if (session.cueRevision == _savedRevision &&
         session.finished == _savedFinished &&
         !moved) {
       return;
@@ -317,7 +358,13 @@ class SessionSaver {
     });
   }
 
-  Future<void> save() async {
+  Future<void> _pending = Future.value();
+  Future<void> save() {
+    _pending = _pending.then((_) => _save());
+    return _pending;
+  }
+
+  Future<void> _save() async {
     if (session.cues.isEmpty) return;
     // Copy everything first: the session may be disposed while we wait.
     final cues = List.of(session.cues);
@@ -325,15 +372,17 @@ class SessionSaver {
     final finished = session.finished;
     final reachedEnd = session.reachedEnd;
     final length = duration?.call() ?? 0;
-    _savedCount = cues.length;
+    _savedRevision = session.cueRevision;
     _savedFinished = finished;
     _savedCovered = coveredSeconds(covered);
     final previous = await SubtitleStore.load(id);
     try {
       await SubtitleStore.save(
+        ifEpoch: _epoch,
         SavedSubs(
           id: id,
-          title: title,
+          // A name the user gave the entry meanwhile is kept.
+          title: previous?.title.isNotEmpty == true ? previous!.title : title,
           page: page,
           language: session.language,
           updated: DateTime.now(),

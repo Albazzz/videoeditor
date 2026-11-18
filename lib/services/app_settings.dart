@@ -30,6 +30,8 @@ class AppSettings extends ChangeNotifier {
 
   /// Block adverts and pop-ups in the in-app browser.
   bool adBlock = true;
+  bool backgroundLinks = false;
+  bool parallelSubtitles = true;
 
   /// Translate recognised speech into Vietnamese. Off shows the
   /// original language.
@@ -77,6 +79,8 @@ class AppSettings extends ChangeNotifier {
     final prefs = _prefs = await SharedPreferences.getInstance();
     language = prefs.getString('language') ?? 'ja';
     showSource = prefs.getBool('showSource') ?? false;
+    backgroundLinks = prefs.getBool('backgroundLinks') ?? false;
+    parallelSubtitles = prefs.getBool('parallelSubtitles') ?? true;
     adBlock = prefs.getBool('adBlock') ?? true;
     translate = prefs.getBool('translate') ?? true;
     subScale = prefs.getDouble('subScale') ?? 1;
@@ -117,6 +121,18 @@ class AppSettings extends ChangeNotifier {
   void setTranslate(bool value) {
     translate = value;
     _prefs?.setBool('translate', value);
+    notifyListeners();
+  }
+
+  void setBackgroundLinks(bool value) {
+    backgroundLinks = value;
+    _prefs?.setBool('backgroundLinks', value);
+    notifyListeners();
+  }
+
+  void setParallelSubtitles(bool value) {
+    parallelSubtitles = value;
+    _prefs?.setBool('parallelSubtitles', value);
     notifyListeners();
   }
 

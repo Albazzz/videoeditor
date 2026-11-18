@@ -61,63 +61,65 @@ class _ProgressSheetState extends State<_ProgressSheet> {
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    ActivityIcon(session: s, size: 22, tappable: false),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        widget.title.isEmpty
-                            ? 'Tiến trình phụ đề'
-                            : widget.title,
-                        style: theme.textTheme.titleMedium,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      ActivityIcon(session: s, size: 22, tappable: false),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          widget.title.isEmpty
+                              ? 'Tiến trình phụ đề'
+                              : widget.title,
+                          style: theme.textTheme.titleMedium,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  ActivityIcon.describe(s.activity),
-                  style: theme.textTheme.bodySmall,
-                ),
-                const SizedBox(height: 10),
-                if (s.duration > 0) ...[
-                  CoverageBar(
-                    covered: s.covered,
-                    duration: s.duration,
-                    done: whole,
+                    ],
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    subtitleProgressLabel(
+                    'Đang làm gì ngay lúc này',
+                    style: theme.textTheme.labelLarge,
+                  ),
+                  Text(s.stage),
+                  const SizedBox(height: 10),
+                  if (s.duration > 0) ...[
+                    CoverageBar(
                       covered: s.covered,
                       duration: s.duration,
-                      reachedEnd: whole,
+                      done: whole,
                     ),
-                    style: theme.textTheme.labelMedium,
-                  ),
-                  const SizedBox(height: 8),
-                ],
-                for (final (i, step) in s.steps.indexed)
-                  _StepRow(number: i + 1, step: step),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Text(s.status, style: theme.textTheme.bodySmall),
-                    const Spacer(),
-                    TextButton(
-                      onPressed: () => showSessionDetails(context, s),
-                      child: const Text('Chi tiết'),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitleProgressLabel(
+                        covered: s.covered,
+                        duration: s.duration,
+                        reachedEnd: whole,
+                      ),
+                      style: theme.textTheme.labelMedium,
                     ),
+                    const SizedBox(height: 8),
                   ],
-                ),
-              ],
+                  for (final (i, step) in s.steps.indexed)
+                    _StepRow(number: i + 1, step: step),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () => showSessionDetails(context, s),
+                        child: const Text('Chi tiết'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );

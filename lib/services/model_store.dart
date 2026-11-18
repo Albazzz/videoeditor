@@ -61,8 +61,27 @@ class ModelStore {
     );
   }
 
-  /// Downloads whatever is missing. [onProgress] gets 0..1.
-  static Future<void> download(void Function(double) onProgress) async {
+  static Future<void>? _running;
+  static final _listeners = <void Function(double)>{};
+
+  /// Downloads whatever is missing. [onProgress] gets 0..1. Called again
+  /// while a download runs (another screen), it joins that download
+  /// instead of writing the same files twice.
+  static Future<void> download(void Function(double) onProgress) {
+    _listeners.add(onProgress);
+    final running = _running ??=
+        _download((v) {
+          for (final l in List.of(_listeners)) {
+            l(v);
+          }
+        }).whenComplete(() {
+          _running = null;
+          _listeners.clear();
+        });
+    return running;
+  }
+
+  static Future<void> _download(void Function(double) onProgress) async {
     final dir = await _dir();
     var doneBytes = 0;
     final client = http.Client();
@@ -81,14 +100,20 @@ class ModelStore {
         }
         final sink = part.openWrite();
         try {
-          await for (final chunk in res.stream) {
+          // A connection that stops sending must fail, not hang for ever.
+          await for (final chunk in res.stream.timeout(
+            const Duration(seconds: 30),
+          )) {
             sink.add(chunk);
             doneBytes += chunk.length;
             onProgress(doneBytes / totalBytes);
           }
-        } finally {
+        } catch (_) {
           await sink.close();
+          if (await part.exists()) await part.delete();
+          rethrow;
         }
+        await sink.close();
         if (await part.length() != f.bytes) {
           await part.delete();
           throw HttpException('Tải ${f.name} bị gián đoạn, hãy thử lại');

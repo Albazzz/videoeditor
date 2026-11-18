@@ -40,7 +40,7 @@ workflows:
           flutter analyze --no-fatal-infos
           # export_ffmpeg_test needs a desktop ffmpeg with libass, so it is
           # left for local runs.
-          flutter test --no-pub test/core_test.dart test/key_store_test.dart test/subtitle_store_test.dart test/subtitle_file_test.dart test/lock_screen_test.dart test/watch_position_test.dart test/openrouter_test.dart test/subtitle_plan_test.dart test/subtitle_picker_test.dart test/web_video_test.dart test/hls_proxy_test.dart test/bookmarks_test.dart test/net_test.dart test/app_settings_test.dart test/browser_tabs_test.dart test/browser_screen_test.dart
+          flutter test --no-pub test/core_test.dart test/key_store_test.dart test/subtitle_store_test.dart test/subtitle_file_test.dart test/lock_screen_test.dart test/watch_position_test.dart test/openrouter_test.dart test/subtitle_plan_test.dart test/subtitle_runs_test.dart test/subtitle_picker_test.dart test/web_video_test.dart test/hls_proxy_test.dart test/bookmarks_test.dart test/net_test.dart test/app_settings_test.dart test/browser_tabs_test.dart test/browser_screen_test.dart test/audit_fixes_test.dart
 
       - name: Build iOS app without signing
         script: |

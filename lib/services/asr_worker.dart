@@ -53,12 +53,24 @@ class AsrError extends AsrEvent {
 /// Runs voice-activity detection + speech recognition in a background
 /// isolate so the UI and the video never stutter.
 class AsrWorker {
-  AsrWorker._(this._isolate, this._toWorker, this._events, this._receivePort);
+  AsrWorker._(
+    this._isolate,
+    this._toWorker,
+    this._events,
+    this._receivePort,
+    this._exited,
+    this._flag,
+  );
+
+  final _ExitFlag _flag;
 
   final Isolate _isolate;
   final SendPort _toWorker;
   final StreamController<AsrEvent> _events;
   final ReceivePort _receivePort;
+  final Future<void> _exited;
+  Future<void>? _stopping;
+  static int _nextWorker = 0;
 
   Stream<AsrEvent> get events => _events.stream;
 
@@ -99,6 +111,22 @@ class AsrWorker {
           events.add(AsrError(m['gen'] as int, m['message'] as String));
       }
     });
+    final exits = ReceivePort();
+    final flag = _ExitFlag();
+    final exited = exits.first.then<void>((_) {
+      if (!ready.isCompleted) {
+        ready.completeError(StateError('Bộ nhận dạng đã dừng'));
+      } else if (!flag.stopping && !events.isClosed) {
+        // Killed by iOS (memory) or crashed: the session must know, or it
+        // waits for lines that never come.
+        events.add(
+          const AsrError(
+            -1,
+            'Bộ nhận dạng dừng bất ngờ (có thể do thiếu bộ nhớ)',
+          ),
+        );
+      }
+    });
     final isolate = await Isolate.spawn(_entry, [
       fromWorker.sendPort,
       config.vadModel,
@@ -106,10 +134,11 @@ class AsrWorker {
       config.tokens,
       config.language,
       CrashTrail.path,
-    ]);
+      _nextWorker++,
+    ], onExit: exits.sendPort);
     try {
       final port = await ready.future;
-      return AsrWorker._(isolate, port, events, fromWorker);
+      return AsrWorker._(isolate, port, events, fromWorker, exited, flag);
     } catch (_) {
       isolate.kill();
       fromWorker.close();
@@ -129,11 +158,21 @@ class AsrWorker {
     'last': last,
   });
 
-  void dispose() {
-    _isolate.kill(priority: Isolate.immediate);
+  Future<void> dispose() => _stopping ??= _shutdown();
+
+  Future<void> _shutdown() async {
+    _flag.stopping = true;
+    _toWorker.send({'type': 'stop'});
+    // A worker busy decoding may not answer; do not wait for ever.
+    await _exited.timeout(const Duration(seconds: 3), onTimeout: () {});
+    _isolate.kill();
     _receivePort.close();
     _events.close();
   }
+}
+
+class _ExitFlag {
+  bool stopping = false;
 }
 
 /// Reads the PCM payload of a 16-bit mono WAV file as floats in [-1, 1].
@@ -169,14 +208,15 @@ void _entry(List<Object?> args) {
   final tokens = args[3] as String;
   final language = args[4] as String;
   final trail = args[5] as String?;
+  final workerId = args[6] as int;
   var step = 0;
   int begin(String label) {
     final id = step++;
-    CrashTrail.write(trail, '+w$id|$label');
+    CrashTrail.write(trail, '+w$workerId-$id|$label');
     return id;
   }
 
-  void end(int id) => CrashTrail.write(trail, '-w$id');
+  void end(int id) => CrashTrail.write(trail, '-w$workerId-$id');
 
   late final sherpa.OfflineRecognizer recognizer;
   sherpa.VoiceActivityDetector newVad() => sherpa.VoiceActivityDetector(
@@ -254,6 +294,12 @@ void _entry(List<Object?> args) {
   final inbox = ReceivePort();
   inbox.listen((msg) {
     final m = msg as Map;
+    if (m['type'] == 'stop') {
+      vad.free();
+      recognizer.free();
+      inbox.close();
+      return;
+    }
     if (m['type'] == 'reset') {
       gen = m['gen'] as int;
       base = m['base'] as double;

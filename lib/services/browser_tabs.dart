@@ -29,10 +29,10 @@ class BrowserTabs extends ChangeNotifier {
   BrowserTab get selected => _tabs.firstWhere((t) => t.id == _selectedId);
   int get selectedIndex => _tabs.indexOf(selected);
 
-  BrowserTab add({String? url, int? windowId}) {
+  BrowserTab add({String? url, int? windowId, bool select = true}) {
     final tab = BrowserTab(_nextId++, url ?? homeUrl, windowId: windowId);
     _tabs.add(tab);
-    _selectedId = tab.id;
+    if (select || _tabs.length == 1) _selectedId = tab.id;
     notifyListeners();
     return tab;
   }

@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'package:crypto/crypto.dart';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -13,7 +16,14 @@ import 'net.dart';
 /// every piece is fetched through it, cuts the picture off the front, and
 /// adds the page's headers (cookies, referer) to every request.
 class HlsProxy {
-  HlsProxy._(this._server, this._headers);
+  HlsProxy._(this._server, this._headers, this._credentialOrigin);
+  Uri? _credentialOrigin;
+  final _signer = Hmac(
+    sha256,
+    List<int>.generate(32, (_) => Random.secure().nextInt(256)),
+  );
+  String _signature(String kind, String target) =>
+      _signer.convert(utf8.encode('$kind\n$target')).toString();
 
   final HttpServer _server;
   final Map<String, String> _headers;
@@ -23,9 +33,12 @@ class HlsProxy {
   /// What went wrong last, for the details panel.
   String lastError = '';
 
-  static Future<HlsProxy> start(Map<String, String> headers) async {
+  static Future<HlsProxy> start(
+    Map<String, String> headers, {
+    Uri? credentialOrigin,
+  }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    final proxy = HlsProxy._(server, headers);
+    final proxy = HlsProxy._(server, Map.of(headers), credentialOrigin);
     server.listen(proxy._handle);
     return proxy;
   }
@@ -37,24 +50,59 @@ class HlsProxy {
   /// avoid buffering an entire movie and preserve ffmpeg's seeking.
   String urlForFile(String video) => _local('f', video);
 
-  String _local(String kind, String target) =>
-      'http://127.0.0.1:${_server.port}/$kind?u=${Uri.encodeQueryComponent(target)}';
+  String _local(String kind, String target) {
+    _credentialOrigin ??= Uri.parse(target);
+    return Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: _server.port,
+      path: '/$kind',
+      queryParameters: {'u': target, 't': _signature(kind, target)},
+    ).toString();
+  }
 
   Future<void> _handle(HttpRequest req) async {
     final target = req.uri.queryParameters['u'];
-    final kind = req.uri.path.replaceAll('/', '');
+    final kind = req.uri.path.substring(1);
     try {
       if (_closed) return;
-      if (target == null) throw const HttpException('no target');
+      if (target == null ||
+          !{'f', 'p', 'r', 's'}.contains(kind) ||
+          req.uri.queryParameters['t'] != _signature(kind, target)) {
+        req.response.statusCode = HttpStatus.forbidden;
+        await req.response.close();
+        return;
+      }
+      final uri = Uri.parse(target);
+      final headers = Net.headersFor(_credentialOrigin!, uri, _headers);
       if (kind == 'f') {
-        await _file(req, Uri.parse(target));
+        await _file(req, uri, headers);
         return;
       }
       // Fetched the way Safari fetches (see Net), so servers that turn
       // away other clients still answer.
-      final (status, bytes) = await Net.get(Uri.parse(target), _headers);
+      // ffmpeg asks for "bytes=0-" on every piece: that is the whole
+      // piece (which may need its fake picture cut off). Only a real
+      // sub-range (#EXT-X-BYTERANGE) is passed on as it is.
+      final asked = kind == 'p' ? null : req.headers.value('range');
+      final range =
+          asked == null || RegExp(r'^bytes=0-\s*$').hasMatch(asked.trim())
+          ? null
+          : asked;
+      final res = await Net.fetch(uri, {...headers, 'Range': ?range});
+      final status = res.status, bytes = res.bytes;
       if (_closed) return;
       req.response.statusCode = status;
+      if (range != null && (status == 206 || status == 416)) {
+        for (final name in ['content-range', 'accept-ranges', 'content-type']) {
+          final v = res.headers[name];
+          if (v != null) req.response.headers.set(name, v);
+        }
+        req.response.contentLength = bytes.length;
+        req.response.add(bytes);
+        await req.response.close();
+        return;
+      }
       if (status != 200) {
         lastError = 'máy chủ trả $status';
         AppLog.e('relay', 'Máy chủ trả $status cho ${AppLog.url(target)}');
@@ -68,8 +116,8 @@ class HlsProxy {
         );
         req.response.write(
           rewritePlaylist(
-            String.fromCharCodes(bytes),
-            Uri.parse(target),
+            utf8.decode(bytes, allowMalformed: true),
+            res.url ?? uri,
             playlistUrl: (u) => _local('p', u),
             segmentUrl: (u) => _local('s', u),
             resourceUrl: (u) => _local('r', u),
@@ -77,23 +125,29 @@ class HlsProxy {
         );
       } else {
         final body = bytes;
-        final start = kind == 'r' ? 0 : mediaStart(body);
+        final start = kind == 'r' || range != null ? 0 : mediaStart(body);
         if (start > 0) stripped++;
         req.response.add(start > 0 ? Uint8List.sublistView(body, start) : body);
       }
       await req.response.close();
     } catch (e) {
       if (_closed) return;
-      lastError = '$e';
+      lastError = AppLog.sanitize('$e');
       AppLog.e('relay', 'Lỗi khi lấy ${AppLog.url(target ?? '')}: $e');
       try {
         req.response.statusCode = 502;
+      } catch (_) {}
+      try {
         await req.response.close();
       } catch (_) {}
     }
   }
 
-  Future<void> _file(HttpRequest req, Uri target) async {
+  Future<void> _file(
+    HttpRequest req,
+    Uri target,
+    Map<String, String> headers,
+  ) async {
     final requested = req.headers.value(HttpHeaders.rangeHeader);
     final range = requested == null
         ? null
@@ -114,7 +168,7 @@ class HlsProxy {
       if (requestedEnd != null && to > requestedEnd) to = requestedEnd;
       if (end != null && to > end) to = end;
       final response = await Net.fetch(target, {
-        ..._headers,
+        ...headers,
         'Range': 'bytes=$offset-$to',
       }, maxBytes: block);
       if (_closed) return;

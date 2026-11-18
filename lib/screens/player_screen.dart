@@ -57,6 +57,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   /// Current lines came from a subtitle file.
   bool _fromFile = false;
+  bool _canResume = false;
   List<Cue> _cues = [];
   bool _showSubs = true;
   bool _showControls = true;
@@ -121,13 +122,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
           });
         }
       } else if (page != null) {
-        // Lines imported from a file for this page are used as they are.
         final saved = await SubtitleStore.load(SubtitleStore.idFor(page));
-        if (saved != null && saved.imported && mounted) {
+        if (saved != null && saved.cues.isNotEmpty && mounted) {
           setState(() {
             _cues = saved.cues;
             _saved = true;
-            _fromFile = true;
+            _fromFile = saved.imported;
+            _canResume = saved.canResume;
           });
         }
       }
@@ -145,7 +146,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   double get _duration => _player.value.duration.inMilliseconds / 1000;
 
   void _onSettings() {
-    _session?.mode = appSettings.subWhole
+    _session?.parallel = appSettings.parallelSubtitles;
+    _session?.mode = widget.item != null || appSettings.subWhole
         ? SubtitleMode.whole
         : SubtitleMode.follow;
     if (mounted) setState(() {});
@@ -171,19 +173,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _startSubtitles() async {
     if (_session != null) return;
-    if (!await ensureModels(context) || !mounted) return;
     final page = widget.item == null ? widget.page : null;
     final saved = page == null
         ? null
         : await SubtitleStore.load(SubtitleStore.idFor(page));
-    final reuse = saved != null && saved.language == appSettings.language;
+    if (!mounted || _session != null) return;
+    if (saved != null && saved.imported) {
+      setState(() {
+        _fromFile = true;
+        _cues = saved.cues;
+        _showSubs = true;
+        _canResume = false;
+      });
+      return;
+    }
+    if (!await ensureModels(context)) return;
     if (!mounted || _session != null) return;
     final session = SubtitleSession(
       input: _input,
       language: appSettings.language,
       headers: widget.headers,
-      initialCues: reuse ? saved.cues : const [],
-      initialCovered: reuse ? saved.covered : const [],
+      saved: saved,
       // A library file is local: making all of it costs no data.
       mode: appSettings.subWhole || widget.item != null
           ? SubtitleMode.whole
@@ -200,21 +210,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     setState(() {
       _session = session;
+      _canResume = false;
       _cues = session.cues;
       _saved = false;
       _showSubs = true;
     });
     ActiveWork.begin(_positionKey ?? _input, widget.title, session);
-    // A saved file should cover the whole video, so start from the top.
-    session.start(widget.item != null ? 0 : _position);
+    session.start(_position);
   }
 
   void _onSession() {
     final session = _session;
-    KeepAwake.update(session);
+    KeepAwake.hold(this, KeepAwake.needed(session));
     if (session == null || !mounted) return;
     final item = widget.item;
-    if (session.finished &&
+    if (session.activity == SessionActivity.done &&
         !_saved &&
         item != null &&
         session.cues.isNotEmpty) {
@@ -225,7 +235,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _toggleSubs() {
-    if (_cues.isEmpty && _session == null) {
+    if ((_cues.isEmpty || _canResume) && _session == null) {
       _startSubtitles();
     } else {
       setState(() => _showSubs = !_showSubs);
@@ -265,6 +275,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _session = null;
       _cues = imported.cues;
+      _canResume = false;
       _saved = true;
       _fromFile = true;
       _showSubs = true;
@@ -336,7 +347,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hide?.cancel();
-    KeepAwake.set(false);
+    KeepAwake.hold(this, false);
     appSettings.removeListener(_onSettings);
     _savePosition(now: true);
     _player.removeListener(_onTick);
@@ -438,12 +449,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                   if (session != null)
                     Text(
-                      session.error != null
-                          ? session.status
-                          : '${subtitleProgressLabel(covered: session.covered, duration: _duration, reachedEnd: session.reachedEnd)}'
-                                ' · ${session.cues.length} dòng'
-                                '${session.finished ? '' : ' · ${session.status} · ${session.stage}'}'
-                                '${session.translatorNote.isEmpty ? '' : ' · ${session.translatorNote}'}',
+                      session.stage,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -473,6 +479,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               tooltip: 'Phụ đề',
               icon: const Icon(Icons.subtitles_outlined, color: Colors.white),
               onSelected: (v) => switch (v) {
+                'resume' => _startSubtitles(),
                 'import' => _importFile(),
                 'style' => showSubtitleStyle(context),
                 'earlier' => _shift(-0.5),
@@ -484,6 +491,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 _ => null,
               },
               itemBuilder: (_) => [
+                if (_canResume)
+                  const PopupMenuItem(value: 'resume', child: Text('Làm tiếp')),
                 const PopupMenuItem(
                   value: 'import',
                   child: Text('Nhập phụ đề từ file…'),
