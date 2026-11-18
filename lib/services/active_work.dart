@@ -64,6 +64,39 @@ class ActiveWork {
   static ActiveWork? find(String id) =>
       _running.values.where((work) => work.id == id).firstOrNull;
 
+  static String _pageKey(String page) =>
+      Uri.tryParse(page)?.removeFragment().toString() ?? page;
+
+  /// The work for this video: by its store id, or (pages give a video a new
+  /// signed address on every visit) the same page with a film of the same
+  /// known length.
+  static ActiveWork? findVideo(String id, String page, double duration) {
+    final exact = find(id);
+    if (exact != null) return exact;
+    if (duration <= 0) return null;
+    final key = _pageKey(page);
+    return _running.values.where((work) {
+      final p = work.saver?.page;
+      final d = work.session.duration;
+      return p != null &&
+          _pageKey(p) == key &&
+          d > 0 &&
+          (d - duration).abs() <= 5;
+    }).firstOrNull;
+  }
+
+  /// Running work for a page (any of its videos), for the browser's
+  /// "subtitles are being made here" bar.
+  static ActiveWork? onPage(String page) {
+    final key = _pageKey(page);
+    return _running.values
+        .where((w) => w.saver != null && _pageKey(w.saver!.page) == key)
+        .firstOrNull;
+  }
+
+  static bool isRunning(SubtitleSession session) =>
+      _running.containsKey(session);
+
   static void begin(
     String id,
     String title,
@@ -85,6 +118,7 @@ class ActiveWork {
       hidden: hidden,
     );
     _running[session] = work;
+    forgetStopped(id);
     session.addListener(work._listener);
     work._saveTimer = Timer.periodic(
       const Duration(seconds: 5),
@@ -95,24 +129,58 @@ class ActiveWork {
     current.value = work;
   }
 
+  /// Work the user stopped, kept as cards with "Làm tiếp" until hidden.
+  static final stopped = ValueNotifier<List<StoppedWork>>(const []);
+  static final _stoppedSessions = Expando<bool>();
+
+  /// The user stopped this session (screens showing it should let go).
+  static bool wasStopped(SubtitleSession session) =>
+      _stoppedSessions[session] == true;
+
+  static void forgetStopped(String id) {
+    stopped.value = List.unmodifiable(stopped.value.where((w) => w.id != id));
+  }
+
   /// Screens detach without stopping. Only this explicit action disposes work.
+  ///
+  /// Stops at once: ffmpeg, recognisers and translation requests are
+  /// cancelled first, then the lines made so far are saved (at most 3 s, so
+  /// a stuck write or network never keeps the button from working).
   static Future<void> stop(SubtitleSession? session) {
     if (session == null) return Future.value();
     if (_stopping[session] case final Future<void> pending) return pending;
-    if (session.stopped) return Future.value();
+    final work = _running[session];
+    // Already stopped elsewhere but still listed: finish the job anyway.
+    if (session.stopped && work == null) return Future.value();
     final done = Completer<void>();
     _stopping[session] = done.future;
+    _stoppedSessions[session] = true;
     session.requestStop();
-    final work = _running[session];
+    AppLog.i('phụ đề', 'Dừng dịch ${work?.title ?? ''}');
     unawaited(() async {
       try {
         try {
-          await work?.saver?.close();
-          await work?.onSave?.call(session);
+          await (() async {
+            await work?.saver?.close();
+            await work?.onSave?.call(session);
+          })().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              AppLog.e('phụ đề', 'Lưu khi dừng quá 3 giây, dừng luôn');
+            },
+          );
+        } catch (e) {
+          AppLog.e('phụ đề', 'Lưu khi dừng: $e');
         } finally {
+          if (work != null) _remember(work);
           end(session);
           session.dispose();
-          await session.closeAudio();
+          // Audio writers close in the background; the stop is done.
+          unawaited(
+            session.closeAudio().catchError((Object e) {
+              AppLog.e('âm thanh', 'Đóng âm thanh sau khi dừng: $e');
+            }),
+          );
         }
         done.complete();
       } catch (e, st) {
@@ -132,6 +200,24 @@ class ActiveWork {
   }
 
   /// Removes this session and shows another tab's work if any remains.
+  static void _remember(ActiveWork work) {
+    final page = work.saver?.page ?? '';
+    if (work.hidden || !page.startsWith('http')) return;
+    final s = work.session;
+    final percent = s.duration > 0
+        ? ' · ${(coveredSeconds(s.covered) / s.duration * 100).clamp(0, 100).round()}%'
+        : '';
+    stopped.value = List.unmodifiable([
+      StoppedWork(
+        id: work.id,
+        title: work.title,
+        page: page,
+        label: '${s.cues.length} dòng$percent',
+      ),
+      ...stopped.value.where((w) => w.id != work.id),
+    ]);
+  }
+
   static void end(SubtitleSession? session) {
     final work = _running.remove(session);
     if (work != null) {
@@ -144,4 +230,15 @@ class ActiveWork {
       current.value = _running.values.lastOrNull;
     }
   }
+}
+
+/// A stopped piece of work, shown in the subtitle store with "Làm tiếp".
+class StoppedWork {
+  const StoppedWork({
+    required this.id,
+    required this.title,
+    required this.page,
+    required this.label,
+  });
+  final String id, title, page, label;
 }

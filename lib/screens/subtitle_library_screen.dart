@@ -150,6 +150,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
               child: ListView(
                 children: [
                   const _ActiveCard(),
+                  const _StoppedCards(),
                   if (web.isNotEmpty) const _Section('Từ web'),
                   for (final s in web)
                     ListTile(
@@ -636,5 +637,50 @@ class _WorkCard extends StatelessWidget {
         ),
       );
     },
+  );
+}
+
+/// Work the user stopped: what was made is kept, and it can carry on.
+class _StoppedCards extends StatelessWidget {
+  const _StoppedCards();
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: ActiveWork.stopped,
+    builder: (context, works, _) => Column(
+      children: [
+        for (final w in works)
+          Card(
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: ListTile(
+              leading: const Icon(Icons.pause_circle_outline),
+              title: Text(
+                'Đã dừng: ${w.title}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(w.label),
+              trailing: Wrap(
+                spacing: 4,
+                children: [
+                  TextButton(
+                    onPressed: () {
+                      ActiveWork.forgetStopped(w.id);
+                      requestResume(w.page);
+                      toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
+                    },
+                    child: const Text('Làm tiếp'),
+                  ),
+                  IconButton(
+                    tooltip: 'Ẩn khỏi danh sách',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => ActiveWork.forgetStopped(w.id),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    ),
   );
 }

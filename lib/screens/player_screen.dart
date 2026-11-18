@@ -96,6 +96,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     appSettings.addListener(_onSettings);
+    ActiveWork.all.addListener(_onWorks);
     _player = widget.item != null
         ? VideoPlayerController.file(widget.item!.file)
         : VideoPlayerController.networkUrl(
@@ -169,6 +170,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   double get _position => _player.value.position.inMilliseconds / 1000;
   double get _duration => _player.value.duration.inMilliseconds / 1000;
 
+  /// Stopped from the subtitle store: keep showing the lines made so far,
+  /// let go of the disposed session.
+  void _onWorks() {
+    final session = _session;
+    if (session == null || !ActiveWork.wasStopped(session)) return;
+    session.removeListener(_onSession);
+    if (!mounted) return;
+    setState(() {
+      _cues = List.of(session.cues);
+      _session = null;
+      _saver = null;
+    });
+  }
+
   void _onSettings() {
     _session?.parallel = appSettings.parallelSubtitles;
     _session?.mode = widget.item != null || appSettings.subWhole
@@ -190,6 +205,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!mounted) return;
     final t = _position;
     _savePosition();
+    _session?.foreground = true;
     _session?.updatePosition(t, duration: _duration);
     final cue = _showSubs ? cueAt(_cues, t) : null;
     if (!identical(cue, _cue) || _showControls) setState(() => _cue = cue);
@@ -524,9 +540,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    // Leaving the player: its work (if it goes on) becomes background.
+    _session?.foreground = false;
     _hide?.cancel();
     KeepAwake.hold(this, false);
     appSettings.removeListener(_onSettings);
+    ActiveWork.all.removeListener(_onWorks);
     _savePosition(now: true);
     _player.removeListener(_onTick);
     _player.dispose();

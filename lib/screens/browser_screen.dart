@@ -29,6 +29,7 @@ import '../widgets/common.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import '../widgets/subtitle_picker.dart';
+import '../widgets/session_progress.dart';
 import '../widgets/subtitle_style.dart';
 import '../widgets/subtitle_revision.dart';
 import '../widgets/video_language.dart';
@@ -470,6 +471,34 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _pageUrl = widget.tab.initialUrl;
     _address.text = _pageUrl;
     appSettings.addListener(_onSettings);
+    ActiveWork.all.addListener(_onWorks);
+  }
+
+  /// Work started, stopped or finished somewhere (the subtitle store, the
+  /// player): let go of a stopped session and refresh the "being made" bar.
+  void _onWorks() {
+    final session = _session;
+    if (session != null && ActiveWork.wasStopped(session)) _onWorkStopped();
+    if (mounted) setState(() {});
+  }
+
+  /// The session shown here was stopped elsewhere: keep its lines on the
+  /// page with ▶ to carry on, without touching the disposed session.
+  void _onWorkStopped() {
+    final session = _session;
+    if (session == null) return;
+    final cues = List.of(session.cues);
+    final language = session.language;
+    session.removeListener(_onSession);
+    _session = null;
+    _saver = null;
+    _sessionSrc = '';
+    _send({'__vsub': 'clear'});
+    if (!mounted) return;
+    if (cues.isNotEmpty) {
+      _showFileCues(cues, _pageUrl, language, imported: false);
+      setState(() => _canCarryOn = _video?.playable ?? false);
+    }
   }
 
   @override
@@ -478,6 +507,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (oldWidget.active && !widget.active) {
       _addressFocus.unfocus();
       _pauseBackground();
+      // Off screen: its work becomes background and gives way.
+      _session?.foreground = false;
     } else if (!oldWidget.active && widget.active) {
       _checkBookmark();
       _web?.evaluateJavascript(
@@ -562,6 +593,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   @override
   void dispose() {
     appSettings.removeListener(_onSettings);
+    ActiveWork.all.removeListener(_onWorks);
     _slowLoad?.cancel();
     _session?.removeListener(_onSession);
     _session?.mode = SubtitleMode.whole;
@@ -666,8 +698,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (session != null) {
       // Adverts often play in their own <video> first; keep the session
       // and simply wait until the main video is back.
-      final other = video.src != _sessionSrc;
+      // Another address is only another video if the length differs too:
+      // the same film often gets a new signed link (or another quality).
+      final sameFilm =
+          video.src == _sessionSrc ||
+          (session.duration > 0 &&
+              video.duration > 0 &&
+              (session.duration - video.duration).abs() <= 5);
+      final other = !sameFilm;
       if (other != _otherVideo) setState(() => _otherVideo = other);
+      if (!other && video.src != _sessionSrc) {
+        _sessionSrc = video.src;
+        session.updateSource(video.src);
+      }
+      // On screen in the active tab: this film's stretch ahead comes first.
+      session.foreground = widget.active && !other;
       if (!other) {
         session.updatePosition(video.time, duration: video.duration);
         // The player frame was reloaded and lost its lines: send them again.
@@ -681,6 +726,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       }
     }
     _rememberPosition(video);
+    // "Làm tiếp" from the subtitle store: carry on once the film plays.
+    if (_session == null &&
+        video.playable &&
+        video.duration >= WatchPosition.minDuration &&
+        takeResume(_pageUrl)) {
+      toast(context, 'Làm tiếp phụ đề cho phim này');
+      unawaited(_startSubtitles());
+    }
     final short = video.duration < WatchPosition.minDuration;
     if (_autoPage != _pageUrl &&
         !_autoBusy &&
@@ -700,7 +753,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _autoBusy = true;
     try {
       final id = SubtitleStore.idForVideo(page, video.src);
-      final running = ActiveWork.find(id);
+      final running = ActiveWork.findVideo(id, page, video.duration);
       if (running != null &&
           mounted &&
           page == _pageUrl &&
@@ -956,7 +1009,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (video == null) return;
     final (page, title) = await _pageInfo();
     final id = SubtitleStore.idForVideo(page, video.src);
-    final running = ActiveWork.find(id);
+    final running = ActiveWork.findVideo(id, page, video.duration);
     if (running != null) {
       _attachWork(running, video);
       return;
@@ -1017,7 +1070,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     } catch (_) {}
     if (!mounted || _session != null) return;
     if (_video?.src != video.src || _pageUrl != page) return;
-    final alreadyRunning = ActiveWork.find(id);
+    final alreadyRunning = ActiveWork.findVideo(id, page, video.duration);
     if (alreadyRunning != null) {
       _attachWork(alreadyRunning, video);
       return;
@@ -1074,7 +1127,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   }
 
   void _attachWork(ActiveWork work, WebVideo video) {
-    if (!mounted || work.session.input != video.src) return;
+    if (!mounted) return;
+    // Same film under a new signed address: keep the work, fetch through
+    // the new link from now on (the old one may have expired).
+    work.session.updateSource(video.src);
     if (_session != work.session) {
       _session?.removeListener(_onSession);
       setState(() {
@@ -1090,12 +1146,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     }
     _autoPage = _pageUrl;
     work.session.mode = _mode;
+    work.session.foreground = widget.active;
     _sendAllCues(work.session.cues);
     _onSession();
   }
 
   /// Detach the view; the manager keeps its pipeline and autosave alive.
   void _detachSubtitles() {
+    _session?.foreground = false;
     _session?.removeListener(_onSession);
     _session?.mode = SubtitleMode.whole;
     _saver?.save();
@@ -1369,6 +1427,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               fit: StackFit.expand,
               children: [
                 _webView,
+                // Subtitles being made for this page but not shown here
+                // yet (video still loading, an advert first): say so.
+                if (_session == null)
+                  Positioned(top: 8, left: 8, right: 8, child: _pageWorkBar()),
                 if (_videoVisible && !_panelHidden && !landscape)
                   Positioned(
                     left: 8,
@@ -1514,6 +1576,40 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   );
 
   bool _landscape = false;
+
+  Widget _pageWorkBar() {
+    final work = ActiveWork.onPage(_pageUrl);
+    if (work == null || work.hidden) return const SizedBox.shrink();
+    final s = work.session;
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => showSessionProgress(context, s, title: work.title),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(6, 2, 12, 2),
+          child: Row(
+            children: [
+              ActivityIcon(session: s, title: work.title),
+              const SizedBox(width: 6),
+              Expanded(
+                child: ListenableBuilder(
+                  listenable: s,
+                  builder: (context, _) => Text(
+                    'Đang làm phụ đề · ${s.stage}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   /// The CC control alone, for watching sideways.
   Widget _compactPanel() {

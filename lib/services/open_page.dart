@@ -10,3 +10,18 @@ void requestOpenPage(String url) {
   openPageRequest.value = null;
   openPageRequest.value = url;
 }
+
+final _resume = <String>{};
+
+String _resumeKey(String page) =>
+    Uri.tryParse(page)?.removeFragment().toString() ?? page;
+
+/// "Làm tiếp" from the subtitle store: open the page and carry on making
+/// subtitles once its video plays (the browser asks [takeResume]).
+void requestResume(String page) {
+  _resume.add(_resumeKey(page));
+  requestOpenPage(page);
+}
+
+/// True once for a page the user asked to carry on.
+bool takeResume(String page) => _resume.remove(_resumeKey(page));

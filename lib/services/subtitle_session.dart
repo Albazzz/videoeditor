@@ -158,6 +158,9 @@ class _Run {
   DateTime lastChunk = DateTime.now();
   int pending = 0, nextChunk = 0;
   bool lastSent = false;
+
+  /// Queued for a recogniser (another film's stretch is more urgent).
+  bool waitingSlot = false;
   void Function()? releaseRecognition;
   void Function()? releaseModel;
   void Function()? releaseExtraction;
@@ -313,6 +316,63 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         : SessionActivity.working;
   }
 
+  bool _foreground = false;
+
+  /// The video is on screen (the browser tab or player showing it): its
+  /// stretch ahead of the viewer comes before every other film's work.
+  bool get foreground => _foreground;
+  set foreground(bool value) {
+    if (_foreground == value || _disposed) return;
+    _foreground = value;
+    VideoPipeline.recognizers.reprioritize();
+    notifyListeners();
+  }
+
+  /// 0: just ahead of the viewer of a video on screen; 1: the rest ahead of
+  /// it; 2: background (other films, stretches behind).
+  int _priorityOf(_Run r) {
+    if (!_foreground) return 2;
+    final end = r.end ?? double.infinity;
+    final ahead = end > _position && r.base <= _position + 180;
+    return ahead ? 0 : 1;
+  }
+
+  /// A more urgent stretch needs this recogniser: stop at the current
+  /// piece (what is done stays done) and queue the rest again.
+  void _yieldRun(_Run r) {
+    if (!_owns(r)) return;
+    AppLog.i(
+      'phụ đề',
+      'Lượt ${r.slot + 1} nhường bộ nhận dạng ở ${_clock(r.processedUntil)}',
+    );
+    _retire(r);
+    _schedule();
+    notifyListeners();
+  }
+
+  String? _liveInput;
+  Map<String, String>? _liveHeaders;
+  final _oldProxies = <HlsProxy>[];
+
+  /// The page gave this video a new address (signed links change on every
+  /// visit and expire): runs from now on fetch through it. Work already
+  /// done is kept; nothing restarts.
+  void updateSource(String src, {Map<String, String>? headers}) {
+    if (_disposed || src.isEmpty || src == (_liveInput ?? input)) return;
+    AppLog.i('phụ đề', 'Video có địa chỉ mới, các lượt sau dùng địa chỉ này');
+    _liveInput = src;
+    if (headers != null) _liveHeaders = headers;
+    _source = null;
+    _resolving = null;
+    // Runs in progress keep their relay; new ones get one with the new
+    // headers. Old relays close with the session.
+    final proxy = _proxy;
+    if (proxy != null && headers != null) {
+      _oldProxies.add(proxy);
+      _proxy = null;
+    }
+  }
+
   SubtitleMode get mode => _mode;
   set mode(SubtitleMode value) {
     if (_mode == value) return;
@@ -332,6 +392,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void didHaveMemoryPressure() {
     if (_lowMemory || _disposed) return;
     _lowMemory = true;
+    VideoPipeline.recognizers.capacity = 1;
     final second = _runs[1];
     if (second != null) {
       AppLog.i('phụ đề', 'Thiếu bộ nhớ, dừng lượt 2 và làm tiếp bằng một lượt');
@@ -514,6 +575,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   Future<String> _audioSource() async {
     final cached = _source;
     if (cached != null) return cached;
+    final input = _liveInput ?? this.input;
+    final headers = _liveHeaders ?? this.headers;
     if (!input.startsWith('http')) return _source = input;
     final resolved = await resolveAudioSource(
       input,
@@ -680,10 +743,14 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       });
       // Audio extraction can run while another film occupies recognition.
       // Limit native model allocations as well as simultaneous decoding.
+      r.waitingSlot = true;
+      notifyListeners();
       final releaseModel = await VideoPipeline.recognizers.acquire(
-        videoId,
+        priority: () => _priorityOf(r),
+        onPreempt: () => _yieldRun(r),
         cancelled: r.cancelled.future,
       );
+      r.waitingSlot = false;
       if (!_owns(r)) {
         releaseModel();
         return;
@@ -743,29 +810,15 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       _chunksFed++;
       r.lastChunk = DateTime.now();
       unawaited(() async {
-        final release = await VideoPipeline.recognition.acquire(
-          videoId,
-          cancelled: r.cancelled.future,
-        );
-        if (!_owns(r)) {
-          release();
-          return;
-        }
-        r.releaseRecognition = release;
         try {
           // The worker may delete its input. It receives a disposable copy;
           // the original audio remains private until explicit confirmation.
           final working = await current.copy(
             p.join(r.dir!.path, p.basename(current.path)),
           );
-          if (!_owns(r)) {
-            release();
-            return;
-          }
+          if (!_owns(r)) return;
           r.worker!.feed(r.gen, working.path, last: r.lastSent);
         } catch (e, st) {
-          release();
-          r.releaseRecognition = null;
           if (_owns(r)) _fail('$e', st);
         }
       }());
@@ -1063,6 +1116,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     final nowKnown = this.duration <= 0 && duration > 0;
     if (duration > 0) this.duration = duration;
     _position = t;
+    if (_foreground && VideoPipeline.recognizers.waiting > 0) {
+      VideoPipeline.recognizers.reprioritize();
+    }
     if (_translator case final OpenRouterTranslator cloud) cloud.position = t;
     if (_translator case final MlKitTranslator local) local.position = t;
     if (_root == null || error != null) return;
@@ -1124,6 +1180,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     return [
       if (error != null || paused || _runs.isEmpty || _feedError.isNotEmpty)
         status
+      else if (_runs.values.isNotEmpty &&
+          _runs.values.every((r) => r.waitingSlot))
+        _foreground
+            ? 'Đang chờ bộ nhận dạng'
+            : 'Đang nhường máy cho video đang xem'
       else if (_runs.values.every((r) => r.worker == null))
         'Đang nạp bộ nhận dạng'
       else if (_chunksFed == 0)
@@ -1289,6 +1350,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     }
     unawaited(_translator.dispose());
     _proxy?.close();
+    for (final old in _oldProxies) {
+      old.close();
+    }
     final root = _root;
     if (root != null) {
       Future.wait(_retiring.toList()).then((_) => _deleteDir(root));

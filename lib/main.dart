@@ -6,6 +6,7 @@ import 'screens/lock_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/subtitle_library_screen.dart';
 import 'screens/log_screen.dart';
+import 'services/active_work.dart';
 import 'services/app_log.dart';
 import 'services/app_settings.dart';
 import 'services/open_page.dart';
@@ -209,7 +210,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 if (i == 1 && _tab != 1) _savedVisit++;
                 _tab = i;
               }),
-              destinations: const [
+              destinations: [
                 NavigationDestination(
                   icon: Icon(Icons.public),
                   label: 'Xem web',
@@ -219,7 +220,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   label: 'Trang lưu',
                 ),
                 NavigationDestination(
-                  icon: Icon(Icons.subtitles_outlined),
+                  // How many films are having subtitles made right now.
+                  icon: ValueListenableBuilder(
+                    valueListenable: ActiveWork.all,
+                    builder: (context, works, _) {
+                      final n = works.where((w) => !w.hidden).length;
+                      return Badge(
+                        isLabelVisible: n > 0,
+                        label: Text('$n'),
+                        child: const Icon(Icons.subtitles_outlined),
+                      );
+                    },
+                  ),
                   label: 'Phụ đề',
                 ),
                 NavigationDestination(
