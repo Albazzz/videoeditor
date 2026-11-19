@@ -135,6 +135,17 @@ void main() {
     },
   );
 
+  test('"Làm lại từ đầu" opens the page once, fresh, unlike "Làm tiếp"', () {
+    const page = 'https://phim.example/xem/3';
+    requestResume(page);
+    expect(takeResume(page), isTrue);
+    expect(takeRestart(page), isFalse, reason: 'carrying on keeps the lines');
+    requestRestart('$page#t=10');
+    expect(takeResume(page), isTrue);
+    expect(takeRestart(page), isTrue);
+    expect(takeRestart(page), isFalse);
+  });
+
   test('saved subtitles keep their key helpers in step', () {
     expect(
       SubtitleStore.idForVideo('https://a.example/x', 's'),

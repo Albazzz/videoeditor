@@ -755,7 +755,16 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         video.playable &&
         video.duration >= WatchPosition.minDuration &&
         takeResume(_pageUrl)) {
-      toast(context, 'Làm tiếp phụ đề cho phim này');
+      final fresh = takeRestart(_pageUrl);
+      // The old lines were deleted: stop showing them before starting.
+      if (fresh) {
+        _detachSubtitles();
+        setState(() {});
+      }
+      toast(
+        context,
+        fresh ? 'Làm lại phụ đề từ đầu' : 'Làm tiếp phụ đề cho phim này',
+      );
       unawaited(_startSubtitles());
     }
     final short = video.duration < WatchPosition.minDuration;

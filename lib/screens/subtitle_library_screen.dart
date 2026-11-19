@@ -21,6 +21,44 @@ import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_revision.dart';
 import '../widgets/video_language.dart';
 
+/// "Làm lại từ đầu": after asking, stops any work on [s], deletes its
+/// lines and opens the page to make them again from the start of the
+/// film. True when it went ahead.
+Future<bool> restartSubtitles(BuildContext context, SavedSubs s) async {
+  final name = s.title.isEmpty ? (Uri.tryParse(s.page)?.host ?? '') : s.title;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Làm lại từ đầu?'),
+      content: Text(
+        'Xoá ${s.cues.length} dòng phụ đề của "$name" rồi nghe và dịch lại '
+        'từ đầu khi phim chạy trên trang.\n\n'
+        'Chỉ muốn dịch lại câu sai thì dùng "Dịch lại"; còn thiếu đoạn thì '
+        'dùng "Làm tiếp".',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('Huỷ'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('Làm lại'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return false;
+  await ActiveWork.stop(ActiveWork.find(s.id)?.session);
+  await SubtitleStore.delete(s.id);
+  ActiveWork.forgetStopped(s.id);
+  requestRestart(s.page);
+  if (context.mounted) {
+    toast(context, 'Mở trang, sẽ làm lại từ đầu khi phim chạy');
+  }
+  return true;
+}
+
 /// Every subtitle the app has made: for web videos and for library videos.
 /// Hidden videos are left out on purpose.
 class SubtitleLibraryScreen extends StatefulWidget {
@@ -97,6 +135,8 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         requestOpenPage(s.page);
       case 'resume':
         _resume(s);
+      case 'restart':
+        if (await restartSubtitles(context, s)) await _reload();
       case 'rename':
         final c = TextEditingController(text: s.title);
         final name = await showDialog<String>(
@@ -225,6 +265,11 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                     const PopupMenuItem(
                       value: 'resume',
                       child: Text('Làm tiếp'),
+                    ),
+                  if (web)
+                    const PopupMenuItem(
+                      value: 'restart',
+                      child: Text('Làm lại từ đầu'),
                     ),
                   const PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
                   const PopupMenuItem(value: 'delete', child: Text('Xoá')),
@@ -637,18 +682,12 @@ class _SubtitleViewState extends State<_SubtitleView> {
           child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
         actions: [
-          if (saved != null || widget.item != null) ...[
+          if (saved != null || widget.item != null)
             IconButton(
               tooltip: 'Yêu cầu dịch lại',
               icon: const Icon(Icons.translate),
               onPressed: () => _revise(),
             ),
-            IconButton(
-              tooltip: 'Ngôn ngữ của video',
-              icon: const Icon(Icons.language),
-              onPressed: _changeLanguage,
-            ),
-          ],
           if (saved case final SavedSubs s
               when s.page.startsWith('http') &&
                   s.canResume &&
@@ -672,21 +711,66 @@ class _SubtitleViewState extends State<_SubtitleView> {
                 Navigator.popUntil(context, (r) => r.isFirst);
               },
             ),
-          if (saved != null)
-            IconButton(
-              tooltip: 'Đổi tên',
-              icon: const Icon(Icons.drive_file_rename_outline),
-              onPressed: _rename,
-            ),
-          IconButton(
-            tooltip: 'Lưu file .srt',
-            icon: const Icon(Icons.download_outlined),
-            onPressed: cues.isEmpty ? null : () => _export(context),
-          ),
-          IconButton(
-            tooltip: 'Xoá',
-            icon: const Icon(Icons.delete_outline),
-            onPressed: () => _delete(context),
+          PopupMenuButton<String>(
+            tooltip: 'Thêm',
+            onSelected: (v) async {
+              switch (v) {
+                case 'restart':
+                  if (await restartSubtitles(context, saved!) &&
+                      context.mounted) {
+                    Navigator.popUntil(context, (r) => r.isFirst);
+                  }
+                case 'language':
+                  await _changeLanguage();
+                case 'rename':
+                  await _rename();
+                case 'export':
+                  await _export(context);
+                case 'delete':
+                  await _delete(context);
+              }
+            },
+            itemBuilder: (_) => [
+              if (saved?.page.startsWith('http') ?? false)
+                const PopupMenuItem(
+                  value: 'restart',
+                  child: ListTile(
+                    leading: Icon(Icons.restart_alt),
+                    title: Text('Làm lại từ đầu'),
+                  ),
+                ),
+              if (saved != null || widget.item != null)
+                const PopupMenuItem(
+                  value: 'language',
+                  child: ListTile(
+                    leading: Icon(Icons.language),
+                    title: Text('Ngôn ngữ của video'),
+                  ),
+                ),
+              if (saved != null)
+                const PopupMenuItem(
+                  value: 'rename',
+                  child: ListTile(
+                    leading: Icon(Icons.drive_file_rename_outline),
+                    title: Text('Đổi tên'),
+                  ),
+                ),
+              PopupMenuItem(
+                value: 'export',
+                enabled: cues.isNotEmpty,
+                child: const ListTile(
+                  leading: Icon(Icons.download_outlined),
+                  title: Text('Lưu file .srt'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'delete',
+                child: ListTile(
+                  leading: Icon(Icons.delete_outline),
+                  title: Text('Xoá'),
+                ),
+              ),
+            ],
           ),
         ],
       ),

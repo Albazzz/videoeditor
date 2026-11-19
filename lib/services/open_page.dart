@@ -25,3 +25,15 @@ void requestResume(String page) {
 
 /// True once for a page the user asked to carry on.
 bool takeResume(String page) => _resume.remove(_resumeKey(page));
+
+final _restart = <String>{};
+
+/// "Làm lại từ đầu": like [requestResume], after the old subtitles were
+/// deleted; the page also stops showing the old lines it may still have.
+void requestRestart(String page) {
+  _restart.add(_resumeKey(page));
+  requestResume(page);
+}
+
+/// True once for a page whose subtitles start over.
+bool takeRestart(String page) => _restart.remove(_resumeKey(page));
