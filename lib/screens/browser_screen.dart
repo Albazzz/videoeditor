@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:path/path.dart' as p;
 
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
@@ -266,6 +267,29 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final saved = url.isNotEmpty && await Bookmarks.contains(url);
     if (mounted && url == _pageUrl && saved != _bookmarked) {
       setState(() => _bookmarked = saved);
+    }
+  }
+
+  /// A small picture of a page with subtitles, for the subtitle store
+  /// (shared with saved pages; taken once per page).
+  Future<void> _keepPagePicture(String page) async {
+    if (!page.startsWith('http')) return;
+    try {
+      final dir = await Bookmarks.thumbDir();
+      if (dir == null ||
+          File(p.join(dir.path, Bookmarks.thumbName(page))).existsSync()) {
+        return;
+      }
+      final shot = await _web?.takeScreenshot(
+        screenshotConfiguration: ScreenshotConfiguration(
+          compressFormat: CompressFormat.JPEG,
+          quality: 60,
+          snapshotWidth: 320,
+        ),
+      );
+      if (shot != null) await Bookmarks.saveThumb(page, shot);
+    } catch (e) {
+      AppLog.e('web', 'Không chụp được ảnh trang: $e');
     }
   }
 
@@ -1008,6 +1032,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     AppLog.i('web', 'Bấm CC${video == null ? ' (chưa thấy video)' : ''}');
     if (video == null) return;
     final (page, title) = await _pageInfo();
+    unawaited(_keepPagePicture(page));
     final id = SubtitleStore.idForVideo(page, video.src);
     final running = ActiveWork.findVideo(id, page, video.duration);
     if (running != null) {

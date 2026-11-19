@@ -3,6 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video/widgets/bookmarks_sheet.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video/services/bookmarks.dart';
+import 'dart:io';
+
+import 'package:video/models/cue.dart';
+import 'package:video/services/subtitle_store.dart';
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -115,6 +119,49 @@ void main() {
     await Bookmarks.remove('https://a.example/phim-1');
     expect((await Bookmarks.load()).map((b) => b.title), ['Phim 2']);
     expect(await Bookmarks.contains('https://a.example/phim-1'), isFalse);
+  });
+
+  testWidgets('a saved page with subtitles carries the mark', (tester) async {
+    final dir = (await tester.runAsync(
+      () => Directory.systemTemp.createTemp('marks'),
+    ))!;
+    SubtitleStore.overrideDir = dir;
+    addTearDown(() {
+      SubtitleStore.overrideDir = null;
+      dir.deleteSync(recursive: true);
+    });
+    await tester.runAsync(() async {
+      await Bookmarks.add('https://phim.example/1', 'Có dịch');
+      await Bookmarks.add('https://phim.example/2', 'Chưa dịch');
+      await SubtitleStore.save(
+        SavedSubs(
+          id: 'x',
+          title: 'Phim',
+          page: 'https://phim.example/1',
+          language: 'ja',
+          updated: DateTime(2026),
+          cues: const [Cue(start: 1, end: 2, text: 'Chào', source: 'やあ')],
+          covered: const [(0, 500)],
+          duration: 1000,
+        ),
+      );
+      // Real file reads finish outside the widget test's fake clock.
+      await SubtitleStore.pageMarks();
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: BookmarksView(onOpen: (_) {})),
+      ),
+    );
+    for (var i = 0; i < 5; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+    }
+    expect(find.text('Có phụ đề · 50%'), findsOneWidget);
+    expect(find.text('Có dịch'), findsOneWidget);
+    expect(find.text('Chưa dịch'), findsOneWidget);
   });
 
   testWidgets('saving asks for the name and folder first', (tester) async {

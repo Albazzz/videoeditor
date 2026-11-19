@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/bookmarks.dart';
+import '../services/subtitle_store.dart';
 
 /// The saved pages; returns the address to open, or null.
 Future<String?> showBookmarks(BuildContext context) =>
@@ -206,10 +207,40 @@ class _BookmarksViewState extends State<BookmarksView> {
   final _expanded = <String>{};
   String _filter = '';
 
+  /// Pages with subtitles in the store, by address.
+  Map<String, PageSubs> _subs = const {};
+  Timer? _subsSoon;
+
   @override
   void initState() {
     super.initState();
     _load();
+    SubtitleStore.changes.addListener(_onSubsChanged);
+  }
+
+  @override
+  void dispose() {
+    SubtitleStore.changes.removeListener(_onSubsChanged);
+    _subsSoon?.cancel();
+    super.dispose();
+  }
+
+  /// Subtitles being made save every few seconds: refresh the marks a
+  /// little later, not on every save.
+  void _onSubsChanged() {
+    _subsSoon ??= Timer(const Duration(seconds: 5), () {
+      _subsSoon = null;
+      unawaited(_loadSubs());
+    });
+  }
+
+  Future<void> _loadSubs() async {
+    try {
+      final marks = await SubtitleStore.pageMarks();
+      if (mounted) setState(() => _subs = marks);
+    } catch (_) {
+      // No mark is better than no list.
+    }
   }
 
   Future<void> _load() async {
@@ -220,6 +251,7 @@ class _BookmarksViewState extends State<BookmarksView> {
       _all = all;
       _folders = folders;
     });
+    unawaited(_loadSubs());
     // The list shows at once; pictures follow when their folder is known.
     if (_thumbs == null) {
       unawaited(
@@ -285,25 +317,37 @@ class _BookmarksViewState extends State<BookmarksView> {
     );
   }
 
-  Widget _page(Bookmark b) => ListTile(
-    leading: _picture(b),
-    title: Text(
-      b.title.isEmpty ? b.host : b.title,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
-    ),
-    subtitle: Text(b.host),
-    trailing: PopupMenuButton<String>(
-      tooltip: 'Sửa trang',
-      onSelected: (v) => _pageAction(b, v),
-      itemBuilder: (_) => const [
-        PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
-        PopupMenuItem(value: 'move', child: Text('Chuyển vào thư mục…')),
-        PopupMenuItem(value: 'remove', child: Text('Xoá')),
-      ],
-    ),
-    onTap: () => widget.onOpen(b.url),
-  );
+  Widget _page(Bookmark b) {
+    final subs = _subs[SubtitleStore.pageKey(b.url)];
+    return ListTile(
+      leading: _picture(b),
+      title: Text(
+        b.title.isEmpty ? b.host : b.title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: subs == null
+          ? Text(b.host)
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(b.host),
+                const SizedBox(height: 2),
+                SubsMark(subs),
+              ],
+            ),
+      trailing: PopupMenuButton<String>(
+        tooltip: 'Sửa trang',
+        onSelected: (v) => _pageAction(b, v),
+        itemBuilder: (_) => const [
+          PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+          PopupMenuItem(value: 'move', child: Text('Chuyển vào thư mục…')),
+          PopupMenuItem(value: 'remove', child: Text('Xoá')),
+        ],
+      ),
+      onTap: () => widget.onOpen(b.url),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -405,6 +449,42 @@ class _BookmarksViewState extends State<BookmarksView> {
                         ),
                     ],
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Có phụ đề · 45%": the page has subtitles (made or being made) in the
+/// subtitle store.
+class SubsMark extends StatelessWidget {
+  const SubsMark(this.subs, {super.key});
+  final PageSubs subs;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = subs.whole
+        ? Colors.green
+        : Theme.of(context).colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.closed_caption, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            subs.label,
+            style: TextStyle(
+              fontSize: 12,
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ],
       ),

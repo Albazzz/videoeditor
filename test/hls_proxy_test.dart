@@ -252,6 +252,41 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
 
+  test(
+    'a slow piece asked for twice is fetched once, and the next one ahead',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      final fetched = <String>[];
+      origin.listen((r) async {
+        final name = r.uri.pathSegments.last;
+        if (name == 'list') {
+          r.response.write('#EXTM3U\n#EXTINF:4,\na.img\n#EXTINF:4,\nb.img\n');
+        } else {
+          fetched.add(name);
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+          r.response.add([1, 2, 3]);
+        }
+        await r.response.close();
+      });
+      final relay = await HlsProxy.start({});
+      addTearDown(relay.close);
+      final list = await http.read(
+        Uri.parse(relay.urlFor('http://127.0.0.1:${origin.port}/list')),
+      );
+      final urls = RegExp(
+        r'^http\S+',
+        multiLine: true,
+      ).allMatches(list).map((m) => Uri.parse(m[0]!)).toList();
+      // ffmpeg gave up on the first try and asks again meanwhile.
+      final both = await Future.wait([http.get(urls[0]), http.get(urls[0])]);
+      expect(both.map((r) => r.bodyBytes), everyElement([1, 2, 3]));
+      final next = await http.get(urls[1]);
+      expect(next.bodyBytes, [1, 2, 3]);
+      expect(fetched, ['a.img', 'b.img']);
+    },
+  );
+
   test('the relay refuses addresses it did not sign (no open proxy)', () async {
     final relay = await HlsProxy.start({'Cookie': 'session=secret'});
     addTearDown(relay.close);

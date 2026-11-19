@@ -137,7 +137,9 @@ class Net {
               'timeout': timeout.inSeconds,
               'maxBytes': ?maxBytes,
             })
-            .timeout(timeout + const Duration(seconds: 5));
+            // iOS ends a request that stops receiving for [timeout]; a slow
+            // piece that keeps arriving is allowed to finish.
+            .timeout(timeout * 4 + const Duration(seconds: 5));
         final body = res?['body'];
         return NetResponse(
           (res?['status'] as int?) ?? 0,

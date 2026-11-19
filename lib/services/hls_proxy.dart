@@ -89,7 +89,9 @@ class HlsProxy {
           asked == null || RegExp(r'^bytes=0-\s*$').hasMatch(asked.trim())
           ? null
           : asked;
-      final res = await Net.fetch(uri, {...headers, 'Range': ?range});
+      final res = kind == 's' && range == null
+          ? await _segment(uri, headers)
+          : await Net.fetch(uri, {...headers, 'Range': ?range});
       final status = res.status, bytes = res.bytes;
       if (_closed) return;
       req.response.statusCode = status;
@@ -114,12 +116,17 @@ class HlsProxy {
           'application',
           'vnd.apple.mpegurl',
         );
+        String? previous;
         req.response.write(
           rewritePlaylist(
             utf8.decode(bytes, allowMalformed: true),
             res.url ?? uri,
             playlistUrl: (u) => _local('p', u),
-            segmentUrl: (u) => _local('s', u),
+            segmentUrl: (u) {
+              if (previous != null) _following[previous!] = u;
+              previous = u;
+              return _local('s', u);
+            },
             resourceUrl: (u) => _local('r', u),
           ),
         );
@@ -141,6 +148,53 @@ class HlsProxy {
         await req.response.close();
       } catch (_) {}
     }
+  }
+
+  /// Pieces being fetched or fetched ahead, by address. ffmpeg asking
+  /// again for a slow piece shares the fetch already running instead of
+  /// starting another one that competes with it.
+  final _pieces = <String, Future<NetResponse>>{};
+
+  /// The piece after each piece, from the playlists seen.
+  final _following = <String, String>{};
+  DateTime _slowNoted = DateTime(0);
+
+  Future<NetResponse> _segment(Uri uri, Map<String, String> headers) async {
+    final key = uri.toString();
+    final piece = _pieces[key] ??= _fetchPiece(uri, headers);
+    // While this one plays, the next piece is already on its way.
+    final next = _following[key];
+    if (next != null && !_pieces.containsKey(next)) {
+      final nextUri = Uri.parse(next);
+      _pieces[next] = _fetchPiece(
+        nextUri,
+        Net.headersFor(_credentialOrigin!, nextUri, _headers),
+      )..ignore();
+    }
+    while (_pieces.length > 4) {
+      _pieces.remove(_pieces.keys.first);
+    }
+    try {
+      return await piece;
+    } finally {
+      if (identical(_pieces[key], piece)) _pieces.remove(key);
+    }
+  }
+
+  Future<NetResponse> _fetchPiece(Uri uri, Map<String, String> headers) async {
+    final watch = Stopwatch()..start();
+    final res = await Net.fetch(uri, headers);
+    final seconds = watch.elapsed.inSeconds;
+    if (seconds >= 15 &&
+        DateTime.now().difference(_slowNoted) > const Duration(minutes: 1)) {
+      _slowNoted = DateTime.now();
+      AppLog.i(
+        'relay',
+        'Máy chủ phim chậm: một đoạn ${(res.bytes.length / 1048576).toStringAsFixed(1)} MB '
+            'mất $seconds giây (${uri.host})',
+      );
+    }
+    return res;
   }
 
   Future<void> _file(

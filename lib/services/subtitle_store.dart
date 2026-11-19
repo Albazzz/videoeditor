@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -199,6 +200,28 @@ class SubtitleStore {
   /// Set in tests to avoid the platform directory lookup.
   static Directory? overrideDir;
 
+  /// Bumped after every save or delete, for screens showing summaries.
+  static final changes = ValueNotifier<int>(0);
+  static Map<String, PageSubs>? _marks;
+  static int _marksAt = -1;
+
+  /// What the store holds for each web page (address without #…), for
+  /// the "has subtitles" mark on saved pages. Cached until the next change.
+  static Future<Map<String, PageSubs>> pageMarks() async {
+    final at = changes.value;
+    if (_marks case final Map<String, PageSubs> marks when _marksAt == at) {
+      return marks;
+    }
+    final out = <String, PageSubs>{};
+    for (final s in await list()) {
+      if (!s.page.startsWith('http') || s.cues.isEmpty) continue;
+      final key = pageKey(s.page);
+      out[key] = PageSubs.of(s, out[key]);
+    }
+    _marksAt = at;
+    return _marks = out;
+  }
+
   static Future<Directory> _dir() async {
     final base = overrideDir ?? await getApplicationSupportDirectory();
     final dir = Directory(p.join(base.path, 'subs'));
@@ -219,7 +242,10 @@ class SubtitleStore {
   static String idForVideo(String page, String source) =>
       idFor('${Uri.tryParse(page)?.removeFragment() ?? page}\n$source');
 
-  static String _pageKey(String page) =>
+  static String _pageKey(String page) => pageKey(page);
+
+  /// A page's address without the part after #.
+  static String pageKey(String page) =>
       Uri.tryParse(page)?.removeFragment().toString() ?? page;
 
   static Future<SavedSubs?> loadVideo(
@@ -322,6 +348,7 @@ class SubtitleStore {
         }
         final old = await _oldFile(subs.id);
         if (await old.exists()) await old.delete();
+        changes.value++;
       });
 
   static Future<SavedSubs?> load(String id) async {
@@ -381,6 +408,7 @@ class SubtitleStore {
     for (final file in [await _file(id), await _oldFile(id)]) {
       if (await file.exists()) await file.delete();
     }
+    changes.value++;
   });
 
   /// Writes an .srt into the folder the Files app shows. Returns its name.
@@ -499,4 +527,38 @@ class SessionSaver {
     session.removeListener(_changed);
     return save();
   }
+}
+
+/// The subtitles kept for one page (all its videos), in short.
+class PageSubs {
+  const PageSubs({
+    required this.lines,
+    required this.whole,
+    required this.progress,
+    required this.canResume,
+  });
+
+  /// [s] added to what is already known for the page ([before]).
+  factory PageSubs.of(SavedSubs s, PageSubs? before) {
+    final p = s.progress;
+    final b = before?.progress;
+    return PageSubs(
+      lines: s.cues.length + (before?.lines ?? 0),
+      whole: s.isWholeVideo || (before?.whole ?? false),
+      progress: p == null ? b : (b == null || p > b ? p : b),
+      canResume: s.canResume || (before?.canResume ?? false),
+    );
+  }
+
+  final int lines;
+  final bool whole;
+  final double? progress;
+  final bool canResume;
+
+  /// "CC · đủ", "CC · 45%" or "CC · 120 dòng".
+  String get label => whole
+      ? 'Có phụ đề · đủ phim'
+      : progress != null
+      ? 'Có phụ đề · ${(progress! * 100).round()}%'
+      : 'Có phụ đề · $lines dòng';
 }

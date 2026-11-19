@@ -204,6 +204,7 @@ class OpenRouterTranslator implements Translator {
     this.contextBefore = const [],
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
+    this.holdFor = const Duration(seconds: 8),
     this.budget = 1000,
     this.maxLines = 40,
     this.parallel = 3,
@@ -220,6 +221,11 @@ class OpenRouterTranslator implements Translator {
   final List<(String, String)> contextBefore;
   String get _logTag => provider.id;
   final Duration gatherFor;
+
+  /// How long lines far from the viewer may wait to fill a request: they
+  /// are not needed yet, and fewer, fuller requests cost less and stay
+  /// under per-minute limits.
+  final Duration holdFor;
 
   /// Characters of original text per request: Chinese or Japanese lines
   /// are short in characters but dense, so this is about 30–80 lines.
@@ -246,14 +252,29 @@ class OpenRouterTranslator implements Translator {
   final _cancel = Completer<void>();
   final _active = <_Waiting>{};
   OpenRouterError? _fatal;
-  DateTime _nextRequest = DateTime(0);
-  Duration _requestSpacing = Duration.zero;
+
+  /// One limit for every film using the same key and model: the provider
+  /// counts requests per account, not per film.
+  static final _gates = <String, _RateGate>{};
+  late final _gate = _gates.putIfAbsent(
+    '${provider.id}|$model|${apiKey.hashCode}',
+    _RateGate.new,
+  );
+
+  /// Forgets learned limits (tests start each case afresh).
+  static void resetRateLimits() => _gates.clear();
+
+  /// The provider told us its per-minute limit: one request per turn,
+  /// each carrying as many lines as fit.
+  bool get _slow => _gate.spacing > Duration.zero;
   bool _structured = true;
   double position = 0;
   int _doneCount = 0, _failedCount = 0, _blockedCount = 0;
   @override
   TranslatorStatus get status {
-    final limited = _nextRequest.isAfter(DateTime.now()) && _rateWaiters > 0;
+    final limited =
+        _gate.next.isAfter(DateTime.now()) &&
+        (_rateWaiters > 0 || _slow && _waiting.isNotEmpty);
     return TranslatorStatus(
       _fatal != null
           ? TranslationState.unavailable
@@ -270,7 +291,7 @@ class OpenRouterTranslator implements Translator {
       done: _doneCount,
       failed: _failedCount,
       blocked: _blockedCount,
-      cooldownUntil: limited ? _nextRequest : null,
+      cooldownUntil: limited ? _gate.next : null,
       note: _fatal?.message ?? provider.name,
     );
   }
@@ -311,12 +332,12 @@ class OpenRouterTranslator implements Translator {
   Future<void> _waitForTurn() async {
     while (true) {
       _checkActive();
-      final delay = _nextRequest.difference(DateTime.now());
+      final delay = _gate.next.difference(DateTime.now());
       if (delay > Duration.zero) {
         await _rateWait(delay);
         continue;
       }
-      _nextRequest = DateTime.now().add(_requestSpacing);
+      _gate.next = DateTime.now().add(_gate.spacing);
       return;
     }
   }
@@ -349,31 +370,57 @@ class OpenRouterTranslator implements Translator {
   /// Live lines in requests now running.
   int _liveRequests = 0;
 
-  /// Sends waiting lines whenever a request slot is free. A request goes
-  /// once it is full (about [budget] characters) or its oldest line has
-  /// waited [gatherFor]; while all slots are busy lines pile up, so the
-  /// next request takes many at once. That way translation keeps up even
-  /// when speech is heard much faster than the film plays.
+  /// Sends waiting lines in as few requests as keeps up with the film.
+  ///
+  /// Lines near the viewer go after a short gather ([gatherFor]); lines
+  /// further away wait up to [holdFor] or until a request is full (about
+  /// [budget] characters). While requests run, lines pile up, so the next
+  /// one takes many at once. Once the provider has named a per-minute
+  /// limit, one request waits for each turn and takes everything waiting
+  /// (up to twice the usual size) instead of spending turns on one line.
   void _dispatch() {
     _gather?.cancel();
     _gather = null;
-    while (_waiting.isNotEmpty && _liveRequests < parallel && !_disposed) {
-      final full = _waitingChars >= budget || _waiting.length >= maxLines;
-      final age = DateTime.now().difference(_waiting.first.since);
-      const firstWait = Duration(milliseconds: 300);
+    final slow = _slow;
+    final lanes = slow ? 1 : parallel;
+    final size = slow ? budget * 2 : budget;
+    final most = slow ? maxLines * 2 : maxLines;
+    while (_waiting.isNotEmpty && _liveRequests < lanes && !_disposed) {
+      final now = DateTime.now();
+      if (slow) {
+        final turn = _gate.next.difference(now);
+        if (turn > Duration.zero) {
+          _gather = Timer(turn, _dispatch);
+          return;
+        }
+      }
+      final full = _waitingChars >= size || _waiting.length >= most;
+      final urgent = _waiting.where((w) => w.urgent(position)).toList();
       final idle = _liveRequests == 0;
-      final wait = idle && gatherFor > firstWait ? firstWait : gatherFor;
-      if (!full && !(idle && _waiting.length >= 4) && age < wait) {
+      const firstWait = Duration(milliseconds: 300);
+      final Duration wait;
+      final DateTime since;
+      if (urgent.isNotEmpty) {
+        wait = idle && gatherFor > firstWait ? firstWait : gatherFor;
+        since = urgent.first.since;
+      } else {
+        wait = holdFor > gatherFor ? holdFor : gatherFor;
+        since = _waiting.first.since;
+      }
+      final age = now.difference(since);
+      if (!full && !(idle && urgent.length >= 4) && age < wait) {
         _gather = Timer(wait - age, _dispatch);
         return;
       }
-      final urgent = _waiting.where((w) => w.near(position)).toList();
-      final ordered = [...urgent, ..._waiting.where((w) => !w.near(position))];
+      final ordered = [
+        ...urgent,
+        ..._waiting.where((w) => !w.urgent(position)),
+      ];
       final batch = <_Waiting>[];
       var chars = 0;
       for (final next in ordered) {
         if (batch.isNotEmpty &&
-            (chars + next.text.length > budget || batch.length >= maxLines)) {
+            (chars + next.text.length > size || batch.length >= most)) {
           break;
         }
         batch.add(next);
@@ -459,7 +506,9 @@ class OpenRouterTranslator implements Translator {
   }) async {
     _checkActive();
     final out = List<String?>.filled(lines.length, null);
-    final chunks = chunkByLength(lines, budget: budget, maxLines: maxLines);
+    final chunks = _slow
+        ? chunkByLength(lines, budget: budget * 2, maxLines: maxLines * 2)
+        : chunkByLength(lines, budget: budget, maxLines: maxLines);
     var done = 0;
     Object? failure;
     await Future.wait([
@@ -677,7 +726,7 @@ class OpenRouterTranslator implements Translator {
               (lines.fold<int>(0, (n, l) => n + l.length) * 2 +
                       lines.length * 16 +
                       512)
-                  .clamp(1024, 4096),
+                  .clamp(1024, 8192),
           if (_structured)
             'response_format': {
               'type': 'json_schema',
@@ -761,15 +810,13 @@ class OpenRouterTranslator implements Translator {
           ).firstMatch(detail);
           final rpm = int.tryParse(limit?[1] ?? '');
           if (rpm != null && rpm > 0) {
-            _requestSpacing = Duration(
-              milliseconds: (60000 / rpm).ceil() + 100,
-            );
+            _gate.spacing = Duration(milliseconds: (60000 / rpm).ceil() + 100);
           }
           final delay =
               retryAfter(res.headers['retry-after'], detail) ??
               retryDelay * (1 << (attempt - 1));
           final next = DateTime.now().add(delay);
-          if (next.isAfter(_nextRequest)) _nextRequest = next;
+          if (next.isAfter(_gate.next)) _gate.next = next;
           throw _Retry('${provider.name} giới hạn tần suất (429): $detail');
         }
         if (code != 200) {
@@ -836,7 +883,7 @@ class OpenRouterTranslator implements Translator {
           throw OpenRouterError('Không dịch được qua ${provider.name}: $e');
         }
         var wait = retryDelay * (1 << (attempt - 1));
-        final cooldown = _nextRequest.difference(DateTime.now());
+        final cooldown = _gate.next.difference(DateTime.now());
         if (cooldown > wait) wait = cooldown;
         AppLog.i(
           _logTag,
@@ -978,10 +1025,18 @@ class _Waiting {
   final double? start;
   bool near(double position) =>
       start != null && start! >= position - 2 && start! < position + 20;
+
+  /// Needed soon: near the viewer, or a line with no place (a preview).
+  bool urgent(double position) => start == null || near(position);
   final String text;
   final String lang;
   final since = DateTime.now();
   final done = Completer<String>();
+}
+
+class _RateGate {
+  DateTime next = DateTime(0);
+  Duration spacing = Duration.zero;
 }
 
 class _Retry implements Exception {

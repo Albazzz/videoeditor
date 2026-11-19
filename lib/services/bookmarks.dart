@@ -185,11 +185,16 @@ class Bookmarks {
     }
   }
 
+  /// The file name of [url]'s picture (one per page, also used by the
+  /// subtitle store).
+  static String thumbName(String url) =>
+      '${sha1.convert(utf8.encode(key(url)))}.jpg';
+
   /// Stores a small picture of [url]'s page; returns its file name.
   static Future<String> saveThumb(String url, Uint8List jpeg) async {
     final dir = await thumbDir();
     if (dir == null || jpeg.isEmpty) return '';
-    final name = '${sha1.convert(utf8.encode(key(url)))}.jpg';
+    final name = thumbName(url);
     await File(p.join(dir.path, name)).writeAsBytes(jpeg, flush: true);
     return name;
   }

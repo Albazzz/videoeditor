@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../services/active_work.dart';
 import '../services/open_page.dart';
@@ -7,6 +10,7 @@ import '../widgets/activity_icon.dart';
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/app_settings.dart';
+import '../services/bookmarks.dart';
 import '../services/subtitle_store.dart';
 import '../services/translator.dart';
 import '../services/video_library.dart';
@@ -30,11 +34,209 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   List<SavedSubs>? _web;
   List<(VideoItem, List<Cue>)> _videos = [];
   int _bytes = 0;
+  String? _thumbs;
 
   @override
   void initState() {
     super.initState();
     _reload();
+    Bookmarks.thumbDir().then((dir) {
+      if (mounted && dir != null) setState(() => _thumbs = dir.path);
+    });
+  }
+
+  /// The page's picture (taken when it was saved or its subtitles began).
+  Widget _picture(SavedSubs s) {
+    final dir = _thumbs;
+    final file = dir == null || !s.page.startsWith('http')
+        ? null
+        : File(p.join(dir, Bookmarks.thumbName(s.page)));
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: SizedBox(
+        width: 64,
+        height: 40,
+        child: file != null && file.existsSync()
+            ? Image.file(file, fit: BoxFit.cover, cacheWidth: 192)
+            : ColoredBox(
+                color: Theme.of(
+                  context,
+                ).colorScheme.primary.withValues(alpha: 0.12),
+                child: Icon(
+                  s.page.startsWith('http')
+                      ? Icons.closed_caption
+                      : Icons.subtitles_outlined,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+      ),
+    );
+  }
+
+  /// Opens the page and carries on making its subtitles once the film
+  /// plays there.
+  void _resume(SavedSubs s) {
+    ActiveWork.forgetStopped(s.id);
+    requestResume(s.page);
+    toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
+  }
+
+  void _view(SavedSubs s) => _open(
+    title: s.title.isEmpty ? _host(s.page) : s.title,
+    subtitle: '${_label(s)}\n${s.page}',
+    cues: s.cues,
+    saved: s,
+    onDelete: () => SubtitleStore.delete(s.id),
+  );
+
+  Future<void> _webAction(SavedSubs s, String action) async {
+    switch (action) {
+      case 'view':
+        _view(s);
+      case 'open':
+        requestOpenPage(s.page);
+      case 'resume':
+        _resume(s);
+      case 'rename':
+        final c = TextEditingController(text: s.title);
+        final name = await showDialog<String>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Đổi tên'),
+            content: TextField(
+              controller: c,
+              autofocus: true,
+              onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Huỷ'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, c.text.trim()),
+                child: const Text('Lưu'),
+              ),
+            ],
+          ),
+        );
+        if (name == null || name.isEmpty) return;
+        final latest = await SubtitleStore.load(s.id) ?? s;
+        await SubtitleStore.save(latest.withTitle(name));
+        await _reload();
+      case 'delete':
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Xoá phụ đề?'),
+            content: Text(
+              'Xoá phụ đề của "${s.title.isEmpty ? _host(s.page) : s.title}". '
+              'Trang đã lưu không bị ảnh hưởng.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Huỷ'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Xoá'),
+              ),
+            ],
+          ),
+        );
+        if (ok != true) return;
+        await ActiveWork.stop(ActiveWork.find(s.id)?.session);
+        await SubtitleStore.delete(s.id);
+        await _reload();
+    }
+  }
+
+  /// One web page's subtitles, like a saved page: a tap opens the page;
+  /// "Làm tiếp" when part of the film is still missing.
+  Widget _webRow(SavedSubs s) {
+    final web = s.page.startsWith('http');
+    return ListTile(
+      leading: _picture(s),
+      title: Text(
+        s.title.isEmpty ? _host(s.page) : s.title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _label(s),
+            style: TextStyle(
+              color: s.isWholeVideo
+                  ? Colors.green
+                  : Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (s.progress != null) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: s.progress,
+              minHeight: 3,
+              color: s.isWholeVideo ? Colors.green : null,
+            ),
+            const SizedBox(height: 4),
+          ],
+          Text(
+            '${s.cues.length} dòng · '
+            '${kLanguages[s.language] ?? s.language} · '
+            '${_date(s.updated)}'
+            '${s.untranslated > 0 ? ' · ${s.untranslated} câu chưa dịch' : ''}',
+          ),
+        ],
+      ),
+      isThreeLine: true,
+      trailing: ValueListenableBuilder(
+        valueListenable: ActiveWork.all,
+        builder: (context, _, _) {
+          final running = ActiveWork.find(s.id) != null;
+          final resume = web && s.canResume && !running;
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (resume)
+                TextButton(
+                  onPressed: () => _resume(s),
+                  child: const Text('Làm tiếp'),
+                )
+              else if (running)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('Đang làm'),
+                ),
+              PopupMenuButton<String>(
+                tooltip: 'Thêm',
+                onSelected: (v) => _webAction(s, v),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'view',
+                    child: Text('Xem / sửa phụ đề'),
+                  ),
+                  if (web)
+                    const PopupMenuItem(value: 'open', child: Text('Mở trang')),
+                  if (resume)
+                    const PopupMenuItem(
+                      value: 'resume',
+                      child: Text('Làm tiếp'),
+                    ),
+                  const PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+                  const PopupMenuItem(value: 'delete', child: Text('Xoá')),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+      onTap: web ? () => requestOpenPage(s.page) : () => _view(s),
+      onLongPress: () => _view(s),
+    );
   }
 
   Future<void> _reload() async {
@@ -152,60 +354,15 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                   const _ActiveCard(),
                   const _StoppedCards(),
                   if (web.isNotEmpty) const _Section('Từ web'),
-                  for (final s in web)
-                    ListTile(
-                      leading: const Icon(Icons.public),
-                      title: Text(
-                        s.title.isEmpty ? _host(s.page) : s.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _label(s),
-                            style: TextStyle(
-                              color: s.isWholeVideo
-                                  ? Colors.green
-                                  : Theme.of(context).colorScheme.primary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          if (s.progress != null) ...[
-                            const SizedBox(height: 4),
-                            LinearProgressIndicator(
-                              value: s.progress,
-                              minHeight: 3,
-                              color: s.isWholeVideo ? Colors.green : null,
-                            ),
-                            const SizedBox(height: 4),
-                          ],
-                          Text(
-                            '${s.cues.length} dòng · '
-                            '${kLanguages[s.language] ?? s.language} · '
-                            '${_date(s.updated)}',
-                          ),
-                        ],
-                      ),
-                      isThreeLine: true,
-                      trailing: s.page.startsWith('http')
-                          ? IconButton(
-                              tooltip: 'Mở trang này để xem',
-                              icon: const Icon(Icons.open_in_browser),
-                              onPressed: () => requestOpenPage(s.page),
-                            )
-                          : null,
-                      onTap: () => _open(
-                        title: s.title.isEmpty ? _host(s.page) : s.title,
-                        subtitle:
-                            '${_label(s)}'
-                            '\n${s.page}',
-                        cues: s.cues,
-                        saved: s,
-                        onDelete: () => SubtitleStore.delete(s.id),
+                  if (web.isNotEmpty)
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 0, 16, 4),
+                      child: Text(
+                        'Bấm để mở trang · giữ lâu hoặc ⋯ để xem, sửa phụ đề',
+                        style: TextStyle(fontSize: 12),
                       ),
                     ),
+                  for (final s in web) _webRow(s),
                   if (_videos.isNotEmpty)
                     const _Section('Video trong Thư viện'),
                   for (final (item, cues) in _videos)
@@ -492,6 +649,20 @@ class _SubtitleViewState extends State<_SubtitleView> {
               onPressed: _changeLanguage,
             ),
           ],
+          if (saved case final SavedSubs s
+              when s.page.startsWith('http') &&
+                  s.canResume &&
+                  ActiveWork.find(s.id) == null)
+            IconButton(
+              tooltip: 'Làm tiếp',
+              icon: const Icon(Icons.play_circle_outline),
+              onPressed: () {
+                ActiveWork.forgetStopped(s.id);
+                requestResume(s.page);
+                toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
+                Navigator.popUntil(context, (r) => r.isFirst);
+              },
+            ),
           if (saved?.page.startsWith('http') ?? false)
             IconButton(
               tooltip: 'Mở trang này để xem',

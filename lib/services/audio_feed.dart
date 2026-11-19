@@ -72,7 +72,10 @@ class AudioFeed {
         '-reconnect_streamed', '1',
         '-reconnect_on_network_error', '1',
         '-reconnect_delay_max', '8',
-        '-rw_timeout', '20000000',
+        // Through the relay a piece arrives whole, after the relay has
+        // fetched it (and gives up itself on a dead server): wait longer.
+        '-rw_timeout',
+        Uri.tryParse(input)?.host == '127.0.0.1' ? '150000000' : '20000000',
       ],
       if (hls) ...[
         // Pieces hosted as pictures, without a video extension.
@@ -150,7 +153,13 @@ class AudioFeed {
     if (id != null) await FFmpegKit.cancel(id);
     _process?.kill();
     if (id != null || _process != null) {
-      await _closed.future.timeout(const Duration(seconds: 10));
+      // ffmpeg waiting on a slow server may take a while to notice; the
+      // run is over either way.
+      await _closed.future.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () =>
+            AppLog.i('ffmpeg', 'ffmpeg chưa thoát sau 10 giây (đang chờ mạng)'),
+      );
     }
   }
 }

@@ -64,6 +64,7 @@ OpenRouterTranslator make(http.Client client, {int maxLines = 3}) =>
     );
 
 void main() {
+  setUp(OpenRouterTranslator.resetRateLimits);
   test('Retry-After accepts seconds, dates and provider error text', () {
     final now = DateTime.utc(2026, 11, 17);
     expect(retryAfter('1.5', ''), const Duration(milliseconds: 1500));
@@ -353,6 +354,79 @@ void main() {
       ),
     );
     expect(calls, 1);
+  });
+
+  test('a per-minute limit makes each turn carry every waiting line', () async {
+    final good = fakeServer();
+    final sizes = <int>[];
+    var calls = 0;
+    final t = OpenRouterTranslator(
+      apiKey: 'k',
+      model: 'limited',
+      gatherFor: Duration.zero,
+      holdFor: Duration.zero,
+      retryDelay: const Duration(milliseconds: 1),
+      client: MockClient((req) async {
+        if (calls++ == 0) {
+          return http.Response(
+            '{"error":{"message":"this team\'s limit of 200 requests per minute was reached"}}',
+            429,
+            headers: {'retry-after': '0'},
+          );
+        }
+        final prompt =
+            (jsonDecode(req.body)['messages'] as List).last['content']
+                as String;
+        final lines =
+            jsonDecode(
+                  prompt.substring(prompt.lastIndexOf('{"lines"')),
+                )['lines']
+                as Map;
+        sizes.add(lines.length);
+        return good.post(req.url, headers: req.headers, body: req.body);
+      }),
+    );
+    addTearDown(t.dispose);
+    expect(await t.translate('first', 'en'), 'VI:first');
+    // Lines heard one by one while waiting for the next turn (300 ms).
+    final rest = <Future<String>>[];
+    for (var i = 0; i < 6; i++) {
+      rest.add(t.translate('line $i', 'en', start: 600.0 + i));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    await Future.wait(rest);
+    expect(sizes, [1, 6]);
+  });
+
+  test('lines far from the viewer wait to fill a request', () async {
+    final sizes = <int>[];
+    final good = fakeServer(seen: null);
+    final t = OpenRouterTranslator(
+      apiKey: 'k',
+      model: 'm',
+      gatherFor: const Duration(milliseconds: 10),
+      holdFor: const Duration(milliseconds: 400),
+      client: MockClient((req) async {
+        final prompt =
+            (jsonDecode(req.body)['messages'] as List).last['content']
+                as String;
+        sizes.add(
+          (jsonDecode(prompt.substring(prompt.lastIndexOf('{"lines"')))['lines']
+                  as Map)
+              .length,
+        );
+        return good.post(req.url, headers: req.headers, body: req.body);
+      }),
+    );
+    addTearDown(t.dispose);
+    t.position = 0;
+    final all = <Future<String>>[];
+    for (var i = 0; i < 5; i++) {
+      all.add(t.translate('far $i', 'en', start: 900.0 + i * 3));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+    }
+    await Future.wait(all);
+    expect(sizes, [5]);
   });
 
   test(

@@ -17,6 +17,37 @@ void main() {
     await dir.delete(recursive: true);
   });
 
+  test('pages are marked with what the store holds for them', () async {
+    const page = 'https://phim.example/xem/9';
+    SavedSubs entry(String src, double until, {bool done = false}) => SavedSubs(
+      id: SubtitleStore.idForVideo(page, src),
+      title: 'Phim',
+      page: '$page#t=5',
+      source: src,
+      language: 'ja',
+      updated: DateTime(2026, 11, 19),
+      cues: const [Cue(start: 1, end: 2, text: 'Chào', source: 'やあ')],
+      covered: [(0, until)],
+      duration: 1000,
+      complete: done,
+    );
+    await SubtitleStore.save(entry('https://cdn.example/a.mp4', 250));
+    var marks = await SubtitleStore.pageMarks();
+    expect(marks[page]?.label, 'Có phụ đề · 25%');
+    expect(marks[page]?.canResume, isTrue);
+    await SubtitleStore.save(entry('https://cdn.example/b.mp4', 400));
+    marks = await SubtitleStore.pageMarks();
+    expect(marks[page]?.lines, 2);
+    expect(marks[page]?.label, 'Có phụ đề · 40%');
+    await SubtitleStore.delete(
+      SubtitleStore.idForVideo(page, 'https://cdn.example/b.mp4'),
+    );
+    await SubtitleStore.delete(
+      SubtitleStore.idForVideo(page, 'https://cdn.example/a.mp4'),
+    );
+    expect(await SubtitleStore.pageMarks(), isEmpty);
+  });
+
   test('overlapping saves to one ID finish in order', () async {
     final item = SavedSubs(
       id: 'same',
