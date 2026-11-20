@@ -17,6 +17,7 @@ import '../services/app_settings.dart';
 import '../services/bookmarks.dart';
 import '../services/browser_tabs.dart';
 import '../services/open_page.dart';
+import '../services/page_translation.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
 import '../services/subtitle_store.dart';
@@ -689,6 +690,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
 
   @override
   void dispose() {
+    unawaited(_pageTr?.dispose());
+    unawaited(PageTranslations.flush());
     appSettings.removeListener(_onSettings);
     ActiveWork.all.removeListener(_onWorks);
     _slowLoad?.cancel();
@@ -1551,8 +1554,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                 _webView,
                 // Subtitles being made for this page but not shown here
                 // yet (video still loading, an advert first): say so.
-                if (_session == null)
-                  Positioned(top: 8, left: 8, right: 8, child: _pageWorkBar()),
+                Positioned(
+                  top: 8,
+                  left: 8,
+                  right: 8,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_translating) _translateBar(),
+                      if (_session == null) ...[
+                        if (_translating) const SizedBox(height: 6),
+                        _pageWorkBar(),
+                      ],
+                    ],
+                  ),
+                ),
                 if (_videoVisible && !_panelHidden && !landscape)
                   Positioned(
                     left: 8,
@@ -1623,6 +1639,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         callback: (args) => _onReport(args.isEmpty ? null : args.first),
       );
       c.addJavaScriptHandler(
+        handlerName: 'vsubTr',
+        callback: (args) =>
+            _onTranslateRequest(args.isEmpty ? null : args.first),
+      );
+      c.addJavaScriptHandler(
         handlerName: 'vsubPopup',
         callback: (args) => _onBlocked(args.isEmpty ? '' : '${args.first}'),
       );
@@ -1639,6 +1660,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     onLoadStop: (_, url) {
       if (_speed != 1) _send({'__vsub': 'rate', 'v': _speed});
       _onLoadStop('${url ?? ''}');
+      unawaited(_translateIfWanted('${url ?? ''}'));
       _refreshHistory();
       if (!widget.active) _pauseBackground();
     },
@@ -1699,6 +1721,154 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   );
 
   bool _landscape = false;
+
+  // ---- translating the page itself (like a browser's translation) ----
+  PageTranslator? _pageTr;
+  bool _translating = false, _showOriginal = false;
+
+  /// Pages whose kept translation the user turned off in this tab.
+  final _untranslated = <String>{};
+
+  Future<Map<String, String>> _onTranslateRequest(Object? raw) async {
+    if (raw is! Map || !_translating) return const {};
+    final texts = [
+      for (final t in (raw['texts'] as List? ?? const [])) '$t',
+    ].where((t) => t.isNotEmpty).toList();
+    if (texts.isEmpty) return const {};
+    final tr = _pageTr ??= PageTranslator();
+    final out = await tr.translate(
+      texts,
+      page: '${raw['page'] ?? _pageUrl}',
+      title: '${raw['title'] ?? ''}',
+      htmlLang: '${raw['lang'] ?? ''}',
+    );
+    if (mounted) setState(() {});
+    return out;
+  }
+
+  Future<void> _startTranslating({bool quiet = false}) async {
+    final web = _web;
+    if (web == null || !_pageUrl.startsWith('http')) return;
+    _untranslated.remove(PageTranslations.key(_pageUrl));
+    _pageTr ??= PageTranslator();
+    setState(() {
+      _translating = true;
+      _showOriginal = false;
+    });
+    final known = await PageTranslations.load(_pageUrl);
+    try {
+      await web.evaluateJavascript(
+        source:
+            '$kTranslateScript\n'
+            'window.__vsubTr.start(${jsonEncode(known)});',
+      );
+      AppLog.i(
+        'dịch trang',
+        'Dịch ${AppLog.url(_pageUrl)} (${known.length} câu đã có)',
+      );
+    } catch (e) {
+      AppLog.e('dịch trang', 'Không chạy được trên trang: $e');
+      if (mounted) {
+        setState(() => _translating = false);
+        toast(context, 'Trang này không cho dịch');
+      }
+      return;
+    }
+    if (!quiet && mounted) toast(context, 'Đang dịch trang sang tiếng Việt');
+  }
+
+  Future<void> _stopTranslating({bool forget = false}) async {
+    setState(() {
+      _translating = false;
+      _showOriginal = false;
+    });
+    _untranslated.add(PageTranslations.key(_pageUrl));
+    try {
+      await _web?.evaluateJavascript(
+        source: 'window.__vsubTr && window.__vsubTr.stop();',
+      );
+    } catch (_) {}
+    if (forget) {
+      await PageTranslations.delete(_pageUrl);
+      if (mounted) toast(context, 'Đã xoá bản dịch đã lưu của trang');
+    }
+  }
+
+  Future<void> _toggleOriginal() async {
+    setState(() => _showOriginal = !_showOriginal);
+    try {
+      await _web?.evaluateJavascript(
+        source: 'window.__vsubTr && window.__vsubTr.show(${!_showOriginal});',
+      );
+    } catch (_) {}
+  }
+
+  /// After a page loads: keep translating in a tab where it is on, and
+  /// translate pages translated before (their lines are kept, so no
+  /// request is repeated).
+  Future<void> _translateIfWanted(String url) async {
+    if (!url.startsWith('http')) return;
+    if (_untranslated.contains(PageTranslations.key(url))) {
+      if (_translating) setState(() => _translating = false);
+      return;
+    }
+    final again = _translating || await PageTranslations.has(url);
+    if (!again || !mounted || url != _pageUrl) return;
+    await _startTranslating(quiet: true);
+  }
+
+  Widget _translateBar() {
+    final tr = _pageTr;
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(20),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 2, 0),
+        child: Row(
+          children: [
+            const Icon(Icons.translate, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: tr == null
+                  ? const SizedBox.shrink()
+                  : ValueListenableBuilder(
+                      valueListenable: tr.busy,
+                      builder: (context, busy, _) => Text(
+                        _showOriginal
+                            ? 'Đang xem bản gốc'
+                            : busy > 0
+                            ? 'Đang dịch trang… $busy câu'
+                            : tr.lastError.isNotEmpty
+                            ? 'Dịch trang lỗi: ${tr.lastError}'
+                            : 'Đã dịch trang sang tiếng Việt',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+            ),
+            TextButton(
+              onPressed: _toggleOriginal,
+              child: Text(_showOriginal ? 'Bản dịch' : 'Bản gốc'),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'Tắt dịch trang',
+              icon: const Icon(Icons.close, size: 18),
+              onSelected: (v) => _stopTranslating(forget: v == 'forget'),
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'off', child: Text('Tắt dịch trang')),
+                PopupMenuItem(
+                  value: 'forget',
+                  child: Text('Tắt và xoá bản dịch đã lưu'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _pageWorkBar() {
     final work = ActiveWork.onPage(_pageUrl);
@@ -1999,6 +2169,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               'history' => _showHistory(),
               'reload' => _web?.reload(),
               'panel' => setState(() => _panelHidden = !_panelHidden),
+              'translatePage' =>
+                _translating ? _stopTranslating() : _startTranslating(),
               _ => null,
             },
             itemBuilder: (_) => [
@@ -2038,6 +2210,17 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                   ),
                   title: Text(
                     _panelHidden ? 'Hiện thanh video' : 'Ẩn thanh video',
+                  ),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'translatePage',
+                child: ListTile(
+                  leading: Icon(
+                    _translating ? Icons.translate : Icons.g_translate,
+                  ),
+                  title: Text(
+                    _translating ? 'Tắt dịch trang' : 'Dịch cả trang',
                   ),
                 ),
               ),

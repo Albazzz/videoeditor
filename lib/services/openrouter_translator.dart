@@ -202,6 +202,7 @@ class OpenRouterTranslator implements Translator {
     this.videoId = '',
     this.additionalInstruction = '',
     this.contextBefore = const [],
+    this.forPage = false,
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
     this.holdFor = const Duration(seconds: 8),
@@ -219,6 +220,9 @@ class OpenRouterTranslator implements Translator {
   final String videoId;
   final String additionalInstruction;
   final List<(String, String)> contextBefore;
+
+  /// Text of a web page (menus, titles, paragraphs) instead of subtitles.
+  final bool forPage;
   String get _logTag => provider.id;
   final Duration gatherFor;
 
@@ -618,6 +622,32 @@ class OpenRouterTranslator implements Translator {
               'them):\n${jsonEncode([
                 for (final r in nearby) {'src': r.$1, if (r.$2.isNotEmpty) 'vi': r.$2},
               ])}\n\n';
+    if (forPage) {
+      return [
+        {
+          'role': 'system',
+          'content':
+              'You translate the text of web pages into natural Vietnamese, '
+              'like a good browser translation: titles, menus, buttons, '
+              'tags, paragraphs and comments. Keep each item about as short '
+              'as the original. Keep names, numbers, codes, links and emoji '
+              'as they are. Translate adult or crude wording faithfully, '
+              'without censoring. An item that is already Vietnamese or has '
+              'nothing to translate is returned unchanged. Never add notes.',
+        },
+        {
+          'role': 'user',
+          'content':
+              'Translate the ${lines.length} numbered items below from $from '
+              'into Vietnamese, each on its own; never merge or skip items.\n'
+              'Answer with JSON only, the same numbers as keys: '
+              '{"1": "…", "2": "…"}\n\n'
+              '${jsonEncode({
+                'lines': {for (var i = 0; i < lines.length; i++) '${i + 1}': lines[i]},
+              })}',
+        },
+      ];
+    }
     return [
       {
         'role': 'system',

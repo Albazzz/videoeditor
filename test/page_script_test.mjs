@@ -94,3 +94,57 @@ test('a long press finds the link around a thumbnail inside other boxes', () => 
   p.listeners.touchstart({ target: { nodeType: 1, tagName: 'P', parentElement: null } });
   assert.equal(JSON.parse(p.window.__vsubPressed()).href, '');
 });
+
+const dartTr = readFileSync(new URL('../lib/services/page_translation.dart', import.meta.url), 'utf8');
+const trScript = dartTr.split("const String kTranslateScript = r'''")[1].split("''';")[0];
+
+function translatedPage(texts) {
+  const el = (tag, parent = null) => ({
+    nodeType: 1, tagName: tag, parentElement: parent, isContentEditable: false,
+    getAttribute: () => null, classList: { contains: () => false },
+    getBoundingClientRect: () => ({ top: 10, bottom: 30, width: 100, height: 20 }),
+  });
+  const body = el('BODY');
+  const nodes = texts.map(([tag, value]) => ({ nodeType: 3, nodeValue: value, parentElement: el(tag, body) }));
+  const calls = [];
+  const window = {
+    addEventListener() {},
+    flutter_inappwebview: {
+      callHandler: (name, data) => new Promise((resolve) => calls.push({ name, data, resolve })),
+    },
+  };
+  const document = {
+    body, title: 'Trang', documentElement: { lang: 'ja' },
+    createTreeWalker: () => { let i = 0; return { nextNode: () => nodes[i++] || null }; },
+  };
+  runInNewContext(trScript, {
+    window, document, WeakMap, location: { href: 'https://page.test/a' },
+    innerHeight: 800, setTimeout: () => 1,
+  });
+  return { tr: window.__vsubTr, nodes, calls };
+}
+
+test('page translation: known text at once, the rest asked for, originals kept', async () => {
+  const p = translatedPage([
+    ['P', ' Hello world '], ['P', 'Xin chào bạn'], ['P', '123 456'],
+    ['CODE', 'function x'], ['SPAN', '日本語'],
+  ]);
+  p.tr.start({ 'Hello world': 'Chào thế giới' });
+  assert.equal(p.nodes[0].nodeValue, ' Chào thế giới ');
+  assert.equal(p.calls.length, 1);
+  assert.deepEqual([...p.calls[0].data.texts], ['日本語']);
+  assert.equal(p.calls[0].data.lang, 'ja');
+  p.calls[0].resolve({ '日本語': 'tiếng Nhật' });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.nodes[4].nodeValue, 'tiếng Nhật');
+  // Vietnamese, numbers and code are left alone.
+  assert.equal(p.nodes[1].nodeValue, 'Xin chào bạn');
+  assert.equal(p.nodes[3].nodeValue, 'function x');
+  p.tr.show(false);
+  assert.equal(p.nodes[0].nodeValue, ' Hello world ');
+  p.tr.show(true);
+  assert.equal(p.nodes[4].nodeValue, 'tiếng Nhật');
+  p.tr.stop();
+  assert.equal(p.nodes[4].nodeValue, '日本語');
+  assert.equal(p.nodes[0].nodeValue, ' Hello world ');
+});

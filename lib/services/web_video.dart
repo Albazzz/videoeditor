@@ -237,6 +237,8 @@ const String kPageScript = r'''
   function ensureBox() {
     if (box) return box;
     box = document.createElement('div');
+    // Page translation leaves the subtitles (and their original line) alone.
+    box.setAttribute('translate', 'no');
     box.setAttribute('style',
       'position:fixed;left:0;bottom:0;display:none;pointer-events:none;' +
       'z-index:2147483647;text-align:center;box-sizing:border-box;' +

@@ -85,6 +85,7 @@ abstract class Translator {
     String videoId = '',
     String additionalInstruction = '',
     List<(String, String)> contextBefore = const [],
+    bool forPage = false,
   }) {
     if (!force && !appSettings.translate) return PassthroughTranslator();
     final cloud = appSettings.aiProvider;
@@ -96,6 +97,7 @@ abstract class Translator {
         videoId: videoId,
         additionalInstruction: additionalInstruction,
         contextBefore: contextBefore,
+        forPage: forPage,
       );
     }
     return TranslatorPacks.supported
