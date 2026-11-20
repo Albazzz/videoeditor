@@ -539,7 +539,9 @@ void main() {
     final t = OpenRouterTranslator(
       apiKey: 'k',
       model: 'm',
-      client: fakeServer(seen: seen, delay: const Duration(milliseconds: 200)),
+      // Slow enough that timer jitter on a busy machine (a 5 ms wait can
+      // take 15 ms or more) still leaves a backlog behind each request.
+      client: fakeServer(seen: seen, delay: const Duration(milliseconds: 600)),
       gatherFor: const Duration(milliseconds: 20),
       parallel: 1,
       retryDelay: const Duration(milliseconds: 1),
