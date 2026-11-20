@@ -143,6 +143,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           page,
           _input,
           duration: _duration,
+          pageTitle: widget.title,
         );
         if (saved != null && saved.cues.isNotEmpty && mounted) {
           setState(() {
@@ -221,7 +222,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final page = widget.item == null ? widget.page : null;
     final saved = page == null
         ? await VideoLibrary.loadSubtitleState(widget.item!)
-        : await SubtitleStore.loadVideo(page, _input, duration: _duration);
+        : await SubtitleStore.loadVideo(
+            page,
+            _input,
+            duration: _duration,
+            pageTitle: widget.title,
+          );
     if (!mounted || _session != null) return;
     if (saved != null && saved.imported) {
       setState(() {
@@ -263,6 +269,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         source: _input,
         videoId: _positionKey ?? _input,
         title: widget.title,
+        pageTitle: widget.title,
         duration: () => session.duration,
       );
     }
@@ -422,6 +429,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           page,
           _input,
           duration: _duration,
+          pageTitle: widget.title,
         );
         if (saved != null) await SubtitleStore.save(saved.withLanguage(code));
       } else if (widget.item case final VideoItem item) {

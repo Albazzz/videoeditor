@@ -54,39 +54,36 @@ void main() {
     expect(guessLanguage(['Hello']), 'en');
   });
 
-  test(
-    'a page is translated once, kept, and opens translated again',
-    () async {
-      const page = 'https://phim.example/list?p=2#top';
-      final fake = _Fake();
-      final tr = PageTranslator(engine: () => fake);
-      final first = await tr.translate(
-        ['Hello', 'World'],
-        page: page,
-        title: 'Danh sách',
-        htmlLang: 'en-US',
-      );
-      expect(first, {'Hello': 'VI:Hello', 'World': 'VI:World'});
-      expect(fake.langs.single, 'en');
-      // Asked again (another tab, a reload): nothing goes to the AI.
-      await tr.translate(['Hello'], page: page);
-      expect(fake.asked, hasLength(1));
-      await PageTranslations.flush();
-      expect(await PageTranslations.has('https://phim.example/list?p=2'), isTrue);
-      final listed = (await PageTranslations.list()).single;
-      expect(listed.title, 'Danh sách');
-      expect(listed.count, 2);
+  test('a page is translated once, kept, and opens translated again', () async {
+    const page = 'https://phim.example/list?p=2#top';
+    final fake = _Fake();
+    final tr = PageTranslator(engine: () => fake);
+    final first = await tr.translate(
+      ['Hello', 'World'],
+      page: page,
+      title: 'Danh sách',
+      htmlLang: 'en-US',
+    );
+    expect(first, {'Hello': 'VI:Hello', 'World': 'VI:World'});
+    expect(fake.langs.single, 'en');
+    // Asked again (another tab, a reload): nothing goes to the AI.
+    await tr.translate(['Hello'], page: page);
+    expect(fake.asked, hasLength(1));
+    await PageTranslations.flush();
+    expect(await PageTranslations.has('https://phim.example/list?p=2'), isTrue);
+    final listed = (await PageTranslations.list()).single;
+    expect(listed.title, 'Danh sách');
+    expect(listed.count, 2);
 
-      // A fresh start of the app reads it back from disk.
-      PageTranslations.resetCache();
-      PageTranslator.clearMemo();
-      expect(await PageTranslations.load(page), {
-        'Hello': 'VI:Hello',
-        'World': 'VI:World',
-      });
-      await PageTranslations.delete(page);
-      expect(await PageTranslations.has(page), isFalse);
-      expect(await PageTranslations.list(), isEmpty);
-    },
-  );
+    // A fresh start of the app reads it back from disk.
+    PageTranslations.resetCache();
+    PageTranslator.clearMemo();
+    expect(await PageTranslations.load(page), {
+      'Hello': 'VI:Hello',
+      'World': 'VI:World',
+    });
+    await PageTranslations.delete(page);
+    expect(await PageTranslations.has(page), isFalse);
+    expect(await PageTranslations.list(), isEmpty);
+  });
 }

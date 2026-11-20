@@ -48,38 +48,111 @@ void main() {
     expect(await SubtitleStore.pageMarks(), isEmpty);
   });
 
-  test('lists read small summaries, rebuilt when missing or out of date', () async {
-    SavedSubs entry(String id, int lines, {String title = 'Phim'}) => SavedSubs(
-      id: id,
-      title: title,
-      page: 'https://phim.example/$id',
-      language: 'ja',
-      updated: DateTime(2026, 11, lines),
-      cues: [
-        for (var i = 0; i < lines; i++)
-          Cue(start: i * 2.0, end: i * 2.0 + 1, text: 'câu $i', source: 'x$i'),
-      ],
-      covered: const [(0, 100)],
-      duration: 200,
-    );
-    await SubtitleStore.save(entry('a', 3));
-    await SubtitleStore.save(entry('b', 5));
-    var infos = await SubtitleStore.summaries();
-    expect(infos.map((i) => (i.id, i.lines)), [('b', 5), ('a', 3)]);
-    expect(infos.first.progress, 0.5);
-    expect(infos.first.canResume, isTrue);
-    // A summary lost (an older app version): made again from the entry.
-    File('${dir.path}/subs/a.meta').deleteSync();
-    await SubtitleStore.save(entry('b', 7, title: 'Phim mới'));
-    infos = await SubtitleStore.summaries();
-    expect(infos.map((i) => (i.id, i.lines, i.title)), [
-      ('b', 7, 'Phim mới'),
-      ('a', 3, 'Phim'),
-    ]);
-    await SubtitleStore.delete('b');
-    expect((await SubtitleStore.summaries()).map((i) => i.id), ['a']);
-    expect(File('${dir.path}/subs/b.meta').existsSync(), isFalse);
-  });
+  test(
+    'lists read small summaries, rebuilt when missing or out of date',
+    () async {
+      SavedSubs entry(String id, int lines, {String title = 'Phim'}) =>
+          SavedSubs(
+            id: id,
+            title: title,
+            page: 'https://phim.example/$id',
+            language: 'ja',
+            updated: DateTime(2026, 11, lines),
+            cues: [
+              for (var i = 0; i < lines; i++)
+                Cue(
+                  start: i * 2.0,
+                  end: i * 2.0 + 1,
+                  text: 'câu $i',
+                  source: 'x$i',
+                ),
+            ],
+            covered: const [(0, 100)],
+            duration: 200,
+          );
+      await SubtitleStore.save(entry('a', 3));
+      await SubtitleStore.save(entry('b', 5));
+      var infos = await SubtitleStore.summaries();
+      expect(infos.map((i) => (i.id, i.lines)), [('b', 5), ('a', 3)]);
+      expect(infos.first.progress, 0.5);
+      expect(infos.first.canResume, isTrue);
+      // A summary lost (an older app version): made again from the entry.
+      File('${dir.path}/subs/a.meta').deleteSync();
+      await SubtitleStore.save(entry('b', 7, title: 'Phim mới'));
+      infos = await SubtitleStore.summaries();
+      expect(infos.map((i) => (i.id, i.lines, i.title)), [
+        ('b', 7, 'Phim mới'),
+        ('a', 3, 'Phim'),
+      ]);
+      await SubtitleStore.delete('b');
+      expect((await SubtitleStore.summaries()).map((i) => i.id), ['a']);
+      expect(File('${dir.path}/subs/b.meta').existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'another episode on the same page never takes the lines of this one',
+    () async {
+      // A series page: episodes switch by #/route or not at all, and run
+      // within seconds of each other. Only the page title tells them apart.
+      expect(
+        SubtitleStore.pageKey('https://phim.example/xem#/tap-2'),
+        isNot(SubtitleStore.pageKey('https://phim.example/xem#/tap-1')),
+      );
+      expect(
+        SubtitleStore.pageKey('https://phim.example/xem#t=30'),
+        'https://phim.example/xem',
+      );
+      bool same(String a, String b, double da, double db) => sameFilm(
+        page: 'https://phim.example/xem',
+        duration: da,
+        title: a,
+        otherPage: 'https://phim.example/xem',
+        otherDuration: db,
+        otherTitle: b,
+      );
+      expect(same('▶ Phim A - Tập 1', 'Phim A - Tập 1', 1420, 1421.5), isTrue);
+      expect(same('Phim A - Tập 2', 'Phim A - Tập 1', 1420, 1420), isFalse);
+      expect(same('', '', 1420, 1423), isFalse, reason: 'no titles: closer');
+      expect(same('', 'Phim A - Tập 1', 1420, 1420.5), isTrue);
+
+      const page = 'https://phim.example/xem';
+      await SubtitleStore.save(
+        SavedSubs(
+          id: SubtitleStore.idForVideo(
+            page,
+            'https://cdn.example/ep1.m3u8?t=1',
+          ),
+          title: 'Tập 1',
+          pageTitle: 'Phim A - Tập 1',
+          page: page,
+          source: 'https://cdn.example/ep1.m3u8?t=1',
+          language: 'zh',
+          updated: DateTime(2026, 11, 20),
+          cues: const [Cue(start: 1, end: 2, text: 'Tập một', source: '一')],
+          covered: const [(0, 600)],
+          duration: 1420,
+        ),
+      );
+      expect(
+        await SubtitleStore.loadVideo(
+          page,
+          'https://cdn.example/ep2.m3u8?t=2',
+          duration: 1420.4,
+          pageTitle: 'Phim A - Tập 2',
+        ),
+        isNull,
+      );
+      final again = await SubtitleStore.loadVideo(
+        page,
+        'https://cdn.example/ep1.m3u8?t=3',
+        duration: 1420,
+        pageTitle: 'Phim A - Tập 1',
+      );
+      expect(again?.cues.single.text, 'Tập một');
+      expect(again?.pageTitle, 'Phim A - Tập 1');
+    },
+  );
 
   test('overlapping saves to one ID finish in order', () async {
     final item = SavedSubs(

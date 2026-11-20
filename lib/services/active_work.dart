@@ -64,24 +64,32 @@ class ActiveWork {
   static ActiveWork? find(String id) =>
       _running.values.where((work) => work.id == id).firstOrNull;
 
-  static String _pageKey(String page) =>
-      Uri.tryParse(page)?.removeFragment().toString() ?? page;
+  static String _pageKey(String page) => SubtitleStore.pageKey(page);
 
   /// The work for this video: by its store id, or (pages give a video a new
-  /// signed address on every visit) the same page with a film of the same
-  /// known length.
-  static ActiveWork? findVideo(String id, String page, double duration) {
+  /// signed address on every visit) the same film by [sameFilm]: same page,
+  /// same length and, when known, same page title. Never another episode
+  /// of the page: its audio would be heard into this film's subtitles.
+  static ActiveWork? findVideo(
+    String id,
+    String page,
+    double duration, {
+    String pageTitle = '',
+  }) {
     final exact = find(id);
     if (exact != null) return exact;
     if (duration <= 0) return null;
-    final key = _pageKey(page);
     return _running.values.where((work) {
-      final p = work.saver?.page;
-      final d = work.session.duration;
-      return p != null &&
-          _pageKey(p) == key &&
-          d > 0 &&
-          (d - duration).abs() <= 5;
+      final saver = work.saver;
+      return saver != null &&
+          sameFilm(
+            page: page,
+            duration: duration,
+            title: pageTitle,
+            otherPage: saver.page,
+            otherDuration: work.session.duration,
+            otherTitle: saver.pageTitle,
+          );
     }).firstOrNull;
   }
 

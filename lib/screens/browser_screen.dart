@@ -240,6 +240,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   /// The page is playing a different video (an advert, the next
   /// episode) from the one subtitles are being made for.
   bool _otherVideo = false;
+
+  /// The page's title as the web view last reported it.
+  String _titleNow = '';
   DateTime _lastResend = DateTime(0);
 
   /// Lines read from a subtitle file for this page, shown instead of a
@@ -815,12 +818,19 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       // and simply wait until the main video is back.
       // Another address is only another video if the length differs too:
       // the same film often gets a new signed link (or another quality).
-      final sameFilm =
+      // Never another episode of the page: its audio would be heard into
+      // this film's subtitles (see [sameFilm]).
+      final same =
           video.src == _sessionSrc ||
-          (session.duration > 0 &&
-              video.duration > 0 &&
-              (session.duration - video.duration).abs() <= 5);
-      final other = !sameFilm;
+          sameFilm(
+            page: _pageUrl,
+            duration: video.duration,
+            title: _titleNow,
+            otherPage: _saver?.page ?? _pageUrl,
+            otherDuration: session.duration,
+            otherTitle: _saver?.pageTitle ?? '',
+          );
+      final other = !same;
       if (other != _otherVideo) setState(() => _otherVideo = other);
       if (!other && video.src != _sessionSrc) {
         _sessionSrc = video.src;
@@ -877,7 +887,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _autoBusy = true;
     try {
       final id = SubtitleStore.idForVideo(page, video.src);
-      final running = ActiveWork.findVideo(id, page, video.duration);
+      final running = ActiveWork.findVideo(
+        id,
+        page,
+        video.duration,
+        pageTitle: _titleNow,
+      );
       if (running != null &&
           mounted &&
           page == _pageUrl &&
@@ -889,6 +904,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         page,
         video.src,
         duration: video.duration,
+        pageTitle: _titleNow,
       );
       final resume = await WatchPosition.load(
         SubtitleStore.idFor(page),
@@ -1149,7 +1165,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final (page, title) = await _pageInfo();
     unawaited(_keepPagePicture(page));
     final id = SubtitleStore.idForVideo(page, video.src);
-    final running = ActiveWork.findVideo(id, page, video.duration);
+    final running = ActiveWork.findVideo(
+      id,
+      page,
+      video.duration,
+      pageTitle: title,
+    );
     if (running != null) {
       _attachWork(running, video);
       return;
@@ -1158,6 +1179,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       page,
       video.src,
       duration: video.duration,
+      pageTitle: title,
     );
     if (!mounted || _video?.src != video.src || page != _pageUrl) return;
     if (saved != null &&
@@ -1210,7 +1232,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     } catch (_) {}
     if (!mounted || _session != null) return;
     if (_video?.src != video.src || _pageUrl != page) return;
-    final alreadyRunning = ActiveWork.findVideo(id, page, video.duration);
+    final alreadyRunning = ActiveWork.findVideo(
+      id,
+      page,
+      video.duration,
+      pageTitle: title,
+    );
     if (alreadyRunning != null) {
       _attachWork(alreadyRunning, video);
       return;
@@ -1233,6 +1260,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       source: video.src,
       videoId: id,
       title: title,
+      pageTitle: title,
       duration: () => session.duration,
     );
     setState(() {
@@ -1379,6 +1407,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
             page,
             video.src,
             duration: video.duration,
+            pageTitle: _titleNow,
           );
           if (saved == null) throw StateError('Không còn phụ đề của video này');
           await SubtitleStore.save(saved.withCues(next));
@@ -1415,6 +1444,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         page,
         video.src,
         duration: video.duration,
+        pageTitle: _titleNow,
       );
       if (saved != null) await SubtitleStore.save(saved.withLanguage(language));
       if (mounted && _video?.src == video.src && _pageUrl == page) {
@@ -1669,6 +1699,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         _detachSubtitles();
       }
       setState(() => _video = null);
+      _titleNow = '';
       _onLoadStart('${url ?? ''}');
       widget.onPage(url: url?.toString(), title: '');
     },
@@ -1679,7 +1710,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _refreshHistory();
       if (!widget.active) _pauseBackground();
     },
-    onTitleChanged: (_, title) => widget.onPage(title: title ?? ''),
+    onTitleChanged: (_, title) {
+      _titleNow = title ?? '';
+      widget.onPage(title: title ?? '');
+    },
     onReceivedError: (_, request, error) {
       if (request.isForMainFrame != true) return;
       final cancelled =
@@ -2458,6 +2492,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                       'library' => _useFromLibrary(),
                       'player' => _openInPlayer(),
                       'remove' => _stopSubtitles(),
+                      'prefer' when session != null =>
+                        session.preferred = !session.preferred,
                       'details' when session != null => showSessionDetails(
                         context,
                         session,
@@ -2518,6 +2554,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                           child: const Text('Chỉ làm trước chỗ đang xem'),
                         ),
                       ],
+                      if (session != null)
+                        CheckedPopupMenuItem(
+                          value: 'prefer',
+                          checked: session.preferred,
+                          child: const Text('Ưu tiên phim này'),
+                        ),
                       if (session != null)
                         const PopupMenuItem(
                           value: 'details',

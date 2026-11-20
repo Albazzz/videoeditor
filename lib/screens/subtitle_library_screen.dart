@@ -271,6 +271,9 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         requestOpenPage(s.page);
       case 'resume':
         _resume(s);
+      case 'prefer':
+        final session = ActiveWork.find(s.id)?.session;
+        if (session != null) session.preferred = !session.preferred;
       case 'restart':
         if (await restartSubtitles(context, s, lines: s.lines)) await _reload();
       case 'folder':
@@ -359,6 +362,27 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         }
         await Future.wait([for (final s in running) ActiveWork.stop(s)]);
         if (mounted) toast(context, 'Đã dừng ${running.length} phụ đề');
+      case 'prefer':
+        final running = [
+          for (final s in chosen) ?ActiveWork.find(s.id)?.session,
+        ];
+        if (running.isEmpty) {
+          toast(context, 'Ưu tiên dành cho phim đang làm');
+          return;
+        }
+        // Picked together: these go first, the others give way.
+        final on = !running.every((s) => s.preferred);
+        for (final s in running) {
+          s.preferred = on;
+        }
+        if (mounted) {
+          toast(
+            context,
+            on
+                ? 'Ưu tiên ${running.length} phim đã chọn'
+                : 'Bỏ ưu tiên ${running.length} phim',
+          );
+        }
       case 'open':
         requestOpenPages([
           for (final s in chosen)
@@ -515,6 +539,14 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                           const PopupMenuItem(
                             value: 'resume',
                             child: Text('Làm tiếp'),
+                          ),
+                        if (running)
+                          CheckedPopupMenuItem(
+                            value: 'prefer',
+                            checked:
+                                ActiveWork.find(s.id)?.session.preferred ??
+                                false,
+                            child: const Text('Ưu tiên phim này'),
                           ),
                         if (web)
                           const PopupMenuItem(
@@ -704,6 +736,12 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
               tooltip: 'Làm tiếp',
               icon: const Icon(Icons.play_arrow),
               onPressed: () => _manyAction('resume'),
+            ),
+          if (running)
+            IconButton(
+              tooltip: 'Ưu tiên',
+              icon: const Icon(Icons.keyboard_double_arrow_up),
+              onPressed: () => _manyAction('prefer'),
             ),
           if (running)
             IconButton(
@@ -1208,6 +1246,18 @@ class _WorkCard extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
+                  ),
+                  IconButton(
+                    tooltip: session.preferred
+                        ? 'Bỏ ưu tiên phim này'
+                        : 'Ưu tiên phim này',
+                    isSelected: session.preferred,
+                    icon: const Icon(Icons.keyboard_double_arrow_up),
+                    selectedIcon: const Icon(
+                      Icons.keyboard_double_arrow_up,
+                      color: Colors.orange,
+                    ),
+                    onPressed: () => session.preferred = !session.preferred,
                   ),
                   IconButton(
                     tooltip: 'Chi tiết phụ đề',

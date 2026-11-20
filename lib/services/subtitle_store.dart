@@ -43,6 +43,38 @@ bool coversWholeVideo(
   return reachedEnd;
 }
 
+/// A page title reduced to its words, for comparing
+/// ("▶ Tập 2 | Phim" → "tập 2 phim").
+String titleKey(String title) => title
+    .toLowerCase()
+    .split(RegExp(r'[^\p{L}\p{N}]+', unicode: true))
+    .where((w) => w.isNotEmpty)
+    .join(' ');
+
+/// Whether a video seen now is the film that other subtitles (or running
+/// work) belong to, although its address changed (pages sign their links
+/// anew on every visit): the same page, the same length and, when both
+/// are known, the same page title. Episodes of a series often share a
+/// page address (#/tap-2, or none at all) and a length within seconds,
+/// never a title; without titles the lengths must agree more closely.
+bool sameFilm({
+  required String page,
+  required double duration,
+  String title = '',
+  required String otherPage,
+  required double otherDuration,
+  String otherTitle = '',
+}) {
+  if (SubtitleStore.pageKey(page) != SubtitleStore.pageKey(otherPage)) {
+    return false;
+  }
+  if (duration <= 0 || otherDuration <= 0) return false;
+  final a = titleKey(title), b = titleKey(otherTitle);
+  final titled = a.isNotEmpty && b.isNotEmpty;
+  if (titled && a != b) return false;
+  return (duration - otherDuration).abs() <= (titled ? 2 : 1);
+}
+
 /// What lists show of an entry: [SavedSubs] and [SubsInfo] both have it.
 abstract class SubsHeader {
   String get id;
@@ -67,6 +99,7 @@ class SubsInfo implements SubsHeader {
     this.duration = 0,
     this.complete = false,
     this.imported = false,
+    this.pageTitle = '',
   });
 
   factory SubsInfo.of(SavedSubs s) => SubsInfo(
@@ -82,7 +115,11 @@ class SubsInfo implements SubsHeader {
     duration: s.duration,
     complete: s.complete,
     imported: s.imported,
+    pageTitle: s.pageTitle,
   );
+
+  /// The page's own title when the subtitles were made (not renamed).
+  final String pageTitle;
 
   @override
   final String id, title, page;
@@ -119,6 +156,7 @@ class SubsInfo implements SubsHeader {
     'duration': duration,
     'complete': complete,
     'imported': imported,
+    'pageTitle': pageTitle,
   };
 
   static SubsInfo fromJson(Map<String, Object?> j) {
@@ -139,6 +177,7 @@ class SubsInfo implements SubsHeader {
       duration: (j['duration'] as num?)?.toDouble() ?? 0,
       complete: j['complete'] == true,
       imported: j['imported'] == true,
+      pageTitle: (j['pageTitle'] as String?) ?? '',
     );
   }
 }
@@ -158,7 +197,12 @@ class SavedSubs implements SubsHeader {
     this.complete = false,
     this.imported = false,
     this.source = '',
+    this.pageTitle = '',
   });
+
+  /// The page's own title when the subtitles were made: [title] may be
+  /// renamed, this tells episodes on one page apart.
+  final String pageTitle;
 
   @override
   final String id;
@@ -200,6 +244,7 @@ class SavedSubs implements SubsHeader {
     duration: duration,
     complete: complete,
     imported: imported,
+    pageTitle: pageTitle,
   );
 
   /// Lines still in the original language (translation failed or was
@@ -219,6 +264,7 @@ class SavedSubs implements SubsHeader {
     duration: duration,
     complete: complete,
     imported: imported,
+    pageTitle: pageTitle,
   );
 
   bool get canResume => !imported && (!isWholeVideo || untranslated > 0);
@@ -235,6 +281,7 @@ class SavedSubs implements SubsHeader {
     duration: duration,
     complete: complete,
     imported: imported,
+    pageTitle: pageTitle,
   );
 
   bool get isWholeVideo =>
@@ -258,6 +305,7 @@ class SavedSubs implements SubsHeader {
     'duration': duration,
     'complete': complete,
     'imported': imported,
+    if (pageTitle.isNotEmpty) 'pageTitle': pageTitle,
     'covered': [
       for (final r in covered) [_ms(r.$1), _ms(r.$2)],
     ],
@@ -283,6 +331,7 @@ class SavedSubs implements SubsHeader {
       duration: (j['duration'] as num?)?.toDouble() ?? 0,
       complete: j['complete'] == true,
       imported: j['imported'] == true,
+      pageTitle: (j['pageTitle'] as String?) ?? '',
       covered: [
         for (final r in (j['covered'] as List? ?? const []))
           (d((r as List)[0]), d(r[1])),
@@ -335,27 +384,29 @@ class SubtitleStore {
 
   /// One entry per page: the stream address changes on every visit, the
   /// page address does not.
-  static String idFor(String page) {
-    final uri = Uri.tryParse(page);
-    final key = uri == null ? page : uri.removeFragment().toString();
-    return sha1.convert(utf8.encode(key)).toString().substring(0, 20);
-  }
+  static String idFor(String page) =>
+      sha1.convert(utf8.encode(pageKey(page))).toString().substring(0, 20);
 
   /// Keep query parameters: they may identify different episodes. A signed
   /// URL changing is safer to select manually than to match the wrong film.
   static String idForVideo(String page, String source) =>
-      idFor('${Uri.tryParse(page)?.removeFragment() ?? page}\n$source');
+      idFor('${pageKey(page)}\n$source');
 
-  static String _pageKey(String page) => pageKey(page);
-
-  /// A page's address without the part after #.
-  static String pageKey(String page) =>
-      Uri.tryParse(page)?.removeFragment().toString() ?? page;
+  /// A page's address without the part after # ("#t=30"), except a
+  /// route ("#/tap-2", "#!/ep/2"), which names another video.
+  static String pageKey(String page) {
+    final uri = Uri.tryParse(page);
+    if (uri == null) return page;
+    final f = uri.fragment;
+    if (f.startsWith('/') || f.startsWith('!')) return uri.toString();
+    return uri.removeFragment().toString();
+  }
 
   static Future<SavedSubs?> loadVideo(
     String page,
     String source, {
     double duration = 0,
+    String pageTitle = '',
   }) async {
     final id = idForVideo(page, source);
     final saved = await load(id);
@@ -374,13 +425,19 @@ class SubtitleStore {
     // videos had their own key (no source) are matched the same way. Both
     // lengths must be known and agree: a page can hold several videos, and
     // a guess would put one film's lines on another.
-    final key = _pageKey(page);
     SubsInfo? found;
     for (final s in await summaries()) {
-      if (s.id == id || _pageKey(s.page) != key) continue;
-      final sameLength =
-          duration > 0 && s.duration > 0 && (s.duration - duration).abs() <= 5;
-      if (!sameLength) continue;
+      if (s.id == id ||
+          !sameFilm(
+            page: page,
+            duration: duration,
+            title: pageTitle,
+            otherPage: s.page,
+            otherDuration: s.duration,
+            otherTitle: s.pageTitle,
+          )) {
+        continue;
+      }
       if (found == null || s.updated.isAfter(found.updated)) found = s;
     }
     final best = found == null ? null : await load(found.id);
@@ -397,6 +454,7 @@ class SubtitleStore {
       duration: best.duration > 0 ? best.duration : duration,
       complete: best.complete,
       imported: best.imported,
+      pageTitle: best.pageTitle.isNotEmpty ? best.pageTitle : pageTitle,
     );
     await save(moved);
     await delete(best.id);
@@ -610,6 +668,7 @@ class SessionSaver {
     required this.title,
     this.duration,
     this.source = '',
+    this.pageTitle = '',
     String? videoId,
   }) : id =
            videoId ??
@@ -635,6 +694,9 @@ class SessionSaver {
   final String page;
   final String source;
   final String title;
+
+  /// The page's title when the work began (tells episodes apart).
+  final String pageTitle;
   final String id;
   int _savedRevision = -1;
   bool _savedFinished = false;
@@ -694,6 +756,9 @@ class SessionSaver {
           complete:
               coversWholeVideo(covered, length, reachedEnd: reachedEnd) ||
               (previous?.complete ?? false),
+          pageTitle: pageTitle.isNotEmpty
+              ? pageTitle
+              : (previous?.pageTitle ?? ''),
         ),
       );
     } catch (_) {}

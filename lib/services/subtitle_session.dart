@@ -328,13 +328,35 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  bool _preferred = false;
+
+  /// The user put this film first: its work takes the recognisers before
+  /// any film that is not preferred, on screen or not.
+  bool get preferred => _preferred;
+  set preferred(bool value) {
+    if (_preferred == value || _disposed) return;
+    _preferred = value;
+    AppLog.i(
+      'phụ đề',
+      '${value ? 'Ưu tiên' : 'Bỏ ưu tiên'} ${audioTitle.isEmpty ? videoId : audioTitle}',
+    );
+    VideoPipeline.recognizers.reprioritize();
+    notifyListeners();
+  }
+
   /// 0: just ahead of the viewer of a video on screen; 1: the rest ahead of
-  /// it; 2: background (other films, stretches behind).
+  /// it; 2: background (other films, stretches behind). A preferred film
+  /// comes before all of these (-3 to -1).
   int _priorityOf(_Run r) {
-    if (!_foreground) return 2;
-    final end = r.end ?? double.infinity;
-    final ahead = end > _position && r.base <= _position + 180;
-    return ahead ? 0 : 1;
+    final int base;
+    if (!_foreground) {
+      base = 2;
+    } else {
+      final end = r.end ?? double.infinity;
+      final ahead = end > _position && r.base <= _position + 180;
+      base = ahead ? 0 : 1;
+    }
+    return _preferred ? base - 3 : base;
   }
 
   /// A more urgent stretch needs this recogniser: stop at the current

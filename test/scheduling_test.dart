@@ -102,6 +102,33 @@ void main() {
     expect(ActiveWork.onPage('$page#t=30')?.session, session);
   });
 
+  test('another episode is never joined to a running film', () {
+    const page = 'https://phim.example/bo/7';
+    final session = SubtitleSession(
+      input: 'https://cdn.example/ep1.m3u8',
+      language: 'zh',
+    )..duration = 1420;
+    final saver = SessionSaver(
+      session: session,
+      page: page,
+      title: 'Tập 1',
+      pageTitle: 'Phim B - Tập 1',
+    );
+    ActiveWork.begin('ep1', 'Tập 1', session, saver: saver);
+    addTearDown(() {
+      ActiveWork.end(session);
+      session.dispose();
+    });
+    expect(
+      ActiveWork.findVideo('ep2', page, 1420, pageTitle: 'Phim B - Tập 2'),
+      isNull,
+    );
+    expect(
+      ActiveWork.findVideo('ep1b', page, 1420, pageTitle: 'Phim B - Tập 1'),
+      isNotNull,
+    );
+  });
+
   test(
     'stopping finishes within 3 s even if saving hangs, and can carry on',
     () async {
