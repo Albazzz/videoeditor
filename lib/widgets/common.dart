@@ -327,3 +327,129 @@ String subtitleProgressLabel({
   final pct = (done / duration * 100).clamp(0, 100).floor();
   return 'Đã làm $pct% (${formatTime(done)}/${formatTime(duration)})';
 }
+
+/// A text box with a ✕ that empties it in one tap (a new name often
+/// starts from nothing).
+class ClearableField extends StatelessWidget {
+  const ClearableField({
+    super.key,
+    required this.controller,
+    this.label,
+    this.hint,
+    this.autofocus = false,
+    this.minLines,
+    this.maxLines = 1,
+    this.onSubmitted,
+    this.onChanged,
+    this.prefixIcon,
+  });
+
+  final TextEditingController controller;
+  final String? label;
+  final String? hint;
+  final bool autofocus;
+  final int? minLines;
+  final int? maxLines;
+  final ValueChanged<String>? onSubmitted;
+  final ValueChanged<String>? onChanged;
+  final Widget? prefixIcon;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: controller,
+    builder: (context, value, _) => TextField(
+      controller: controller,
+      autofocus: autofocus,
+      minLines: minLines,
+      maxLines: maxLines,
+      onSubmitted: onSubmitted,
+      onChanged: onChanged,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        prefixIcon: prefixIcon,
+        suffixIcon: value.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Xoá hết',
+                icon: const Icon(Icons.cancel),
+                onPressed: () {
+                  controller.clear();
+                  onChanged?.call('');
+                },
+              ),
+      ),
+    ),
+  );
+}
+
+/// Asks for a line of text (a name), with ✕ to clear it. Null when
+/// cancelled; the trimmed text otherwise.
+Future<String?> askText(
+  BuildContext context,
+  String title, {
+  String initial = '',
+  String? label,
+  int lines = 1,
+  String action = 'Lưu',
+}) => showDialog<String>(
+  context: context,
+  builder: (_) => _TextDialog(
+    title: title,
+    initial: initial,
+    label: label,
+    lines: lines,
+    action: action,
+  ),
+);
+
+class _TextDialog extends StatefulWidget {
+  const _TextDialog({
+    required this.title,
+    required this.initial,
+    required this.label,
+    required this.lines,
+    required this.action,
+  });
+  final String title, initial, action;
+  final String? label;
+  final int lines;
+
+  @override
+  State<_TextDialog> createState() => _TextDialogState();
+}
+
+class _TextDialogState extends State<_TextDialog> {
+  late final _text = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: ClearableField(
+      controller: _text,
+      label: widget.label,
+      autofocus: true,
+      minLines: widget.lines,
+      maxLines: widget.lines == 1 ? 1 : widget.lines + 2,
+      onSubmitted: widget.lines == 1
+          ? (v) => Navigator.pop(context, v.trim())
+          : null,
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Huỷ'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _text.text.trim()),
+        child: Text(widget.action),
+      ),
+    ],
+  );
+}

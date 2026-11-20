@@ -27,6 +27,7 @@ import '../widgets/bookmarks_sheet.dart';
 import '../widgets/browser_history_sheet.dart';
 import '../widgets/browser_tabs_sheet.dart';
 import '../widgets/common.dart';
+import '../widgets/link_menu.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import '../widgets/subtitle_picker.dart';
@@ -353,6 +354,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     allowsBackForwardNavigationGestures: true,
     javaScriptCanOpenWindowsAutomatically: false,
     supportMultipleWindows: true,
+    // A long press on a link opens the app's own menu (new tab, copy…)
+    // instead of the system preview.
+    disableLongPressContextMenuOnLinks: true,
+    allowsLinkPreview: false,
     // Pass as Safari: some sites stall or loop on a "checking your
     // browser" page for an unknown web view.
     applicationNameForUserAgent: _safariName(),
@@ -439,6 +444,74 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     }
     if (mounted) {
       toast(context, on ? 'Đã bật chặn quảng cáo' : 'Đã tắt chặn quảng cáo');
+    }
+  }
+
+  DateTime _lastLongPress = DateTime(0);
+
+  /// A long press on a link or picture: Chrome's choices.
+  Future<void> _onLongPress(
+    InAppWebViewController c,
+    InAppWebViewHitTestResult hit,
+  ) async {
+    // The web view may report one press twice.
+    final now = DateTime.now();
+    if (now.difference(_lastLongPress) < const Duration(milliseconds: 800)) {
+      return;
+    }
+    _lastLongPress = now;
+    Object? raw;
+    try {
+      raw = await c.evaluateJavascript(
+        source: 'window.__vsubPressed ? window.__vsubPressed() : ""',
+      );
+    } catch (_) {}
+    final type = hit.type;
+    final link = PressedLink.parse(
+      raw,
+      fallback: hit.extra,
+      isImage:
+          type == InAppWebViewHitTestResultType.IMAGE_TYPE ||
+          type == InAppWebViewHitTestResultType.SRC_IMAGE_ANCHOR_TYPE,
+    );
+    if (link.isEmpty || !mounted || !widget.active) return;
+    final action = await showLinkMenu(context, link);
+    if (action == null || !mounted) return;
+    switch (action) {
+      case LinkAction.newTab:
+        widget.onNewTab(url: link.href);
+      case LinkAction.backgroundTab:
+        widget.onNewTab(url: link.href, select: false);
+      case LinkAction.here:
+        _go(link.href);
+      case LinkAction.copyLink:
+        await Clipboard.setData(ClipboardData(text: link.href));
+        if (mounted) toast(context, 'Đã sao chép liên kết');
+      case LinkAction.copyText:
+        await Clipboard.setData(ClipboardData(text: link.text));
+        if (mounted) toast(context, 'Đã sao chép chữ');
+      case LinkAction.save:
+        final place = await askBookmarkPlace(
+          context,
+          link.text.isEmpty ? (Uri.tryParse(link.href)?.host ?? '') : link.text,
+        );
+        if (place == null) return;
+        final saved = await Bookmarks.add(
+          link.href,
+          place.$1.isEmpty ? link.href : place.$1,
+          folder: place.$2,
+        );
+        if (mounted) {
+          toast(
+            context,
+            'Đã lưu vào ${saved.folder.isEmpty ? 'Ngoài cùng' : saved.folder}',
+          );
+        }
+      case LinkAction.openImage:
+        widget.onNewTab(url: link.image);
+      case LinkAction.copyImage:
+        await Clipboard.setData(ClipboardData(text: link.image));
+        if (mounted) toast(context, 'Đã sao chép địa chỉ ảnh');
     }
   }
 
@@ -905,7 +978,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final id = SubtitleStore.idForVideo(page, video.src);
     final choice = await pickSavedSubtitles(
       context,
-      excludeId: id,
+      currentId: id,
       pageTitle: title,
       duration: video.duration,
       canCarryOn: video.playable,
@@ -917,6 +990,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       return;
     }
     final (src, use) = choice;
+    // The lines this video already has: show them, nothing to copy.
+    if (src.id == id) {
+      if (_session != null) {
+        toast(context, 'Phụ đề này đang được làm và hiện trên video');
+        return;
+      }
+      if (use == PickedUse.carryOn) {
+        await _startSubtitles();
+        return;
+      }
+      _showFileCues(src.cues, page, src.language, imported: src.imported);
+      setState(() => _canCarryOn = src.canResume && video.playable);
+      toast(context, 'Đang hiện ${src.cues.length} dòng của video này');
+      return;
+    }
     if (_session != null || _fileCues != null) {
       // Let the current lines be written before the copy replaces them.
       final saver = _saver;
@@ -1527,6 +1615,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       return _openWindow(action.request, windowId: action.windowId);
     },
     onCloseWindow: (_) => widget.onClose(),
+    onLongPressHitTestResult: (c, hit) => _onLongPress(c, hit),
     onWebViewCreated: (c) {
       _web = c;
       c.addJavaScriptHandler(

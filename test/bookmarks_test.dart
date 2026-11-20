@@ -89,7 +89,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Đổi tên'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), 'Tập hai');
+    // ✕ empties the old name in one tap.
+    await tester.tap(find.byTooltip('Xoá hết').last);
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+      '',
+    );
+    await tester.enterText(find.byType(TextField).last, 'Tập hai');
     await tester.tap(find.text('Lưu'));
     await tester.pumpAndSettle();
     expect(find.text('Tập hai'), findsOneWidget);
@@ -190,12 +197,12 @@ void main() {
     // A new folder can be made right there and is then chosen.
     await tester.tap(find.text('Thư mục mới…'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField).last, 'Hàn');
+    await tester.enterText(find.byType(TextField).last, 'Hàn');
     await tester.tap(find.text('Lưu').last);
     await tester.pumpAndSettle();
     expect(find.text('Hàn'), findsOneWidget);
     await tester.enterText(
-      find.widgetWithText(TextFormField, 'Tập 1'),
+      find.widgetWithText(TextField, 'Tập 1'),
       'Tập 1 - bản đẹp',
     );
     await tester.tap(find.widgetWithText(FilledButton, 'Lưu'));

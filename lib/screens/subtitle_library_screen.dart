@@ -138,28 +138,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       case 'restart':
         if (await restartSubtitles(context, s)) await _reload();
       case 'rename':
-        final c = TextEditingController(text: s.title);
-        final name = await showDialog<String>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Đổi tên'),
-            content: TextField(
-              controller: c,
-              autofocus: true,
-              onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Huỷ'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(ctx, c.text.trim()),
-                child: const Text('Lưu'),
-              ),
-            ],
-          ),
-        );
+        final name = await askText(context, 'Đổi tên', initial: s.title);
         if (name == null || name.isEmpty) return;
         final latest = await SubtitleStore.load(s.id) ?? s;
         await SubtitleStore.save(latest.withTitle(name));
@@ -503,32 +482,8 @@ class _SubtitleViewState extends State<_SubtitleView> {
     });
   }
 
-  Future<String?> _ask(String heading, String initial, {int lines = 1}) {
-    final c = TextEditingController(text: initial);
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(heading),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          minLines: lines,
-          maxLines: lines + 2,
-          decoration: const InputDecoration(border: OutlineInputBorder()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Huỷ'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, c.text.trim()),
-            child: const Text('Lưu'),
-          ),
-        ],
-      ),
-    ).whenComplete(c.dispose);
-  }
+  Future<String?> _ask(String heading, String initial, {int lines = 1}) =>
+      askText(context, heading, initial: initial, lines: lines);
 
   Future<void> _rename() async {
     final s = saved;

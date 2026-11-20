@@ -49,29 +49,34 @@ List<SavedSubs> rankByTitle(List<SavedSubs> all, String title) {
   });
 }
 
-/// Lets the user take subtitles saved for another page (the same film on
-/// another site). Returns the entry and what to do with it.
+/// Lets the user take subtitles from the store: the ones this video
+/// already has ([currentId], listed first) or those saved for another page
+/// (the same film on another site). Nothing is left out. Returns the entry
+/// and what to do with it.
 Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
   BuildContext context, {
-  required String excludeId,
+  required String currentId,
   required String pageTitle,
   required double duration,
   required bool canCarryOn,
 }) async {
-  final all = (await SubtitleStore.list())
-      .where((s) => s.id != excludeId && s.cues.isNotEmpty)
-      .toList();
+  final all = await SubtitleStore.list();
   if (!context.mounted) return null;
   if (all.isEmpty) {
-    toast(context, 'Kho phụ đề chưa có phim nào khác');
+    toast(context, 'Kho phụ đề chưa có phụ đề nào');
     return null;
   }
+  final ranked = rankByTitle(all, pageTitle);
+  final current = ranked.where((s) => s.id == currentId).toList();
   final picked = await showModalBottomSheet<SavedSubs>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) =>
-        _PickerSheet(entries: rankByTitle(all, pageTitle), duration: duration),
+    builder: (_) => _PickerSheet(
+      entries: [...current, ...ranked.where((s) => s.id != currentId)],
+      currentId: currentId,
+      duration: duration,
+    ),
   );
   if (picked == null || !context.mounted) return null;
   final unfinished = picked.canResume;
@@ -101,9 +106,14 @@ Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
 }
 
 class _PickerSheet extends StatefulWidget {
-  const _PickerSheet({required this.entries, required this.duration});
+  const _PickerSheet({
+    required this.entries,
+    required this.duration,
+    this.currentId = '',
+  });
   final List<SavedSubs> entries;
   final double duration;
+  final String currentId;
 
   @override
   State<_PickerSheet> createState() => _PickerSheetState();
@@ -111,6 +121,13 @@ class _PickerSheet extends StatefulWidget {
 
 class _PickerSheetState extends State<_PickerSheet> {
   String _filter = '';
+  final _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -134,18 +151,15 @@ class _PickerSheetState extends State<_PickerSheet> {
                 Text('Dùng phụ đề từ kho', style: theme.textTheme.titleMedium),
                 const SizedBox(height: 2),
                 Text(
-                  'Cùng phim nhưng ở trang khác? Chọn phụ đề đã làm hoặc đã '
-                  'nhập để xem tiếp trên trang này.',
+                  'Mọi phụ đề trong kho, cả phụ đề video này đang có. Cùng '
+                  'phim ở trang khác? Chọn để xem tiếp trên trang này.',
                   style: theme.textTheme.bodySmall,
                 ),
                 const SizedBox(height: 8),
-                TextField(
-                  decoration: const InputDecoration(
-                    hintText: 'Tìm theo tên phim',
-                    prefixIcon: Icon(Icons.search),
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
+                ClearableField(
+                  controller: _search,
+                  hint: 'Tìm theo tên phim',
+                  prefixIcon: const Icon(Icons.search),
                   onChanged: (v) => setState(() => _filter = v),
                 ),
               ],
@@ -170,7 +184,12 @@ class _PickerSheetState extends State<_PickerSheet> {
                     widget.duration > 0 &&
                     s.duration > 0 &&
                     (widget.duration - s.duration).abs() > 90;
+                final mine = s.id == widget.currentId;
                 return ListTile(
+                  leading: Icon(
+                    mine ? Icons.check_circle : Icons.closed_caption_outlined,
+                    color: mine ? theme.colorScheme.primary : null,
+                  ),
                   title: Text(
                     s.title.isEmpty ? host : s.title,
                     maxLines: 2,
@@ -179,7 +198,18 @@ class _PickerSheetState extends State<_PickerSheet> {
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('$host · $label · ${s.cues.length} dòng'),
+                      if (mine)
+                        Text(
+                          'Đang gắn với video này',
+                          style: TextStyle(
+                            color: theme.colorScheme.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      Text(
+                        '$host · $label · '
+                        '${s.cues.isEmpty ? 'chưa có dòng nào' : '${s.cues.length} dòng'}',
+                      ),
                       if (mismatch)
                         Text(
                           'Dài ${formatTime(s.duration)}, video này '
@@ -188,6 +218,9 @@ class _PickerSheetState extends State<_PickerSheet> {
                         ),
                     ],
                   ),
+                  // Listed so nothing seems lost, but there is nothing
+                  // to show yet.
+                  enabled: s.cues.isNotEmpty,
                   onTap: () => Navigator.pop(context, s),
                 );
               },

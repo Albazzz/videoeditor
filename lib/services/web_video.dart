@@ -387,6 +387,28 @@ const String kPageScript = r'''
     }
   }
   window.__vsubSend = handle;
+
+  // ---- long press: the app shows its own link menu (like Chrome) ----
+  // The web view's own lookup misses links wrapped around a picture
+  // inside other boxes (film thumbnails), so remember what was touched.
+  var touched = null;
+  document.addEventListener('touchstart', function (ev) {
+    touched = ev.target;
+  }, { capture: true, passive: true });
+  window.__vsubPressed = function () {
+    var a = null, img = null;
+    for (var n = touched; n && n.nodeType === 1; n = n.parentElement) {
+      if (!img && n.tagName === 'IMG') img = n;
+      if (n.tagName === 'A' && n.href) { a = n; break; }
+    }
+    if (!img && a && a.querySelector) img = a.querySelector('img');
+    var text = a ? (a.innerText || a.textContent || a.title || '') : '';
+    return JSON.stringify({
+      href: a ? String(a.href) : '',
+      text: String(text).trim().slice(0, 200),
+      img: img ? String(img.currentSrc || img.src || '') : ''
+    });
+  };
   window.addEventListener('message', function (ev) {
     if (ev.data && ev.data.__vsub) handle(ev.data);
   });

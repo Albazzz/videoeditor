@@ -17,10 +17,11 @@ function page() {
       constructor(s, e, text) { this.startTime = s; this.endTime = e; this.text = text; }
     },
   };
+  const listeners = {};
   const document = {
     querySelectorAll: (selector) => selector === 'video' ? videos : [],
     getElementsByTagName: () => videos,
-    addEventListener() {},
+    addEventListener(type, fn) { listeners[type] = fn; },
   };
   class XHR { open() {} }
   runInNewContext(script, {
@@ -30,7 +31,7 @@ function page() {
     setInterval: (fn) => intervals.push(fn), setTimeout: (fn) => timeouts.push(fn),
   });
   const report = () => { reports.length = 0; intervals[0](); return reports; };
-  return { videos, window, report, draw: () => timeouts.shift()() };
+  return { videos, window, listeners, report, draw: () => timeouts.shift()() };
 }
 
 function video(src) {
@@ -77,4 +78,19 @@ test('changing the source of an existing video hides and clears its old track', 
   p.window.__vsubSend({ __vsub: 'cue', target: a.src, element: a.element,
     c: [3, 4, 'Late subtitle A', 'Original'] });
   assert.equal(p.videos[0].tracks[0].cues.length, 0);
+});
+
+test('a long press finds the link around a thumbnail inside other boxes', () => {
+  const p = page();
+  const a = { nodeType: 1, tagName: 'A', href: 'https://page.test/film/7',
+    innerText: '  Film   seven ', querySelector: () => null };
+  const box = { nodeType: 1, tagName: 'DIV', parentElement: a };
+  const img = { nodeType: 1, tagName: 'IMG', src: 'https://img.test/7.jpg', parentElement: box };
+  p.listeners.touchstart({ target: img });
+  const got = JSON.parse(p.window.__vsubPressed());
+  assert.equal(got.href, 'https://page.test/film/7');
+  assert.equal(got.img, 'https://img.test/7.jpg');
+  assert.equal(got.text, 'Film   seven');
+  p.listeners.touchstart({ target: { nodeType: 1, tagName: 'P', parentElement: null } });
+  assert.equal(JSON.parse(p.window.__vsubPressed()).href, '');
 });

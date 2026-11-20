@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../services/bookmarks.dart';
 import '../services/subtitle_store.dart';
+import 'common.dart';
 
 /// The saved pages; returns the address to open, or null.
 Future<String?> showBookmarks(BuildContext context) =>
@@ -30,7 +31,7 @@ Future<(String, String)?> askBookmarkPlace(
   final folders = await Bookmarks.folders();
   var folder = await Bookmarks.lastFolder();
   if (!context.mounted) return null;
-  var name = title;
+  final name = TextEditingController(text: title);
   final result = await showDialog<(String, String)>(
     context: context,
     builder: (ctx) => StatefulBuilder(
@@ -41,11 +42,7 @@ Future<(String, String)?> askBookmarkPlace(
           child: ListView(
             shrinkWrap: true,
             children: [
-              TextFormField(
-                initialValue: title,
-                decoration: const InputDecoration(labelText: 'Tên trang'),
-                onChanged: (v) => name = v,
-              ),
+              ClearableField(controller: name, label: 'Tên trang'),
               const SizedBox(height: 8),
               RadioGroup<String>(
                 groupValue: folder,
@@ -87,7 +84,7 @@ Future<(String, String)?> askBookmarkPlace(
             child: const Text('Huỷ'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(ctx, (name.trim(), folder)),
+            onPressed: () => Navigator.pop(ctx, (name.text.trim(), folder)),
             child: const Text('Lưu'),
           ),
         ],
@@ -103,31 +100,7 @@ Future<String?> _askName(
   BuildContext context,
   String label, [
   String name = '',
-]) {
-  var value = name;
-  return showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(label),
-      content: TextFormField(
-        initialValue: name,
-        autofocus: true,
-        onChanged: (v) => value = v,
-        onFieldSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Huỷ'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, value.trim()),
-          child: const Text('Lưu'),
-        ),
-      ],
-    ),
-  );
-}
+]) => askText(context, label, initial: name);
 
 /// Also used by the action immediately after a page is saved.
 Future<void> editBookmark(
@@ -138,7 +111,7 @@ Future<void> editBookmark(
   final folders = await Bookmarks.folders();
   if (!context.mounted) return;
   var folder = folders.contains(bookmark.folder) ? bookmark.folder : '';
-  var title = bookmark.title;
+  final title = TextEditingController(text: bookmark.title);
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -146,12 +119,7 @@ Future<void> editBookmark(
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (editName)
-            TextFormField(
-              initialValue: title,
-              decoration: const InputDecoration(labelText: 'Tên trang'),
-              onChanged: (v) => title = v,
-            ),
+          if (editName) ClearableField(controller: title, label: 'Tên trang'),
           DropdownButtonFormField<String>(
             initialValue: folder,
             isExpanded: true,
@@ -182,7 +150,7 @@ Future<void> editBookmark(
   if (ok == true) {
     await Bookmarks.update(
       bookmark.url,
-      title: editName ? title : null,
+      title: editName ? title.text.trim() : null,
       folder: folder,
     );
   }
