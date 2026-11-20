@@ -27,7 +27,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   final Set<String> _busy = {};
   String? _packError;
 
-  List<SavedSubs> _web = [];
+  List<SubsInfo> _web = [];
   int _librarySubs = 0;
 
   @override
@@ -38,7 +38,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
 
   Future<void> _load() async {
     final speech = await ModelStore.isReady();
-    final web = await SubtitleStore.list();
+    final web = await SubtitleStore.summaries();
     var library = 0;
     for (final item in await VideoLibrary.list(hidden: false)) {
       if (item.srtFile.existsSync()) library++;

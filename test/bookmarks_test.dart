@@ -61,6 +61,18 @@ void main() {
     },
   );
 
+  test('subtitles share the folders of saved pages and follow renames', () async {
+    await Bookmarks.createFolder('Hàn');
+    await Bookmarks.moveSubtitles(['s1', 's2'], 'Phim lẻ');
+    expect(await Bookmarks.folders(), ['Hàn', 'Phim lẻ']);
+    await Bookmarks.renameFolder('Phim lẻ', 'Lẻ');
+    expect(await Bookmarks.subtitleFolders(), {'s1': 'Lẻ', 's2': 'Lẻ'});
+    await Bookmarks.moveSubtitles(['s2'], '');
+    await Bookmarks.deleteFolder('Lẻ');
+    expect(await Bookmarks.subtitleFolders(), isEmpty);
+    expect(await Bookmarks.folders(), ['Hàn']);
+  });
+
   testWidgets('a collapsed folder can be searched and a saved page edited', (
     tester,
   ) async {
@@ -169,6 +181,33 @@ void main() {
     expect(find.text('Có phụ đề · 50%'), findsOneWidget);
     expect(find.text('Có dịch'), findsOneWidget);
     expect(find.text('Chưa dịch'), findsOneWidget);
+  });
+
+  testWidgets('a long press picks pages; picked pages go together', (
+    tester,
+  ) async {
+    await Bookmarks.add('https://a.example/1', 'Một');
+    await Bookmarks.add('https://b.example/2', 'Hai');
+    await Bookmarks.add('https://c.example/3', 'Ba');
+    final opened = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: BookmarksView(onOpen: opened.add))),
+    );
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('Một'));
+    await tester.pump();
+    expect(find.text('Đã chọn 1'), findsOneWidget);
+    // While picking, a tap picks instead of opening.
+    await tester.tap(find.text('Hai'));
+    await tester.pump();
+    expect(find.text('Đã chọn 2'), findsOneWidget);
+    expect(opened, isEmpty);
+    await tester.tap(find.byTooltip('Xoá'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Xoá'));
+    await tester.pumpAndSettle();
+    expect((await Bookmarks.load()).map((b) => b.title), ['Ba']);
+    expect(find.text('Đã chọn 2'), findsNothing);
   });
 
   testWidgets('saving asks for the name and folder first', (tester) async {

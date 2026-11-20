@@ -37,3 +37,22 @@ void requestRestart(String page) {
 
 /// True once for a page whose subtitles start over.
 bool takeRestart(String page) => _restart.remove(_resumeKey(page));
+
+/// Several pages at once (picked in a list): the first opens in front,
+/// the others in background tabs.
+final openPagesRequest = ValueNotifier<List<String>?>(null);
+
+void requestOpenPages(List<String> urls) {
+  if (urls.isEmpty) return;
+  openPagesRequest.value = null;
+  openPagesRequest.value = List.unmodifiable(urls);
+}
+
+/// "Làm tiếp" for several films: each page opens in its own tab and
+/// carries on once its film plays there.
+void requestResumeAll(List<String> pages) {
+  for (final page in pages) {
+    _resume.add(_resumeKey(page));
+  }
+  requestOpenPages(pages);
+}

@@ -43,9 +43,109 @@ bool coversWholeVideo(
   return reachedEnd;
 }
 
+/// What lists show of an entry: [SavedSubs] and [SubsInfo] both have it.
+abstract class SubsHeader {
+  String get id;
+  String get title;
+  String get page;
+  DateTime get updated;
+}
+
+/// An entry without its lines: what lists need, read from a small file
+/// next to the entry instead of unpacking every film's subtitles.
+class SubsInfo implements SubsHeader {
+  const SubsInfo({
+    required this.id,
+    required this.title,
+    required this.page,
+    required this.source,
+    required this.language,
+    required this.updated,
+    required this.lines,
+    required this.untranslated,
+    required this.covered,
+    this.duration = 0,
+    this.complete = false,
+    this.imported = false,
+  });
+
+  factory SubsInfo.of(SavedSubs s) => SubsInfo(
+    id: s.id,
+    title: s.title,
+    page: s.page,
+    source: s.source,
+    language: s.language,
+    updated: s.updated,
+    lines: s.cues.length,
+    untranslated: s.untranslated,
+    covered: s.covered,
+    duration: s.duration,
+    complete: s.complete,
+    imported: s.imported,
+  );
+
+  @override
+  final String id, title, page;
+  final String source, language;
+  @override
+  final DateTime updated;
+  final int lines, untranslated;
+  final List<(double, double)> covered;
+  final double duration;
+  final bool complete, imported;
+
+  bool get isWholeVideo =>
+      imported || coversWholeVideo(covered, duration, reachedEnd: complete);
+  double? get progress => isWholeVideo
+      ? 1
+      : duration <= 0
+      ? null
+      : (coveredSeconds(covered) / duration).clamp(0.0, 1.0);
+  bool get canResume => !imported && (!isWholeVideo || untranslated > 0);
+
+  Map<String, Object?> toJson(int stamp) => {
+    'stamp': stamp,
+    'id': id,
+    'title': title,
+    'page': page,
+    'source': source,
+    'language': language,
+    'updated': updated.millisecondsSinceEpoch,
+    'lines': lines,
+    'untranslated': untranslated,
+    'covered': [
+      for (final r in covered) [r.$1, r.$2],
+    ],
+    'duration': duration,
+    'complete': complete,
+    'imported': imported,
+  };
+
+  static SubsInfo fromJson(Map<String, Object?> j) {
+    double d(Object? v) => (v as num).toDouble();
+    return SubsInfo(
+      id: j['id'] as String,
+      title: (j['title'] as String?) ?? '',
+      page: (j['page'] as String?) ?? '',
+      source: (j['source'] as String?) ?? '',
+      language: (j['language'] as String?) ?? '',
+      updated: DateTime.fromMillisecondsSinceEpoch((j['updated'] as int?) ?? 0),
+      lines: (j['lines'] as int?) ?? 0,
+      untranslated: (j['untranslated'] as int?) ?? 0,
+      covered: [
+        for (final r in (j['covered'] as List? ?? const []))
+          (d((r as List)[0]), d(r[1])),
+      ],
+      duration: (j['duration'] as num?)?.toDouble() ?? 0,
+      complete: j['complete'] == true,
+      imported: j['imported'] == true,
+    );
+  }
+}
+
 /// Subtitles generated for one web video, kept so they can be read later
 /// and reused the next time the same page is watched.
-class SavedSubs {
+class SavedSubs implements SubsHeader {
   SavedSubs({
     required this.id,
     required this.title,
@@ -60,15 +160,19 @@ class SavedSubs {
     this.source = '',
   });
 
+  @override
   final String id;
+  @override
   final String title;
 
   /// Address of the page the video was on.
+  @override
   final String page;
 
   /// Exact media source. Old page-only entries require manual selection.
   final String source;
   final String language;
+  @override
   final DateTime updated;
   final List<Cue> cues;
 
@@ -213,8 +317,8 @@ class SubtitleStore {
       return marks;
     }
     final out = <String, PageSubs>{};
-    for (final s in await list()) {
-      if (!s.page.startsWith('http') || s.cues.isEmpty) continue;
+    for (final s in await summaries()) {
+      if (!s.page.startsWith('http') || s.lines == 0) continue;
       final key = pageKey(s.page);
       out[key] = PageSubs.of(s, out[key]);
     }
@@ -271,14 +375,15 @@ class SubtitleStore {
     // lengths must be known and agree: a page can hold several videos, and
     // a guess would put one film's lines on another.
     final key = _pageKey(page);
-    SavedSubs? best;
-    for (final s in await list()) {
+    SubsInfo? found;
+    for (final s in await summaries()) {
       if (s.id == id || _pageKey(s.page) != key) continue;
       final sameLength =
           duration > 0 && s.duration > 0 && (s.duration - duration).abs() <= 5;
       if (!sameLength) continue;
-      if (best == null || s.updated.isAfter(best.updated)) best = s;
+      if (found == null || s.updated.isAfter(found.updated)) found = s;
     }
+    final best = found == null ? null : await load(found.id);
     if (best == null) return null;
     final moved = SavedSubs(
       id: id,
@@ -348,8 +453,79 @@ class SubtitleStore {
         }
         final old = await _oldFile(subs.id);
         if (await old.exists()) await old.delete();
+        await _writeInfo(file, SubsInfo.of(subs));
         changes.value++;
       });
+
+  static final _infos = <String, (int, SubsInfo)>{};
+
+  static File _infoFile(File data, String id) =>
+      File(p.join(p.dirname(data.path), '$id.meta'));
+
+  static Future<void> _writeInfo(File data, SubsInfo info) async {
+    try {
+      final stamp = (await data.stat()).modified.microsecondsSinceEpoch;
+      _infos[info.id] = (stamp, info);
+      await _infoFile(
+        data,
+        info.id,
+      ).writeAsString(jsonEncode(info.toJson(stamp)));
+    } catch (_) {
+      // Only a shortcut for lists: they read the entry itself without it.
+    }
+  }
+
+  /// Every entry without its lines, newest first: what lists show. Reads
+  /// the small summary next to each entry (made from the entry once when
+  /// missing or out of date) and keeps them in memory.
+  static Future<List<SubsInfo>> summaries() async {
+    final dir = await _dir();
+    final files = <String, File>{};
+    await for (final e in dir.list()) {
+      if (e is! File) continue;
+      final name = p.basename(e.path);
+      if (name.endsWith(_ext)) {
+        files[name.substring(0, name.length - _ext.length)] = e;
+      } else if (name.endsWith('.json')) {
+        files.putIfAbsent(name.substring(0, name.length - 5), () => e);
+      }
+    }
+    _infos.removeWhere((id, _) => !files.containsKey(id));
+    final out = <SubsInfo>[];
+    for (final MapEntry(key: id, value: data) in files.entries) {
+      final int stamp;
+      try {
+        stamp = (await data.stat()).modified.microsecondsSinceEpoch;
+      } catch (_) {
+        continue;
+      }
+      final cached = _infos[id];
+      if (cached != null && cached.$1 == stamp) {
+        out.add(cached.$2);
+        continue;
+      }
+      SubsInfo? info;
+      try {
+        final meta = _infoFile(data, id);
+        if (await meta.exists()) {
+          final j = jsonDecode(await meta.readAsString());
+          if (j is Map<String, Object?> && j['stamp'] == stamp) {
+            info = SubsInfo.fromJson(j);
+          }
+        }
+      } catch (_) {}
+      if (info == null) {
+        final full = await load(id);
+        if (full == null) continue;
+        info = SubsInfo.of(full);
+        await _writeInfo(data, info);
+      }
+      _infos[id] = (stamp, info);
+      out.add(info);
+    }
+    out.sort((a, b) => b.updated.compareTo(a.updated));
+    return out;
+  }
 
   static Future<SavedSubs?> load(String id) async {
     try {
@@ -405,9 +581,11 @@ class SubtitleStore {
 
   static Future<void> delete(String id) => _serial(id, () async {
     _epochs[id] = epochOf(id) + 1;
-    for (final file in [await _file(id), await _oldFile(id)]) {
+    final data = await _file(id);
+    for (final file in [data, await _oldFile(id), _infoFile(data, id)]) {
       if (await file.exists()) await file.delete();
     }
+    _infos.remove(id);
     changes.value++;
   });
 
@@ -539,11 +717,11 @@ class PageSubs {
   });
 
   /// [s] added to what is already known for the page ([before]).
-  factory PageSubs.of(SavedSubs s, PageSubs? before) {
+  factory PageSubs.of(SubsInfo s, PageSubs? before) {
     final p = s.progress;
     final b = before?.progress;
     return PageSubs(
-      lines: s.cues.length + (before?.lines ?? 0),
+      lines: s.lines + (before?.lines ?? 0),
       whole: s.isWholeVideo || (before?.whole ?? false),
       progress: p == null ? b : (b == null || p > b ? p : b),
       canResume: s.canResume || (before?.canResume ?? false),

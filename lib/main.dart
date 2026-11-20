@@ -114,12 +114,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// A page asked for elsewhere opens in the browser tab.
   void _toBrowser() {
-    if (openPageRequest.value != null && mounted) setState(() => _tab = 0);
+    if ((openPageRequest.value != null || openPagesRequest.value != null) &&
+        mounted) {
+      setState(() => _tab = 0);
+    }
   }
 
   @override
   void dispose() {
     openPageRequest.removeListener(_toBrowser);
+    openPagesRequest.removeListener(_toBrowser);
     super.dispose();
   }
 
@@ -131,6 +135,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     openPageRequest.addListener(_toBrowser);
+    openPagesRequest.addListener(_toBrowser);
     final crash = widget.crash;
     if (crash != null || AppLog.previousNativeCrash != null) {
       WidgetsBinding.instance.addPostFrameCallback(

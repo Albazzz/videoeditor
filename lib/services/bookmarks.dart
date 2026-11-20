@@ -103,8 +103,44 @@ class Bookmarks {
       ...?prefs.getStringList('bookmarkFolders'),
       for (final b in await load())
         if (b.folder.isNotEmpty) b.folder,
+      ..._subtitleFolders(prefs).values,
     }).toList()..sort();
   }
+
+  static const _subtitleKey = 'subtitleFolders';
+
+  static Map<String, String> _subtitleFolders(SharedPreferences prefs) {
+    try {
+      final raw = prefs.getString(_subtitleKey);
+      final data = raw == null ? null : jsonDecode(raw);
+      if (data is Map) {
+        return {
+          for (final e in data.entries)
+            if ('${e.value}'.isNotEmpty) '${e.key}': '${e.value}',
+        };
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  /// The folders subtitles were put in (the same folders as saved
+  /// pages), by subtitle id. Subtitles not listed are at the top level.
+  static Future<Map<String, String>> subtitleFolders() async =>
+      _subtitleFolders(await SharedPreferences.getInstance());
+
+  /// Puts subtitles into [folder] ('' = top level).
+  static Future<void> moveSubtitles(Iterable<String> ids, String folder) =>
+      _change((prefs) async {
+        final map = _subtitleFolders(prefs);
+        for (final id in ids) {
+          if (folder.isEmpty) {
+            map.remove(id);
+          } else {
+            map[id] = folder;
+          }
+        }
+        await prefs.setString(_subtitleKey, jsonEncode(map));
+      });
 
   static Future<bool> createFolder(String name) => _change((prefs) async {
     final folder = name.trim();
@@ -135,6 +171,10 @@ class Bookmarks {
       for (final b in await load())
         b.folder == from ? b.copyWith(folder: to) : b,
     ]);
+    final subs = _subtitleFolders(prefs)
+      ..updateAll((_, f) => f == from ? to : f)
+      ..removeWhere((_, f) => f.isEmpty);
+    await prefs.setString(_subtitleKey, jsonEncode(subs));
     names.remove(from);
     if (!delete) names.add(to);
     await prefs.setStringList('bookmarkFolders', names);

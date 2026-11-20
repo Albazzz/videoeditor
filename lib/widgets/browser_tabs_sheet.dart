@@ -28,6 +28,17 @@ Future<void> showBrowserTabs(
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                   ),
+                  if (tabs.tabs.length > 1)
+                    IconButton(
+                      tooltip: 'Đóng các tab khác',
+                      icon: const Icon(Icons.layers_clear_outlined),
+                      onPressed: () {
+                        final keep = tabs.selected.id;
+                        for (final t in List.of(tabs.tabs)) {
+                          if (t.id != keep) onClose(t.id);
+                        }
+                      },
+                    ),
                   TextButton.icon(
                     icon: const Icon(Icons.add),
                     label: const Text('Tab mới'),

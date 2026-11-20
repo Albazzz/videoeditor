@@ -60,6 +60,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
     super.initState();
     _tabs.addListener(_changed);
     openPageRequest.addListener(_openRequested);
+    openPagesRequest.addListener(_openManyRequested);
+  }
+
+  void _openManyRequested() {
+    final urls = openPagesRequest.value;
+    if (urls == null || urls.isEmpty) return;
+    for (var i = 0; i < urls.length; i++) {
+      final existing = _tabs.tabs.where((t) => t.url == urls[i]).firstOrNull;
+      if (existing != null) {
+        if (i == 0) _tabs.select(existing.id);
+      } else {
+        _newTab(url: urls[i], select: i == 0);
+      }
+    }
   }
 
   void _changed() {
@@ -124,6 +138,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void dispose() {
     _disposing = true;
     openPageRequest.removeListener(_openRequested);
+    openPagesRequest.removeListener(_openManyRequested);
     _tabs.dispose();
     KeepAwake.hold(this, false);
     super.dispose();

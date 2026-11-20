@@ -48,6 +48,39 @@ void main() {
     expect(await SubtitleStore.pageMarks(), isEmpty);
   });
 
+  test('lists read small summaries, rebuilt when missing or out of date', () async {
+    SavedSubs entry(String id, int lines, {String title = 'Phim'}) => SavedSubs(
+      id: id,
+      title: title,
+      page: 'https://phim.example/$id',
+      language: 'ja',
+      updated: DateTime(2026, 11, lines),
+      cues: [
+        for (var i = 0; i < lines; i++)
+          Cue(start: i * 2.0, end: i * 2.0 + 1, text: 'câu $i', source: 'x$i'),
+      ],
+      covered: const [(0, 100)],
+      duration: 200,
+    );
+    await SubtitleStore.save(entry('a', 3));
+    await SubtitleStore.save(entry('b', 5));
+    var infos = await SubtitleStore.summaries();
+    expect(infos.map((i) => (i.id, i.lines)), [('b', 5), ('a', 3)]);
+    expect(infos.first.progress, 0.5);
+    expect(infos.first.canResume, isTrue);
+    // A summary lost (an older app version): made again from the entry.
+    File('${dir.path}/subs/a.meta').deleteSync();
+    await SubtitleStore.save(entry('b', 7, title: 'Phim mới'));
+    infos = await SubtitleStore.summaries();
+    expect(infos.map((i) => (i.id, i.lines, i.title)), [
+      ('b', 7, 'Phim mới'),
+      ('a', 3, 'Phim'),
+    ]);
+    await SubtitleStore.delete('b');
+    expect((await SubtitleStore.summaries()).map((i) => i.id), ['a']);
+    expect(File('${dir.path}/subs/b.meta').existsSync(), isFalse);
+  });
+
   test('overlapping saves to one ID finish in order', () async {
     final item = SavedSubs(
       id: 'same',

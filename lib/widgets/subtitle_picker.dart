@@ -40,9 +40,9 @@ Set<String> titleWords(String title) => {
 
 /// Saved entries, those whose titles share most words with [title] first,
 /// then the newest.
-List<SavedSubs> rankByTitle(List<SavedSubs> all, String title) {
+List<T> rankByTitle<T extends SubsHeader>(List<T> all, String title) {
   final want = titleWords(title);
-  int score(SavedSubs s) => titleWords(s.title).intersection(want).length;
+  int score(T s) => titleWords(s.title).intersection(want).length;
   return List.of(all)..sort((a, b) {
     final byScore = score(b).compareTo(score(a));
     return byScore != 0 ? byScore : b.updated.compareTo(a.updated);

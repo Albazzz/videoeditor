@@ -453,3 +453,56 @@ class _TextDialogState extends State<_TextDialog> {
     ],
   );
 }
+
+/// The app bar while items of a list are picked: ✕ to stop picking, how
+/// many, "all", and what can be done to them.
+PreferredSizeWidget selectionBar(
+  BuildContext context, {
+  required int count,
+  required VoidCallback onDone,
+  VoidCallback? onAll,
+  List<Widget> actions = const [],
+}) => AppBar(
+  leading: IconButton(
+    tooltip: 'Thôi chọn',
+    icon: const Icon(Icons.close),
+    onPressed: onDone,
+  ),
+  title: Text('Đã chọn $count'),
+  backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+  actions: [
+    if (onAll != null)
+      IconButton(
+        tooltip: 'Chọn tất cả',
+        icon: const Icon(Icons.select_all),
+        onPressed: onAll,
+      ),
+    ...actions,
+  ],
+);
+
+/// Asks before doing something to several items at once.
+Future<bool> confirmMany(
+  BuildContext context,
+  String title,
+  String message, {
+  String action = 'Xoá',
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Huỷ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    ) ==
+    true;
