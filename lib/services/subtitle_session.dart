@@ -414,11 +414,19 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void didHaveMemoryPressure() {
     if (_lowMemory || _disposed) return;
     _lowMemory = true;
-    VideoPipeline.recognizers.capacity = 1;
     final second = _runs[1];
     if (second != null) {
       AppLog.i('phụ đề', 'Thiếu bộ nhớ, dừng lượt 2 và làm tiếp bằng một lượt');
+      // Give back run 2's recogniser before there is only one: otherwise
+      // lowering the count may make run 1 (the stretch being watched)
+      // give way instead, whichever of the two happened to start last.
+      final release = second.releaseModel;
+      second.releaseModel = null;
       _retire(second);
+      release?.call();
+    }
+    VideoPipeline.recognizers.capacity = 1;
+    if (second != null) {
       _schedule();
       notifyListeners();
     }

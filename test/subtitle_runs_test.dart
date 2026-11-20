@@ -7,6 +7,7 @@ import 'package:video/services/asr_worker.dart';
 import 'package:video/services/audio_feed.dart';
 import 'package:video/services/retained_audio.dart';
 import 'package:video/services/subtitle_session.dart';
+import 'package:video/services/video_pipeline.dart';
 import 'package:video/services/subtitle_store.dart';
 import 'package:video/services/translator.dart';
 
@@ -119,6 +120,8 @@ void main() {
   );
   group('session scheduling', () {
     setUp(() async {
+      // Memory pressure in one test must not leave one recogniser for the next.
+      VideoPipeline.recognizers.capacity = 2;
       workers.clear();
       feeds.clear();
       languages.clear();
