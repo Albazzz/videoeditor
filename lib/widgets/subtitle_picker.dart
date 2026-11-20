@@ -60,7 +60,8 @@ Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
   required double duration,
   required bool canCarryOn,
 }) async {
-  final all = await SubtitleStore.list();
+  // Summaries only: the chosen entry's lines are read once it is picked.
+  final all = await SubtitleStore.summaries();
   if (!context.mounted) return null;
   if (all.isEmpty) {
     toast(context, 'Kho phụ đề chưa có phụ đề nào');
@@ -68,7 +69,7 @@ Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
   }
   final ranked = rankByTitle(all, pageTitle);
   final current = ranked.where((s) => s.id == currentId).toList();
-  final picked = await showModalBottomSheet<SavedSubs>(
+  final chosen = await showModalBottomSheet<SubsInfo>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -78,6 +79,8 @@ Future<(SavedSubs, PickedUse)?> pickSavedSubtitles(
       duration: duration,
     ),
   );
+  if (chosen == null || !context.mounted) return null;
+  final picked = await SubtitleStore.load(chosen.id);
   if (picked == null || !context.mounted) return null;
   final unfinished = picked.canResume;
   if (!canCarryOn || !unfinished) return (picked, PickedUse.watch);
@@ -111,7 +114,7 @@ class _PickerSheet extends StatefulWidget {
     required this.duration,
     this.currentId = '',
   });
-  final List<SavedSubs> entries;
+  final List<SubsInfo> entries;
   final double duration;
   final String currentId;
 
@@ -208,7 +211,7 @@ class _PickerSheetState extends State<_PickerSheet> {
                         ),
                       Text(
                         '$host · $label · '
-                        '${s.cues.isEmpty ? 'chưa có dòng nào' : '${s.cues.length} dòng'}',
+                        '${s.lines == 0 ? 'chưa có dòng nào' : '${s.lines} dòng'}',
                       ),
                       if (mismatch)
                         Text(
@@ -220,7 +223,7 @@ class _PickerSheetState extends State<_PickerSheet> {
                   ),
                   // Listed so nothing seems lost, but there is nothing
                   // to show yet.
-                  enabled: s.cues.isNotEmpty,
+                  enabled: s.lines > 0,
                   onTap: () => Navigator.pop(context, s),
                 );
               },
