@@ -19,6 +19,7 @@ import '../services/translator.dart';
 import '../services/video_library.dart';
 import '../widgets/bookmarks_sheet.dart';
 import '../widgets/common.dart';
+import '../widgets/folder_group.dart';
 import 'downloads_screen.dart';
 import 'retained_audio_screen.dart';
 import '../widgets/subtitle_details.dart';
@@ -70,7 +71,9 @@ Future<bool> restartSubtitles(
 /// Every subtitle the app has made: for web videos and for library videos.
 /// Hidden videos are left out on purpose.
 class SubtitleLibraryScreen extends StatefulWidget {
-  const SubtitleLibraryScreen({super.key});
+  const SubtitleLibraryScreen({super.key, this.visit = 0});
+
+  final int visit;
 
   @override
   State<SubtitleLibraryScreen> createState() => _SubtitleLibraryScreenState();
@@ -93,6 +96,12 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   final _picked = <String>{};
   bool get _picking => _picked.isNotEmpty;
   Timer? _soon;
+
+  @override
+  void didUpdateWidget(covariant SubtitleLibraryScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visit != widget.visit) unawaited(_reload());
+  }
 
   @override
   void initState() {
@@ -435,7 +444,9 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     if (action == 'rename') {
       final name = await askText(context, 'Đổi tên thư mục', initial: folder);
       if (name == null || name.isEmpty || name == folder) return;
-      if (!await Bookmarks.renameFolder(folder, name) && mounted) {
+      final renamed = await Bookmarks.renameFolder(folder, name);
+      if (renamed && _expanded.remove(folder)) _expanded.add(name.trim());
+      if (!renamed && mounted) {
         toast(context, 'Tên thư mục trống hoặc đã có');
       }
     } else if (action == 'delete') {
@@ -447,6 +458,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         return;
       }
       await Bookmarks.deleteFolder(folder);
+      _expanded.remove(folder);
     } else if (action == 'pick') {
       setState(() {
         for (final s in _web ?? const <SubsInfo>[]) {
@@ -587,14 +599,14 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
 
   Widget _folderRow(String folder, int count) {
     final open = _expanded.contains(folder) || _picking;
-    return ListTile(
-      leading: Icon(open ? Icons.folder_open : Icons.folder),
-      title: Text(folder),
-      subtitle: Text('$count phụ đề'),
+    return FolderGroupHeader(
+      expanded: open,
+      title: folder,
+      subtitle: '$count phụ đề',
       onTap: () => setState(() {
         if (!_expanded.remove(folder)) _expanded.add(folder);
       }),
-      trailing: PopupMenuButton<String>(
+      actions: PopupMenuButton<String>(
         tooltip: 'Sửa thư mục',
         onSelected: (v) => _folderAction(folder, v),
         itemBuilder: (_) => const [
@@ -689,12 +701,25 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         rows.add(() => _folderRow(folder, list.length));
         if (_expanded.contains(folder) || _picking) {
           for (final s in list) {
-            rows.add(() => _webRow(s));
+            rows.add(
+              () => FolderGroupEntry(last: s == list.last, child: _webRow(s)),
+            );
           }
         }
       }
-      for (final s in top) {
-        rows.add(() => _webRow(s));
+      if (top.isNotEmpty) {
+        rows.add(
+          () => FolderGroupHeader(
+            title: 'Chưa có thư mục',
+            subtitle: '${top.length} phụ đề',
+            expanded: true,
+          ),
+        );
+        for (final s in top) {
+          rows.add(
+            () => FolderGroupEntry(last: s == top.last, child: _webRow(s)),
+          );
+        }
       }
     }
     if (_translated.isNotEmpty && !_picking) {

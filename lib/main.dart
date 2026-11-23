@@ -197,8 +197,8 @@ class _HomeScreenState extends State<HomeScreen> {
           const BrowserScreen(),
           // Watching on the web works well now; saved pages are what is
           // reached for. The video library sits in Settings.
-          SavedPagesScreen(key: ValueKey(_savedVisit)),
-          SubtitleLibraryScreen(key: ValueKey(_subsVisit)),
+          SavedPagesScreen(visit: _savedVisit),
+          SubtitleLibraryScreen(visit: _subsVisit),
           const SettingsScreen(),
         ],
       ),

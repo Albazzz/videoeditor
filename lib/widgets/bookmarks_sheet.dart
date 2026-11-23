@@ -9,20 +9,29 @@ import '../services/open_page.dart';
 import '../services/page_translation.dart';
 import '../services/subtitle_store.dart';
 import 'common.dart';
+import 'folder_group.dart';
 
 /// The saved pages; returns the address to open, or null.
-Future<String?> showBookmarks(BuildContext context) =>
-    showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
+Future<String?> showBookmarks(BuildContext context) {
+  final bucket = PageStorage.maybeOf(context) ?? PageStorageBucket();
+  return showModalBottomSheet<String>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (context) => PageStorage(
+      bucket: bucket,
+      child: SafeArea(
         child: SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.75,
-          child: BookmarksView(onOpen: (url) => Navigator.pop(context, url)),
+          child: BookmarksView(
+            key: const PageStorageKey('bookmarks-sheet'),
+            onOpen: (url) => Navigator.pop(context, url),
+          ),
         ),
       ),
-    );
+    ),
+  );
+}
 
 /// Asks where to save a page before saving it: its name and a folder
 /// (with a way to make a new one). Returns (title, folder) or null.
@@ -161,7 +170,10 @@ Future<void> editBookmark(
 /// Saved pages grouped by folder, with search and editing. Used in the
 /// browser's sheet and as the "Trang lưu" tab.
 class BookmarksView extends StatefulWidget {
-  const BookmarksView({super.key, required this.onOpen});
+  const BookmarksView({super.key, required this.onOpen, this.visit = 0});
+
+  /// Refresh data on a visit while keeping folders, search and scroll position.
+  final int visit;
 
   /// A page was tapped.
   final void Function(String url) onOpen;
@@ -176,6 +188,7 @@ class _BookmarksViewState extends State<BookmarksView> {
   final _thumbSeen = <String, bool>{};
   List<String> _folders = [];
   final _expanded = <String>{};
+  bool _restoredFolders = false;
   String _filter = '';
   final _search = TextEditingController();
 
@@ -189,6 +202,30 @@ class _BookmarksViewState extends State<BookmarksView> {
   /// Pages translated before (ids from [PageTranslations.idFor]).
   Set<String> _translated = const {};
   Timer? _subsSoon;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_restoredFolders) return;
+    _restoredFolders = true;
+    final saved = PageStorage.maybeOf(context)?.readState(
+      context,
+      identifier: widget.key ?? const ValueKey('bookmark-folders'),
+    );
+    if (saved is Set<String>) _expanded.addAll(saved);
+  }
+
+  void _rememberFolders() => PageStorage.maybeOf(context)?.writeState(
+    context,
+    Set<String>.of(_expanded),
+    identifier: widget.key ?? const ValueKey('bookmark-folders'),
+  );
+
+  @override
+  void didUpdateWidget(covariant BookmarksView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visit != widget.visit) unawaited(_load());
+  }
 
   @override
   void initState() {
@@ -255,6 +292,7 @@ class _BookmarksViewState extends State<BookmarksView> {
     switch (action) {
       case 'delete':
         await Bookmarks.deleteFolder(from!);
+        _expanded.remove(from);
       case 'pick':
         setState(() {
           for (final b in _all ?? const <Bookmark>[]) {
@@ -277,7 +315,12 @@ class _BookmarksViewState extends State<BookmarksView> {
             const SnackBar(content: Text('Tên thư mục trống hoặc đã có')),
           );
         }
+        if (ok && (from == null || _expanded.remove(from))) {
+          _expanded.add(name.trim());
+        }
     }
+    if (!mounted) return;
+    _rememberFolders();
     await _load();
   }
 
@@ -312,6 +355,7 @@ class _BookmarksViewState extends State<BookmarksView> {
           await Bookmarks.move(b.url, folder);
         }
         if (folder.isNotEmpty) _expanded.add(folder);
+        if (mounted) _rememberFolders();
       case 'remove':
         if (!await confirmMany(
           context,
@@ -406,14 +450,15 @@ class _BookmarksViewState extends State<BookmarksView> {
     );
   }
 
-  Widget _folderRow(String folder, bool open, int count) => ListTile(
-    leading: Icon(open ? Icons.folder_open : Icons.folder),
-    title: Text(folder),
-    subtitle: Text('$count trang'),
+  Widget _folderRow(String folder, bool open, int count) => FolderGroupHeader(
+    expanded: open,
+    title: folder,
+    subtitle: '$count trang',
     onTap: () => setState(() {
       if (!_expanded.remove(folder)) _expanded.add(folder);
+      _rememberFolders();
     }),
-    trailing: PopupMenuButton<String>(
+    actions: PopupMenuButton<String>(
       tooltip: 'Sửa thư mục',
       onSelected: (v) => _folderAction(folder, v),
       itemBuilder: (_) => const [
@@ -501,13 +546,35 @@ class _BookmarksViewState extends State<BookmarksView> {
       final open = searching || _picking || _expanded.contains(folder);
       rows.add(() => _folderRow(folder, open, inside.length));
       if (open) {
+        if (inside.isEmpty) {
+          rows.add(
+            () => const FolderGroupEntry(
+              last: true,
+              child: ListTile(title: Text('Thư mục trống')),
+            ),
+          );
+        }
         for (final b in inside) {
-          rows.add(() => _page(b));
+          rows.add(
+            () => FolderGroupEntry(last: b == inside.last, child: _page(b)),
+          );
         }
       }
     }
-    for (final b in shown.where((b) => b.folder.isEmpty)) {
-      rows.add(() => _page(b));
+    final unfiled = shown.where((b) => b.folder.isEmpty).toList();
+    if (unfiled.isNotEmpty) {
+      rows.add(
+        () => FolderGroupHeader(
+          title: 'Chưa có thư mục',
+          subtitle: '${unfiled.length} trang',
+          expanded: true,
+        ),
+      );
+      for (final b in unfiled) {
+        rows.add(
+          () => FolderGroupEntry(last: b == unfiled.last, child: _page(b)),
+        );
+      }
     }
     if (shown.isEmpty &&
         (_folders.isEmpty ||
@@ -547,6 +614,8 @@ class _BookmarksViewState extends State<BookmarksView> {
             child: _all == null
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
+                    key: const PageStorageKey('bookmark-list'),
+                    padding: const EdgeInsets.only(bottom: 16),
                     itemCount: rows.length,
                     itemBuilder: (context, i) => rows[i](),
                   ),
