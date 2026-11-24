@@ -31,15 +31,23 @@ class ActiveWork {
   Future<void> _saving = Future.value();
   Timer? _saveTimer;
   int _savedRevision = -1;
+  bool _savedWaitingForAudio = false;
   late final VoidCallback _listener = _changed;
 
   void _changed() {
     KeepAwake.hold(this, KeepAwake.needed(session));
     BackgroundSubtitles.instance.update(
       session,
-      active: session.activity != SessionActivity.failed && !session.stopped,
+      active:
+          session.activity != SessionActivity.failed &&
+          !session.stopped &&
+          (!session.needsAudioSource || session.waitingTranslation > 0),
       fraction: session.progressFraction,
     );
+    if (session.needsAudioSource && !_savedWaitingForAudio) {
+      _savedWaitingForAudio = true;
+      unawaited(_persist(force: true));
+    }
     if (session.readyToFinish &&
         !_finishing &&
         !_stopping.containsKey(session)) {
@@ -48,8 +56,10 @@ class ActiveWork {
     }
   }
 
-  Future<void> _persist() => _saving = _saving.then((_) async {
-    if (_finishing || _savedRevision == session.cueRevision) return;
+  Future<void> _persist({bool force = false}) => _saving = _saving.then((
+    _,
+  ) async {
+    if (_finishing || (!force && _savedRevision == session.cueRevision)) return;
     final revision = session.cueRevision;
     try {
       await saver?.save();
@@ -92,6 +102,17 @@ class ActiveWork {
   static final current = ValueNotifier<ActiveWork?>(null);
   static final _running = <SubtitleSession, ActiveWork>{};
   static final _stopping = <SubtitleSession, Future<void>>{};
+  static final _closingAudio = <String, Future<void>>{};
+  static Future<void> waitForAudio(String id) async {
+    for (final entry in _stopping.entries.toList()) {
+      if (entry.key.videoId == id) {
+        await entry.value;
+        await entry.key.closeAudio();
+      }
+    }
+    await _closingAudio[id];
+  }
+
   static final all = ValueNotifier<List<ActiveWork>>(const []);
   static ActiveWork? find(String id) =>
       _running.values.where((work) => work.id == id).firstOrNull;
@@ -148,6 +169,7 @@ class ActiveWork {
     if (_running.containsKey(session)) return;
     if (find(id) != null) throw StateError('Video đã có phiên dịch: $id');
     session.audioTitle = title;
+    session.audioPage = saver?.page ?? '';
     session.audioHidden = hidden;
     final work = ActiveWork(
       id: id,
@@ -221,9 +243,15 @@ class ActiveWork {
           end(session);
           session.dispose();
           // Audio writers close in the background; the stop is done.
+          final closing = session.closeAudio().catchError((Object e) {
+            AppLog.e('âm thanh', 'Đóng âm thanh sau khi dừng: $e');
+          });
+          _closingAudio[session.videoId] = closing;
           unawaited(
-            session.closeAudio().catchError((Object e) {
-              AppLog.e('âm thanh', 'Đóng âm thanh sau khi dừng: $e');
+            closing.whenComplete(() {
+              if (identical(_closingAudio[session.videoId], closing)) {
+                _closingAudio.remove(session.videoId);
+              }
             }),
           );
         }

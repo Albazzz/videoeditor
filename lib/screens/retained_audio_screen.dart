@@ -4,6 +4,7 @@ import '../services/active_work.dart';
 import '../services/retained_audio.dart';
 import '../services/subtitle_session.dart';
 import '../widgets/common.dart';
+import '../widgets/subtitle_resume.dart';
 
 class RetainedAudioScreen extends StatefulWidget {
   const RetainedAudioScreen({
@@ -173,9 +174,24 @@ class _RetainedAudioScreenState extends State<RetainedAudioScreen> {
             )
           : _picking
           ? null
-          : TextButton(
-              onPressed: () => _confirm(audio),
-              child: const Text('Xác nhận…'),
+          : Wrap(
+              spacing: 4,
+              children: [
+                IconButton(
+                  tooltip: 'Làm tiếp từ âm thanh đã lưu',
+                  onPressed: () => resumeStoredSubtitles(
+                    context,
+                    audio.videoId,
+                    audioStore: widget.store,
+                    includeHidden: widget.includeHidden,
+                  ),
+                  icon: const Icon(Icons.play_circle_outline),
+                ),
+                TextButton(
+                  onPressed: () => _confirm(audio),
+                  child: const Text('Xác nhận…'),
+                ),
+              ],
             ),
     );
   }

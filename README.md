@@ -31,6 +31,12 @@ bản âm thanh giữ lại không nằm trong thư mục dọn cache. Vào **Kh
 **Xác nhận…**. Có thể tiếp tục giữ; nếu xác nhận xóa lúc đang xử lý, app sẽ dừng
 phiên và chờ đóng các bộ ghi trước khi xóa. Phụ đề và video gốc không bị xóa.
 
+Bấm **Làm tiếp** trong kho phụ đề, chi tiết hoặc kho âm thanh để dùng ngay
+âm thanh đã lưu trong app, bỏ qua các đoạn đã nhận dạng. Nếu chỉ còn câu chưa
+dịch, app dịch tiếp từ lời gốc mà không cần lấy lại âm thanh. App xử lý hết phần
+âm thanh đang có trước; chỉ yêu cầu mở lại web khi còn thiếu đoạn cần nhận dạng.
+Các mốc thời gian và file âm thanh gốc được giữ nguyên.
+
 Trên Android, kho âm thanh ở `noBackupFilesDir`; trên iOS, ở Application Support
 với quyền thư mục chỉ dành cho chủ sở hữu, Data Protection và loại khỏi backup.
 Kho này không được đưa vào Documents, Tệp, MediaStore hoặc chức năng chia sẻ;

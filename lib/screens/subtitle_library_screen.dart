@@ -12,6 +12,8 @@ import '../services/app_settings.dart';
 import '../services/bookmarks.dart';
 import '../services/retained_audio.dart';
 import '../services/subtitle_store.dart';
+import '../services/subtitle_resume.dart';
+import '../widgets/subtitle_resume.dart';
 import '../services/translator.dart';
 import '../services/video_library.dart';
 import '../widgets/bookmarks_sheet.dart';
@@ -235,12 +237,8 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     ),
   );
 
-  /// Opens the page and carries on making its subtitles once the film
-  /// plays there.
-  void _resume(SubsInfo s) {
-    ActiveWork.forgetStopped(s.id);
-    requestResume(s.page);
-    toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
+  Future<void> _resume(SubsInfo s) async {
+    await resumeStoredSubtitles(context, s.id);
   }
 
   Future<void> _view(SubsInfo info) async {
@@ -339,25 +337,35 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     if (chosen.isEmpty) return;
     switch (action) {
       case 'resume':
-        final pages = [
-          for (final s in chosen)
-            if (s.page.startsWith('http') &&
-                s.canResume &&
-                ActiveWork.find(s.id) == null)
-              s.page,
-        ];
-        if (pages.isEmpty) {
+        final eligible = chosen
+            .where((s) => s.canResume && ActiveWork.find(s.id) == null)
+            .toList();
+        if (eligible.isEmpty) {
           toast(context, 'Các phụ đề đã chọn không còn gì để làm tiếp');
           return;
         }
-        for (final s in chosen) {
-          ActiveWork.forgetStopped(s.id);
+        final pages = <String>[];
+        for (final s in eligible) {
+          if (!mounted) return;
+          final result = await resumeStoredSubtitles(
+            context,
+            s.id,
+            openSource: false,
+          );
+          if (result == SubtitleResumeResult.needsSource &&
+              s.page.startsWith('http')) {
+            pages.add(s.page);
+          }
         }
-        requestResumeAll(pages);
-        toast(
-          context,
-          'Mở ${pages.length} trang, mỗi phim làm tiếp khi chạy trong tab của nó',
-        );
+        if (pages.isNotEmpty) {
+          requestResumeAll(pages);
+          if (mounted) {
+            toast(
+              context,
+              '${pages.length} trang còn thiếu âm thanh; các video có dữ liệu được làm tiếp trong app',
+            );
+          }
+        }
       case 'stop':
         final running = [
           for (final s in chosen) ?ActiveWork.find(s.id)?.session,
@@ -521,7 +529,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
               valueListenable: ActiveWork.all,
               builder: (context, _, _) {
                 final running = ActiveWork.find(s.id) != null;
-                final resume = web && s.canResume && !running;
+                final resume = s.canResume && !running;
                 return Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -1146,17 +1154,20 @@ class _SubtitleViewState extends State<_SubtitleView> {
               onPressed: () => _revise(),
             ),
           if (saved case final SavedSubs s
-              when s.page.startsWith('http') &&
-                  s.canResume &&
-                  ActiveWork.find(s.id) == null)
+              when s.canResume && ActiveWork.find(s.id) == null)
             IconButton(
               tooltip: 'Làm tiếp',
               icon: const Icon(Icons.play_circle_outline),
-              onPressed: () {
-                ActiveWork.forgetStopped(s.id);
-                requestResume(s.page);
-                toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
-                Navigator.popUntil(context, (r) => r.isFirst);
+              onPressed: () async {
+                final result = await resumeStoredSubtitles(context, s.id);
+                if (!context.mounted) return;
+                if (result == SubtitleResumeResult.needsSource &&
+                    s.page.startsWith('http')) {
+                  Navigator.popUntil(context, (r) => r.isFirst);
+                } else if (result == SubtitleResumeResult.started ||
+                    result == SubtitleResumeResult.alreadyRunning) {
+                  Navigator.pop(context);
+                }
               },
             ),
           if (saved?.page.startsWith('http') ?? false)
@@ -1345,6 +1356,17 @@ class _WorkCard extends StatelessWidget {
                   ),
                 ],
               ),
+              if (session.needsAudioSource &&
+                  (work.saver?.page.startsWith('http') ?? false))
+                TextButton.icon(
+                  icon: const Icon(Icons.open_in_browser),
+                  label: const Text('Lấy âm thanh còn thiếu từ web'),
+                  onPressed: () async {
+                    final page = work.saver!.page;
+                    await ActiveWork.stop(session);
+                    requestResume(page);
+                  },
+                ),
               SessionRetryButton(session: session),
               Text(session.languageNotice),
               if (session.duration > 0)
@@ -1393,11 +1415,7 @@ class _StoppedCards extends StatelessWidget {
                 spacing: 4,
                 children: [
                   TextButton(
-                    onPressed: () {
-                      ActiveWork.forgetStopped(w.id);
-                      requestResume(w.page);
-                      toast(context, 'Mở trang, sẽ làm tiếp khi phim chạy');
-                    },
+                    onPressed: () => resumeStoredSubtitles(context, w.id),
                     child: const Text('Làm tiếp'),
                   ),
                   IconButton(
