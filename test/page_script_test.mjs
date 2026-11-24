@@ -148,3 +148,26 @@ test('page translation: known text at once, the rest asked for, originals kept',
   assert.equal(p.nodes[4].nodeValue, '日本語');
   assert.equal(p.nodes[0].nodeValue, ' Hello world ');
 });
+
+
+test('page translation retry keeps successful text and retries exhausted failures', async () => {
+  const p = translatedPage([['P', 'Hello'], ['P', 'World']]);
+  p.tr.start({ Hello: 'Chào' });
+  assert.equal(p.calls.length, 1);
+  p.calls[0].resolve({});
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.calls.length, 2);
+  p.calls[1].resolve({});
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.calls.length, 2);
+  p.tr.retry();
+  assert.equal(p.calls.length, 3);
+  assert.deepEqual([...p.calls[2].data.texts], ['World']);
+  p.calls[2].resolve({ World: 'Thế giới' });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.nodes[0].nodeValue, 'Chào');
+  assert.equal(p.nodes[1].nodeValue, 'Thế giới');
+  p.tr.stop();
+  p.tr.start({});
+  assert.deepEqual([...p.calls[3].data.texts], ['Hello', 'World']);
+});

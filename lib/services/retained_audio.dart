@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -28,6 +29,7 @@ class RetainedAudioStore {
   RetainedAudioStore({Future<Directory> Function()? baseDirectory})
     : _baseDirectory = baseDirectory ?? _platformDirectory;
   static final instance = RetainedAudioStore();
+  static final changes = ValueNotifier<int>(0);
   final Future<Directory> Function() _baseDirectory;
   Future<Directory>? _root;
   static final _queues = <String, Future<void>>{};
@@ -178,6 +180,7 @@ class RetainedAudioStore {
         throw StateError('Đường dẫn âm thanh không hợp lệ');
       }
       if (await video.exists()) await video.delete(recursive: true);
+      changes.value++;
     });
   }
 }
@@ -221,6 +224,7 @@ class AudioArchive {
       final tmp = File(p.join(directory.path, 'audio.json.tmp'));
       await tmp.writeAsString(info, flush: true);
       await tmp.rename(p.join(directory.path, 'audio.json'));
+      RetainedAudioStore.changes.value++;
     });
     _writes = next.then<void>((_) {}, onError: (_) {});
     return next;

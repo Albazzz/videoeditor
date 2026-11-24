@@ -228,6 +228,75 @@ void main() {
         expect(feeds.last.startAt, 230);
       },
     );
+
+    test(
+      'retry recovers an initialization failure without recreating the session',
+      () async {
+        var attempts = 0;
+        session = SubtitleSession(
+          input: 'film.mp4',
+          language: 'ja',
+          parallel: false,
+          temporaryDirectory: () async {
+            if (++attempts == 1) {
+              throw const FileSystemException('temporary unavailable');
+            }
+            return root;
+          },
+          retainedAudio: RetainedAudioStore(
+            baseDirectory: () async => Directory('${root.path}/audio'),
+          ),
+          createFeed: () {
+            final feed = _Feed();
+            feeds.add(feed);
+            return feed;
+          },
+          createWorker: (_) async {
+            final worker = _Worker();
+            workers.add(worker);
+            return worker;
+          },
+        )..duration = 100;
+        await session.start(0);
+        expect(session.canRetry, true);
+        await session.retry();
+        await _until(() => feeds.length == 1);
+        expect(attempts, 2);
+        expect(session.error, isNull);
+        expect(session.canRetry, false);
+      },
+    );
+
+    test(
+      'retry resumes missing audio and keeps completed cues and coverage',
+      () async {
+        session = create()..duration = 300;
+        await session.start(0);
+        await _until(() => feeds.length == 2);
+        final old = List.of(workers);
+        final first = workers.singleWhere((w) => w.base == 0);
+        first.controller.add(AsrSegment(first.gen, 10, 11, 'Hello', 'ja'));
+        first.controller.add(AsrProgress(first.gen, 40, false));
+        first.controller.add(AsrError(first.gen, 'connection lost'));
+        expect(session.canRetry, true);
+        expect(session.covered, [(0.0, 40.0)]);
+        final kept = List.of(session.cues);
+        await Future.wait([session.retry(), session.retry()]);
+        await _until(() => feeds.length == 4);
+        expect(session.error, isNull);
+        expect(session.canRetry, false);
+        expect(old.every((w) => w.stopped), true);
+        expect(session.cues, kept);
+        expect(session.covered, [(0.0, 40.0)]);
+        expect(
+          feeds.skip(2).map((f) => f.startAt),
+          unorderedEquals([40.0, 170.0]),
+        );
+        session.requestStop();
+        await session.retry();
+        expect(feeds, hasLength(4));
+      },
+    );
   });
 
   test(

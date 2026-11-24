@@ -221,7 +221,12 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> markAudioCompleted() async {
     if (_audioCompleted || _audioArchive == null) return;
     _audioCompleted = true;
-    await _audioArchive!.update(completed: true);
+    try {
+      await _audioArchive!.update(completed: true);
+    } catch (_) {
+      _audioCompleted = false;
+      rethrow;
+    }
   }
 
   Future<void> closeAudio() => _audioClosing ??= () async {
@@ -255,6 +260,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   final _retryCount = <int, int>{};
   final _translations = <String, Future<String?>>{};
   final _blockedTranslations = <String>{};
+  final _failedTranslations = <String>{};
   final _pendingCues = <(double, String)>{};
   final _cueLanguages = <(double, String), String>{};
 
@@ -273,6 +279,63 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       _lastTranslateError = '';
   String? error;
   String? _prepareError;
+  bool retrying = false;
+
+  bool get canRetry =>
+      !_disposed &&
+      !stopped &&
+      (error != null ||
+          _prepareError != null ||
+          _failedTranslations.isNotEmpty ||
+          activity == SessionActivity.stuck);
+
+  /// Resume missing ranges and failed lines without discarding completed work.
+  Future<void> retry() async {
+    if (!canRetry || retrying) return;
+    retrying = true;
+    final previousStatus = status;
+    final restartAudio = error != null || activity == SessionActivity.stuck;
+    _set('Đang thử lại…');
+    try {
+      if (restartAudio) {
+        ++_epoch;
+        for (final run in _runs.values.toList()) {
+          _retire(run);
+        }
+        await Future.wait(_retiring.toList());
+        if (_disposed || stopped) return;
+        _resolving = null;
+        _source = null;
+        _feedError = '';
+        _retryCount.clear();
+        error = null;
+        finished = false;
+        paused = false;
+        _resumeAt = null;
+        await _initializeStorage();
+        if (_disposed || stopped) return;
+        _schedule();
+      }
+      _translationEpoch++;
+      _translations.clear();
+      _pendingCues.clear();
+      _blockedTranslations.clear();
+      _failedTranslations.clear();
+      _prepareError = null;
+      _lastTranslateError = '';
+      _translateFailures = 0;
+      _translatorReady = false;
+      _prepareTranslator();
+      if (!restartAudio) status = previousStatus;
+      lastActivity = DateTime.now();
+    } catch (e, st) {
+      _fail('$e', st);
+    } finally {
+      retrying = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
   DateTime lastActivity = DateTime.now(), _lastSeekRestart = DateTime(0);
   Directory? _root;
   Timer? _tick;
@@ -301,8 +364,12 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     if (error != null) return SessionActivity.failed;
     if (finished &&
         waitingTranslation == 0 &&
+        (_prepareError != null || _failedTranslations.isNotEmpty)) {
+      return SessionActivity.failed;
+    }
+    if (finished &&
+        waitingTranslation == 0 &&
         (_translatorReady ||
-            _prepareError != null ||
             _translator.status.state == TranslationState.disabled)) {
       return SessionActivity.done;
     }
@@ -315,6 +382,34 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         ? SessionActivity.stuck
         : SessionActivity.working;
   }
+
+  /// No completion while a translation, failed line or final audio range remains.
+  bool get readyToFinish =>
+      !_disposed &&
+      !stopped &&
+      !retrying &&
+      activity == SessionActivity.done &&
+      _prepareError == null &&
+      _failedTranslations.isEmpty &&
+      coversWholeVideo(covered, duration, reachedEnd: reachedEnd);
+
+  double get progressFraction {
+    final audio = duration > 0
+        ? (coveredSeconds(covered) / duration).clamp(0.0, 1.0)
+        : finished
+        ? 1.0
+        : 0.0;
+    final translated = cues.isEmpty
+        ? 0.0
+        : cues.where((c) => c.source.isEmpty || c.text != c.source).length /
+              cues.length;
+    return readyToFinish
+        ? 1
+        : (audio * 0.9 + translated * 0.1).clamp(0.0, 0.9999);
+  }
+
+  void reportSaveFailure(Object error) =>
+      _fail('Chưa lưu xong phụ đề: $error', StackTrace.current);
 
   bool _foreground = false;
 
@@ -456,6 +551,15 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     );
     _prepareTranslator();
     try {
+      await _initializeStorage();
+      if (!_disposed && !stopped) _schedule();
+    } catch (e, st) {
+      _fail('$e', st);
+    }
+  }
+
+  Future<void> _initializeStorage() async {
+    if (_root == null) {
       final tmp = await _temporaryDirectory();
       final parent = await Directory(
         p.join(tmp.path, 'vsub'),
@@ -466,6 +570,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       _root = root;
+    }
+    if (_audioArchive == null && !_disposed && !stopped) {
       _audioOpening = audioStore.create(
         videoId,
         title: audioTitle,
@@ -476,9 +582,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         await closeAudio();
         return;
       }
-      _schedule();
-    } catch (e, st) {
-      _fail('$e', st);
     }
   }
 
@@ -553,6 +656,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
         _pendingCues.remove(id);
+        if (text != null) _failedTranslations.remove(key);
         if (text != null && text != cue.source) {
           _replaceText(cue.start, cue.source, text);
         }
@@ -564,6 +668,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<String?> _doTranslate(Translator engine, Cue c, String lang) async {
+    final epoch = _translationEpoch;
     try {
       if (engine is OpenRouterTranslator) {
         engine.position = _position;
@@ -575,13 +680,17 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       }
       return await engine.translate(c.source, lang).timeout(engine.timeout);
     } catch (e) {
-      if (_disposed || e is TranslationCancelled || engine != _translator) {
+      if (_disposed ||
+          epoch != _translationEpoch ||
+          e is TranslationCancelled ||
+          engine != _translator) {
         return null;
       }
       if (e is OpenRouterError && (e.blocked || e.permanent)) {
         _blockedTranslations.add('$lang|${c.source}');
       }
       _translateFailures++;
+      _failedTranslations.add('$lang|${c.source}');
       _lastTranslateError = '$e';
       if (_translateFailures <= 3 || _translateFailures % 25 == 0) {
         AppLog.e('dịch', _lastTranslateError);
@@ -1062,6 +1171,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _translations.clear();
     _pendingCues.clear();
     _blockedTranslations.clear();
+    _failedTranslations.clear();
     _cueLanguages.clear();
     for (final cue in List.of(cues)) {
       if (cue.source.isNotEmpty) {
@@ -1081,6 +1191,10 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _translationEpoch++;
     _pendingCues.clear();
     _translations.clear();
+    _failedTranslations.retainAll({
+      for (final c in replacement)
+        if (c.source.isNotEmpty && c.text == c.source) '$language|${c.source}',
+    });
     cues
       ..clear()
       ..addAll(replacement);

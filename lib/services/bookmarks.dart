@@ -1,11 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/painting.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'subtitle_store.dart';
 
 /// A page the user saved to come back to.
 class Bookmark {
@@ -64,6 +67,9 @@ class Bookmark {
 /// Saved pages, newest first, kept with the other settings.
 class Bookmarks {
   static const _key = 'bookmarks';
+  static final pictureChanges = ValueNotifier<int>(0);
+  static Directory? overrideThumbDir;
+  static String subtitlePictureKey(String id) => 'subtitle:$id';
 
   /// The same page with or without "#…" is one bookmark.
   static String key(String url) => url.split('#').first;
@@ -217,7 +223,7 @@ class Bookmarks {
   /// path (tests).
   static Future<Directory?> thumbDir() async {
     try {
-      final base = await getApplicationSupportDirectory();
+      final base = overrideThumbDir ?? await getApplicationSupportDirectory();
       return Directory(p.join(base.path, 'bookmark_thumbs'))
         ..createSync(recursive: true);
     } catch (_) {
@@ -233,10 +239,25 @@ class Bookmarks {
   /// Stores a small picture of [url]'s page; returns its file name.
   static Future<String> saveThumb(String url, Uint8List jpeg) async {
     final dir = await thumbDir();
-    if (dir == null || jpeg.isEmpty) return '';
+    if (dir == null) return '';
     final name = thumbName(url);
-    await File(p.join(dir.path, name)).writeAsBytes(jpeg, flush: true);
+    final file = File(p.join(dir.path, name));
+    await file.writeAsBytes(jpeg, flush: true);
+    await FileImage(file).evict();
+    await ResizeImage.resizeIfNeeded(192, null, FileImage(file)).evict();
+    pictureChanges.value++;
     return name;
+  }
+
+  static Future<Uint8List?> loadThumb(String key, {String? fallbackKey}) async {
+    final dir = await thumbDir();
+    if (dir == null) return null;
+    final file = File(p.join(dir.path, thumbName(key)));
+    if (!await file.exists()) {
+      return fallbackKey == null ? null : loadThumb(fallbackKey);
+    }
+    if (await file.length() == 0) return null;
+    return file.readAsBytes();
   }
 
   static Future<void> rename(String url, String title) =>
@@ -260,16 +281,23 @@ class Bookmarks {
 
   static Future<void> remove(String url) => _change((prefs) async {
     final all = await load();
-    final gone = all.where((b) => key(b.url) == key(url)).toList();
+    final hadPicture = all.any(
+      (b) => key(b.url) == key(url) && b.thumb.isNotEmpty,
+    );
     all.removeWhere((b) => key(b.url) == key(url));
     await _write(all);
-    for (final b in gone) {
-      if (b.thumb.isEmpty) continue;
+    if (!hadPicture) return;
+    try {
+      // A legacy screenshot can still be the fallback for saved subtitles.
+      final subs = await SubtitleStore.summaries();
+      if (subs.any((s) => key(s.page) == key(url))) return;
       final dir = await thumbDir();
-      final file = dir == null ? null : File(p.join(dir.path, b.thumb));
-      try {
-        if (file != null && file.existsSync()) file.deleteSync();
-      } catch (_) {}
+      if (dir == null) return;
+      final file = File(p.join(dir.path, thumbName(url)));
+      if (await file.exists()) await file.delete();
+      pictureChanges.value++;
+    } catch (_) {
+      // Preserve a shared picture if its remaining references cannot be read.
     }
   });
 

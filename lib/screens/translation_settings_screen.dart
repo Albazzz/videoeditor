@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/app_settings.dart';
 import '../services/openrouter_translator.dart';
+import '../widgets/vercel_credits.dart';
 
 /// Chooses between the offline translator and a language model on an AI
 /// service (OpenRouter, Vercel AI Gateway), with the user's own key.
@@ -203,6 +204,7 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
               trailing: const Icon(Icons.edit),
               onTap: () => _editKey(provider),
             ),
+            if (provider == kVercel) VercelCreditsPanel(apiKey: key),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
               child: Text('Model', style: theme.textTheme.titleSmall),

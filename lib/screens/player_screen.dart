@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
+import '../widgets/session_retry.dart';
+import '../services/bookmarks.dart';
 import '../models/cue.dart';
 import '../services/active_work.dart';
 import '../services/app_log.dart';
@@ -175,13 +177,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
   /// let go of the disposed session.
   void _onWorks() {
     final session = _session;
-    if (session == null || !ActiveWork.wasStopped(session)) return;
+    if (session == null ||
+        (!ActiveWork.wasStopped(session) && !ActiveWork.wasCompleted(session))) {
+      return;
+    }
     session.removeListener(_onSession);
     if (!mounted) return;
     setState(() {
       _cues = List.of(session.cues);
       _session = null;
       _saver = null;
+      _canResume = !ActiveWork.wasCompleted(session);
+      if (ActiveWork.wasCompleted(session)) _saved = true;
     });
   }
 
@@ -476,6 +483,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _showSubs = true;
     });
     await _keepCues(language: imported.language);
+    if (imported.picture != null) {
+      final id = widget.item == null
+          ? SubtitleStore.idForVideo(widget.page!, _input)
+          : 'file:${widget.item!.file.absolute.path}';
+      await Bookmarks.saveThumb(
+        Bookmarks.subtitlePictureKey(id),
+        imported.picture!,
+      );
+    }
     if (mounted) {
       toast(context, 'Đã nhập ${imported.cues.length} dòng phụ đề');
     }
@@ -679,6 +695,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ],
               ),
             ),
+            if (session != null) SessionRetryButton(session: session),
             PopupMenuButton<String>(
               tooltip: 'Phụ đề',
               icon: const Icon(Icons.subtitles_outlined, color: Colors.white),

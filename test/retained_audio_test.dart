@@ -186,7 +186,11 @@ void main() {
       ActiveWork.begin('A', 'Film', session);
       await session.start(0);
       await until(() => session.finished && worker.paths.length == 2);
-      await ActiveWork.stop(session);
+      await until(() => ActiveWork.wasCompleted(session));
+      expect(ActiveWork.find('A'), isNull);
+      expect(session.stopped, isFalse);
+      // Stop returns promptly; retained audio writers finish in the background.
+      await session.closeAudio();
       await until(() => Directory('${temp.path}/vsub').listSync().isEmpty);
       expect(worker.paths.every((path) => path.contains('vsub')), isTrue);
       final retained = (await store.list()).single;

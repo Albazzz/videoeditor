@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path/path.dart' as p;
 
+import '../widgets/session_retry.dart';
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/ad_block.dart';
@@ -31,6 +32,7 @@ import '../widgets/common.dart';
 import '../widgets/link_menu.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
+import '../widgets/picture_picker.dart';
 import '../widgets/subtitle_picker.dart';
 import '../widgets/session_progress.dart';
 import '../widgets/subtitle_style.dart';
@@ -313,6 +315,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     }
   }
 
+  Future<Uint8List?> _capturePage() async => _web?.takeScreenshot(
+    screenshotConfiguration: ScreenshotConfiguration(
+      compressFormat: CompressFormat.JPEG,
+      quality: 80,
+      snapshotWidth: 640,
+    ),
+  );
+
   Future<void> _toggleBookmark() async {
     final (page, title) = await _pageInfo();
     if (!mounted || !page.startsWith('http')) return;
@@ -320,24 +330,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       await Bookmarks.remove(page);
       if (mounted) toast(context, 'Đã bỏ lưu trang');
     } else {
-      // Ask where it goes; nothing is filed away without the user's say.
-      final place = await askBookmarkPlace(context, title);
+      Uint8List? picture;
+      try {
+        picture = await _capturePage();
+      } catch (_) {}
+      if (!mounted) return;
+      final place = await askBookmarkPlace(
+        context,
+        title,
+        initialPicture: picture,
+        capture: _capturePage,
+        onPicture: (v) => picture = v,
+      );
       if (place == null || !mounted) return;
       final (name, folder) = place;
-      // A small picture of the page for the saved-pages list.
-      var thumb = '';
-      try {
-        final shot = await _web?.takeScreenshot(
-          screenshotConfiguration: ScreenshotConfiguration(
-            compressFormat: CompressFormat.JPEG,
-            quality: 60,
-            snapshotWidth: 320,
-          ),
-        );
-        if (shot != null) thumb = await Bookmarks.saveThumb(page, shot);
-      } catch (e) {
-        AppLog.e('web', 'Không chụp được ảnh trang: $e');
-      }
+      final thumb = await Bookmarks.saveThumb(page, picture ?? Uint8List(0));
       final bookmark = await Bookmarks.add(
         page,
         name.isEmpty ? title : name,
@@ -510,15 +517,18 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         await Clipboard.setData(ClipboardData(text: link.text));
         if (mounted) toast(context, 'Đã sao chép chữ');
       case LinkAction.save:
+        Uint8List? picture;
         final place = await askBookmarkPlace(
           context,
           link.text.isEmpty ? (Uri.tryParse(link.href)?.host ?? '') : link.text,
+          onPicture: (v) => picture = v,
         );
         if (place == null) return;
         final saved = await Bookmarks.add(
           link.href,
           place.$1.isEmpty ? link.href : place.$1,
           folder: place.$2,
+          thumb: await Bookmarks.saveThumb(link.href, picture ?? Uint8List(0)),
         );
         if (mounted) {
           toast(
@@ -594,7 +604,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   /// player): let go of a stopped session and refresh the "being made" bar.
   void _onWorks() {
     final session = _session;
-    if (session != null && ActiveWork.wasStopped(session)) _onWorkStopped();
+    if (session != null &&
+        (ActiveWork.wasStopped(session) || ActiveWork.wasCompleted(session))) {
+      _onWorkStopped();
+    }
     if (mounted) setState(() {});
   }
 
@@ -613,7 +626,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (!mounted) return;
     if (cues.isNotEmpty) {
       _showFileCues(cues, _pageUrl, language, imported: false);
-      setState(() => _canCarryOn = _video?.playable ?? false);
+      setState(
+        () => _canCarryOn =
+            !ActiveWork.wasCompleted(session) && (_video?.playable ?? false),
+      );
     }
   }
 
@@ -709,7 +725,6 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   @override
   void dispose() {
     unawaited(_pageTr?.dispose());
-    unawaited(PageTranslations.flush());
     appSettings.removeListener(_onSettings);
     ActiveWork.all.removeListener(_onWorks);
     _slowLoad?.cancel();
@@ -1088,7 +1103,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (video == null) return;
     final (page, title) = await _pageInfo();
     if (!mounted || page.isEmpty) return;
-    final imported = await importSubtitleFile(context);
+    final imported = await importSubtitleFile(context, capture: _capturePage);
     if (imported == null ||
         !mounted ||
         _video?.src != video.src ||
@@ -1112,6 +1127,12 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         imported: true,
       ),
     );
+    if (imported.picture != null) {
+      await Bookmarks.saveThumb(
+        Bookmarks.subtitlePictureKey(SubtitleStore.idForVideo(page, video.src)),
+        imported.picture!,
+      );
+    }
     if (!mounted || _pageUrl != page || _video?.src != video.src) return;
     AppLog.i(
       'web',
@@ -1775,7 +1796,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   PageTranslator? _pageTr;
   bool _translating = false, _showOriginal = false;
 
-  /// Pages whose kept translation the user turned off in this tab.
+  /// Pages on which the user turned translation off in this tab.
   final _untranslated = <String>{};
 
   Future<Map<String, String>> _onTranslateRequest(Object? raw) async {
@@ -1804,7 +1825,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _translating = true;
       _showOriginal = false;
     });
-    final known = await PageTranslations.load(_pageUrl);
+    const known = <String, String>{};
     try {
       await web.evaluateJavascript(
         source:
@@ -1826,8 +1847,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (!quiet && mounted) toast(context, 'Đang dịch trang sang tiếng Việt');
   }
 
-  Future<void> _stopTranslating({bool forget = false}) async {
+  Future<void> _stopTranslating() async {
+    final translator = _pageTr;
     setState(() {
+      _pageTr = null;
       _translating = false;
       _showOriginal = false;
     });
@@ -1837,10 +1860,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         source: 'window.__vsubTr && window.__vsubTr.stop();',
       );
     } catch (_) {}
-    if (forget) {
-      await PageTranslations.delete(_pageUrl);
-      if (mounted) toast(context, 'Đã xoá bản dịch đã lưu của trang');
-    }
+    await translator?.dispose();
   }
 
   Future<void> _toggleOriginal() async {
@@ -1852,16 +1872,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     } catch (_) {}
   }
 
-  /// After a page loads: keep translating in a tab where it is on, and
-  /// translate pages translated before (their lines are kept, so no
-  /// request is repeated).
+  /// Continue translating while it is enabled in this open tab.
   Future<void> _translateIfWanted(String url) async {
     if (!url.startsWith('http')) return;
     if (_untranslated.contains(PageTranslations.key(url))) {
       if (_translating) setState(() => _translating = false);
       return;
     }
-    final again = _translating || await PageTranslations.has(url);
+    final again = _translating;
     if (!again || !mounted || url != _pageUrl) return;
     await _startTranslating(quiet: true);
   }
@@ -1901,17 +1919,21 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               onPressed: _toggleOriginal,
               child: Text(_showOriginal ? 'Bản dịch' : 'Bản gốc'),
             ),
-            PopupMenuButton<String>(
+            if (tr?.lastError.isNotEmpty ?? false)
+              TextButton(
+                onPressed: () async {
+                  await tr!.retry();
+                  await _web?.evaluateJavascript(
+                    source: 'window.__vsubTr && window.__vsubTr.retry();',
+                  );
+                  if (mounted) setState(() {});
+                },
+                child: const Text('Thử lại'),
+              ),
+            IconButton(
               tooltip: 'Tắt dịch trang',
               icon: const Icon(Icons.close, size: 18),
-              onSelected: (v) => _stopTranslating(forget: v == 'forget'),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'off', child: Text('Tắt dịch trang')),
-                PopupMenuItem(
-                  value: 'forget',
-                  child: Text('Tắt và xoá bản dịch đã lưu'),
-                ),
-              ],
+              onPressed: _stopTranslating,
             ),
           ],
         ),
@@ -2212,6 +2234,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               'home' => _go(kHomePage),
               'save' => _toggleBookmark(),
               'bookmarks' => _openBookmarks(),
+              'bookmarkPicture' => editStoredPicture(
+                context,
+                _pageUrl,
+                capture: _capturePage,
+              ),
               'clear' => _clearWebData(),
               'newtab' => widget.onNewTab(),
               'duplicate' => widget.onNewTab(url: _pageUrl),
@@ -2237,6 +2264,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                   title: Text('Mở trang này trong tab mới'),
                 ),
               ),
+              if (_bookmarked)
+                const PopupMenuItem(
+                  value: 'bookmarkPicture',
+                  child: Text('Đổi ảnh trang đã lưu…'),
+                ),
               const PopupMenuItem(
                 value: 'history',
                 child: ListTile(
@@ -2444,6 +2476,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                 alignment: WrapAlignment.end,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
+                  if (session != null) SessionRetryButton(session: session),
                   IconButton(
                     tooltip: 'Lùi 10 giây',
                     icon: const Icon(Icons.replay_10, size: 22),
@@ -2485,6 +2518,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                           ),
                         ),
                       ),
+                      'picture' => editStoredPicture(
+                        context,
+                        Bookmarks.subtitlePictureKey(
+                          SubtitleStore.idForVideo(_pageUrl, video.src),
+                        ),
+                        fallbackKey: _pageUrl,
+                        capture: _capturePage,
+                      ),
                       'language' => _changeLanguage(),
                       'revise' => _revise(),
                       'chooseVideo' => _chooseVideo(),
@@ -2505,6 +2546,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                       _ => null,
                     },
                     itemBuilder: (_) => [
+                      if (active)
+                        const PopupMenuItem(
+                          value: 'picture',
+                          child: Text('Đổi ảnh phụ đề…'),
+                        ),
                       const PopupMenuItem(
                         value: 'audio',
                         child: Text('Âm thanh lưu riêng…'),
@@ -2571,9 +2617,13 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                           child: Text('Phát trong app (toàn màn hình)'),
                         ),
                       if (active)
-                        const PopupMenuItem(
+                        PopupMenuItem(
                           value: 'remove',
-                          child: Text('Dừng dịch và bỏ phụ đề khỏi trang'),
+                          child: Text(
+                            session == null
+                                ? 'Bỏ phụ đề khỏi trang'
+                                : 'Dừng dịch và bỏ phụ đề khỏi trang',
+                          ),
                         ),
                     ],
                   ),

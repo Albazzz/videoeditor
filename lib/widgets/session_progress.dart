@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'session_retry.dart';
 import '../services/subtitle_session.dart';
 import '../services/subtitle_store.dart';
 import 'activity_icon.dart';
@@ -111,6 +112,7 @@ class _ProgressSheetState extends State<_ProgressSheet> {
                   const SizedBox(height: 8),
                   Row(
                     children: [
+                      SessionRetryButton(session: s),
                       const Spacer(),
                       TextButton(
                         onPressed: () => showSessionDetails(context, s),

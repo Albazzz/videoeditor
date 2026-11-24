@@ -41,6 +41,37 @@ và [lưu trữ hỗ trợ ứng dụng trên iOS](https://developer.apple.com/d
 Kiểm tra: `flutter test`, `dart analyze lib test`,
 `node --test test/page_script_test.mjs`.
 
+## Ảnh đại diện, bản dịch trang và thử lại
+
+- Khi lưu trang hoặc nhập phụ đề, có thể xem/chọn ảnh đại diện trước khi xác nhận.
+  Trong trình duyệt có thể chụp lại trang; trên điện thoại có thể chụp bằng camera.
+  Ảnh chụp được giữ trong dữ liệu riêng của app, không thêm vào thư viện ảnh.
+  Menu trang lưu và phụ đề cho phép đổi ảnh; ảnh phụ đề được giữ riêng theo video.
+- Nhãn **Có bản dịch** và **Có âm thanh** cho biết nội dung hiện có trong kho.
+  Tiến độ nhận dạng vẫn hiển thị riêng để phân biệt phần đã nghe với phần đã dịch.
+- Dịch nội dung trang chỉ giữ tạm trong tab đang mở. App không lưu bản dịch trang
+  lâu dài; dữ liệu `page_tr` của bản cũ được dọn khi khởi động, giữ nguyên phụ đề video.
+- Khi gặp lỗi, dùng **Thử lại** ở thanh video, tiến trình hoặc chi tiết phụ đề.
+  App giữ các đoạn đã nhận dạng và các câu đã dịch, rồi làm tiếp phần thiếu.
+  Nhập phụ đề bị lỗi một phần cũng cho thử lại hoặc nhập phần đã dịch.
+
+## Tiến trình nền và hoàn tất
+
+- Thanh tiến trình chỉ ghi **Sub: số video đã xong / tổng video hoàn thành**,
+  không gửi tên phim, URL hay key sang thông báo hệ thống. Số đếm chỉ tăng sau
+  khi lưu xong kết quả; video lỗi hoặc bị huỷ không được tính là hoàn thành.
+- iOS 26 trở lên dùng Continuous Background Task với Live Activity của hệ thống.
+  Cần build bằng Xcode 26 trở lên. iOS cũ hơn vẫn có thanh tiến trình trong app.
+  Huỷ từ Live Activity dừng các phiên và giữ dữ liệu đã làm.
+- Android dùng foreground service khi xử lý, với thông báo riêng không có tên
+  phim. Chạm thông báo mở kho phụ đề; thông báo kết thúc không còn giữ dịch vụ.
+- Khi đã nghe, dịch và lưu xong, phiên tự kết thúc, bỏ nút **Dừng dịch** và đưa
+  phụ đề web về **Chưa phân loại**. Âm thanh vẫn được giữ cho đến khi xác nhận xoá.
+  Bộ lọc **Chưa xoá âm thanh** giúp tìm những video cần kiểm tra/dọn âm thanh.
+- **Cài đặt → Cách dịch → Vercel AI Gateway → Số dư Vercel** đọc số USD còn lại
+  và tổng đã dùng bằng key đã nhập. Đây là số dư chung của nhóm Vercel gắn với key;
+  Token Pass hiển thị riêng nếu có. Có nút cập nhật, báo lỗi và thời điểm cập nhật.
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.

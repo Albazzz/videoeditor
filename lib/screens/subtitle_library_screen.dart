@@ -1,24 +1,23 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 
+import '../widgets/session_retry.dart';
 import '../services/active_work.dart';
 import '../services/open_page.dart';
 import '../widgets/activity_icon.dart';
-
 import '../models/cue.dart';
 import '../models/subtitle_file.dart';
 import '../services/app_settings.dart';
 import '../services/bookmarks.dart';
-import '../services/page_translation.dart';
 import '../services/retained_audio.dart';
 import '../services/subtitle_store.dart';
 import '../services/translator.dart';
 import '../services/video_library.dart';
 import '../widgets/bookmarks_sheet.dart';
 import '../widgets/common.dart';
+import '../widgets/picture_picker.dart';
+import '../widgets/asset_marks.dart';
 import '../widgets/folder_group.dart';
 import 'downloads_screen.dart';
 import 'retained_audio_screen.dart';
@@ -82,12 +81,11 @@ class SubtitleLibraryScreen extends StatefulWidget {
 class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   List<SubsInfo>? _web;
   List<(VideoItem, int)> _videos = [];
-  List<PageTranslationInfo> _translated = [];
+  final _videoTranslated = <String, bool>{};
   Map<String, String> _folderOf = {};
   Map<String, int> _audio = {};
   int _bytes = 0;
   String? _thumbs;
-  final _thumbSeen = <String, bool>{};
 
   /// Folders opened to show their subtitles.
   final _expanded = <String>{};
@@ -96,6 +94,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   final _picked = <String>{};
   bool get _picking => _picked.isNotEmpty;
   Timer? _soon;
+  String _filter = 'all';
 
   @override
   void didUpdateWidget(covariant SubtitleLibraryScreen oldWidget) {
@@ -111,13 +110,17 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       if (mounted && dir != null) setState(() => _thumbs = dir.path);
     });
     SubtitleStore.changes.addListener(_changedSoon);
-    PageTranslations.changes.addListener(_changedSoon);
+    RetainedAudioStore.changes.addListener(_changedSoon);
+    Bookmarks.pictureChanges.addListener(_changedSoon);
+    ActiveWork.all.addListener(_changedSoon);
   }
 
   @override
   void dispose() {
     SubtitleStore.changes.removeListener(_changedSoon);
-    PageTranslations.changes.removeListener(_changedSoon);
+    RetainedAudioStore.changes.removeListener(_changedSoon);
+    Bookmarks.pictureChanges.removeListener(_changedSoon);
+    ActiveWork.all.removeListener(_changedSoon);
     _soon?.cancel();
     super.dispose();
   }
@@ -137,10 +140,14 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       SubtitleStore.summaries(),
       SubtitleStore.storageBytes(),
       Bookmarks.subtitleFolders(),
-      PageTranslations.list(),
       RetainedAudioStore.instance
           .list()
-          .then<Object>((all) => {for (final a in all) a.videoId: a.bytes})
+          .then<Object>(
+            (all) => {
+              for (final a in all)
+                if (a.bytes > 0) a.videoId: a.bytes,
+            },
+          )
           .catchError((Object _) => <String, int>{}),
     ]);
     if (!mounted) return;
@@ -149,8 +156,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       _web = web;
       _bytes = results[1] as int;
       _folderOf = results[2] as Map<String, String>;
-      _translated = results[3] as List<PageTranslationInfo>;
-      _audio = results[4] as Map<String, int>;
+      _audio = results[3] as Map<String, int>;
       _picked.removeWhere((id) => !web.any((s) => s.id == id));
     });
     // Library videos after: the web list is already on screen.
@@ -159,7 +165,12 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     )).where((item) => item.srtFile.existsSync()).toList();
     final counts = await Future.wait([
       for (final item in items)
-        VideoLibrary.loadCues(item).then((c) => c.length),
+        VideoLibrary.loadCues(item).then((c) {
+          _videoTranslated[item.file.absolute.path] = c.any(
+            (line) => line.source.isEmpty || line.source != line.text,
+          );
+          return c.length;
+        }),
     ]);
     if (!mounted) return;
     setState(
@@ -214,36 +225,15 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   }
 
   /// The page's picture (taken when it was saved or its subtitles began).
-  Widget _picture(SubsInfo s) {
-    final dir = _thumbs;
-    final path = dir == null || !s.page.startsWith('http')
-        ? null
-        : p.join(dir, Bookmarks.thumbName(s.page));
-    // Looked up once, not on every rebuild of the list.
-    final exists =
-        path != null &&
-        _thumbSeen.putIfAbsent(path, () => File(path).existsSync());
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
-      child: SizedBox(
-        width: 64,
-        height: 40,
-        child: exists
-            ? Image.file(File(path), fit: BoxFit.cover, cacheWidth: 192)
-            : ColoredBox(
-                color: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.12),
-                child: Icon(
-                  s.page.startsWith('http')
-                      ? Icons.closed_caption
-                      : Icons.subtitles_outlined,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-              ),
-      ),
-    );
-  }
+  Widget _picture(SubsInfo s) => StoredPicture(
+    pictureKey: Bookmarks.subtitlePictureKey(s.id),
+    fallbackKey: s.page,
+    directory: _thumbs,
+    placeholder: const ColoredBox(
+      color: Color(0x223D7DFF),
+      child: Icon(Icons.subtitles_outlined),
+    ),
+  );
 
   /// Opens the page and carries on making its subtitles once the film
   /// plays there.
@@ -274,6 +264,13 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
 
   Future<void> _webAction(SubsInfo s, String action) async {
     switch (action) {
+      case 'picture':
+        await editStoredPicture(
+          context,
+          Bookmarks.subtitlePictureKey(s.id),
+          fallbackKey: s.page,
+        );
+        if (mounted) setState(() {});
       case 'view':
         await _view(s);
       case 'open':
@@ -504,12 +501,16 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
             ),
             const SizedBox(height: 4),
           ],
+          AssetMarks(
+            translated: s.lines > s.untranslated,
+            audio: (audio ?? 0) > 0,
+          ),
           Text(
             '${s.lines} dòng · '
             '${kLanguages[s.language] ?? s.language} · '
             '${_date(s.updated)}'
             '${s.untranslated > 0 ? ' · ${s.untranslated} câu chưa dịch' : ''}'
-            '${audio != null ? ' · âm thanh ${_size(audio)}' : ''}',
+            '${audio != null ? ' · chưa xoá âm thanh ${_size(audio)}' : ''}',
           ),
         ],
       ),
@@ -538,6 +539,10 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                       tooltip: 'Thêm',
                       onSelected: (v) => _webAction(s, v),
                       itemBuilder: (_) => [
+                        const PopupMenuItem(
+                          value: 'picture',
+                          child: Text('Đổi ảnh đại diện'),
+                        ),
                         const PopupMenuItem(
                           value: 'view',
                           child: Text('Xem / sửa phụ đề'),
@@ -618,35 +623,36 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     );
   }
 
-  Widget _translatedRow(PageTranslationInfo t) => ListTile(
-    leading: const Icon(Icons.g_translate),
-    title: Text(
-      t.title.isEmpty ? _host(t.page) : t.title,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
+  Widget _videoRow(VideoItem item, int count) => ListTile(
+    leading: StoredPicture(
+      pictureKey: Bookmarks.subtitlePictureKey(
+        'file:${item.file.absolute.path}',
+      ),
+      directory: _thumbs,
+      placeholder: const Icon(Icons.movie_outlined),
     ),
-    subtitle: Text('${_host(t.page)} · ${t.count} câu · ${_date(t.updated)}'),
-    onTap: () => requestOpenPage(t.page),
-    trailing: PopupMenuButton<String>(
-      tooltip: 'Thêm',
-      onSelected: (v) async {
-        if (v == 'open') requestOpenPage(t.page);
-        if (v == 'delete') {
-          await PageTranslations.delete(t.page);
-          await _reload();
-        }
-      },
-      itemBuilder: (_) => const [
-        PopupMenuItem(value: 'open', child: Text('Mở trang')),
-        PopupMenuItem(value: 'delete', child: Text('Xoá bản dịch trang')),
+    title: Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+    subtitle: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$count dòng phụ đề'),
+        AssetMarks(
+          translated: _videoTranslated[item.file.absolute.path] ?? false,
+          audio: (_audio['file:${item.file.absolute.path}'] ?? 0) > 0,
+        ),
       ],
     ),
-  );
-
-  Widget _videoRow(VideoItem item, int count) => ListTile(
-    leading: const Icon(Icons.movie_outlined),
-    title: Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-    subtitle: Text('$count dòng phụ đề'),
+    trailing: IconButton(
+      tooltip: 'Đổi ảnh đại diện',
+      icon: const Icon(Icons.image_outlined),
+      onPressed: () async {
+        await editStoredPicture(
+          context,
+          Bookmarks.subtitlePictureKey('file:${item.file.absolute.path}'),
+        );
+        if (mounted) setState(() {});
+      },
+    ),
     onTap: () async {
       final cues = await VideoLibrary.loadCues(item);
       if (!mounted) return;
@@ -668,9 +674,57 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     },
   );
 
+  Widget _filters() {
+    final web = _web ?? const <SubsInfo>[];
+    final unclassified =
+        web.where((s) => (_folderOf[s.id] ?? '').isEmpty).length +
+        _videos.length;
+    final retained =
+        web.where((s) => _audio.containsKey(s.id)).length +
+        _videos
+            .where((v) => _audio.containsKey('file:${v.$1.file.absolute.path}'))
+            .length;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          for (final choice in [
+            ('all', 'Tất cả'),
+            ('unclassified', 'Chưa phân loại ($unclassified)'),
+            ('audio', 'Chưa xoá âm thanh ($retained)'),
+          ])
+            ChoiceChip(
+              label: Text(choice.$2),
+              selected: _filter == choice.$1,
+              onSelected: (_) => setState(() => _filter = choice.$1),
+            ),
+        ],
+      ),
+    );
+  }
+
   /// Rows of the list, built only as they scroll into view.
   List<Widget Function()> _rows(List<SubsInfo> web) {
+    web = web
+        .where(
+          (s) => switch (_filter) {
+            'unclassified' => (_folderOf[s.id] ?? '').isEmpty,
+            'audio' => _audio.containsKey(s.id),
+            _ => true,
+          },
+        )
+        .toList();
+    final videos = _videos
+        .where(
+          (v) =>
+              _filter != 'audio' ||
+              _audio.containsKey('file:${v.$1.file.absolute.path}'),
+        )
+        .toList();
     final rows = <Widget Function()>[
+      if (!_picking) _filters,
       () => const _ActiveCard(),
       () => const _StoppedCards(),
     ];
@@ -710,7 +764,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       if (top.isNotEmpty) {
         rows.add(
           () => FolderGroupHeader(
-            title: 'Chưa có thư mục',
+            title: 'Chưa phân loại',
             subtitle: '${top.length} phụ đề',
             expanded: true,
           ),
@@ -722,17 +776,16 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         }
       }
     }
-    if (_translated.isNotEmpty && !_picking) {
-      rows.add(() => const _Section('Trang đã dịch'));
-      for (final t in _translated) {
-        rows.add(() => _translatedRow(t));
-      }
-    }
-    if (_videos.isNotEmpty && !_picking) {
+    if (videos.isNotEmpty && !_picking) {
       rows.add(() => const _Section('Video trong Thư viện'));
-      for (final (item, count) in _videos) {
+      for (final (item, count) in videos) {
         rows.add(() => _videoRow(item, count));
       }
+    }
+    if (web.isEmpty && videos.isEmpty) {
+      rows.add(
+        () => const ListTile(title: Text('Chưa có phụ đề trong mục này')),
+      );
     }
     return rows;
   }
@@ -845,10 +898,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         appBar: _appBar(web),
         body: web == null
             ? const Center(child: CircularProgressIndicator())
-            : web.isEmpty &&
-                  _videos.isEmpty &&
-                  _translated.isEmpty &&
-                  ActiveWork.current.value == null
+            : web.isEmpty && _videos.isEmpty && ActiveWork.current.value == null
             ? const Center(
                 child: Padding(
                   padding: EdgeInsets.all(32),
@@ -1295,6 +1345,7 @@ class _WorkCard extends StatelessWidget {
                   ),
                 ],
               ),
+              SessionRetryButton(session: session),
               Text(session.languageNotice),
               if (session.duration > 0)
                 CoverageBar(

@@ -1,8 +1,5 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -154,6 +151,10 @@ const String kTranslateScript = r'''
       }
       scan();
     },
+    retry: function () {
+      failed = {};
+      if (on) { scan(); pump(); }
+    },
     stop: function () {
       on = false;
       if (observer) observer.disconnect();
@@ -164,6 +165,7 @@ const String kTranslateScript = r'''
       }
       for (var j = 0; j < waiting.length; j++) waiting[j].__vsubWait = false;
       mine = []; waiting = []; originals = new WeakMap(); showing = true;
+      known = {}; failed = {};
     },
     show: function (translated) {
       showing = !!translated;
@@ -217,209 +219,22 @@ String guessLanguage(Iterable<String> texts) {
   return top.first.$2 == 0 ? 'en' : top.first.$1;
 }
 
-/// One page's translation as listed in the store.
-class PageTranslationInfo {
-  const PageTranslationInfo({
-    required this.id,
-    required this.page,
-    required this.title,
-    required this.count,
-    required this.updated,
-  });
-  final String id, page, title;
-  final int count;
-  final DateTime updated;
-}
-
-/// Translations of pages, kept so a page opens translated again without
-/// asking the AI twice (and so saved pages can show "Đã dịch trang").
+/// Removes page translations persisted by earlier versions. New translations
+/// live only in the open browser tab and are never written to disk.
 class PageTranslations {
   static Directory? overrideDir;
-
-  /// Bumped when a page's translation is written or deleted.
-  static final changes = ValueNotifier<int>(0);
-
-  static Future<Directory?> _dir() async {
-    try {
-      final base = overrideDir ?? await getApplicationSupportDirectory();
-      return Directory(p.join(base.path, 'page_tr'))
-        ..createSync(recursive: true);
-    } catch (_) {
-      return null;
-    }
-  }
 
   static String key(String page) =>
       Uri.tryParse(page)?.removeFragment().toString() ?? page.split('#').first;
 
-  static String idFor(String page) =>
-      sha1.convert(utf8.encode(key(page))).toString().substring(0, 24);
-
-  static final _maps = <String, Map<String, String>>{};
-  static final _titles = <String, String>{};
-  static final _writes = <String, Timer>{};
-  static Set<String>? _ids;
-
-  /// The translation kept for [page] (original → Vietnamese), or empty.
-  static Future<Map<String, String>> load(String page) async {
-    final id = idFor(page);
-    final cached = _maps[id];
-    if (cached != null) return cached;
-    final dir = await _dir();
-    final file = dir == null ? null : File(p.join(dir.path, '$id.map.gz'));
-    var map = <String, String>{};
-    if (file != null && await file.exists()) {
-      try {
-        final data = jsonDecode(
-          utf8.decode(gzip.decode(await file.readAsBytes())),
-        );
-        if (data is Map) map = data.map((k, v) => MapEntry('$k', '$v'));
-      } catch (e) {
-        AppLog.e('dịch trang', 'Không đọc được bản dịch đã lưu: $e');
-      }
-    }
-    return _maps[id] = map;
-  }
-
-  /// Whether [page] has a kept translation.
-  static Future<bool> has(String page) async =>
-      (await ids()).contains(idFor(page));
-
-  /// Ids of the pages with a kept translation.
-  static Future<Set<String>> ids() async {
-    final known = _ids;
-    if (known != null) return known;
-    final dir = await _dir();
-    final out = <String>{};
-    if (dir != null) {
-      await for (final e in dir.list()) {
-        final name = p.basename(e.path);
-        if (name.endsWith('.json')) out.add(name.substring(0, name.length - 5));
-      }
-    }
-    return _ids = out;
-  }
-
-  /// Adds new lines to [page]'s translation; written a moment later so a
-  /// page translating piece by piece is not written for every piece.
-  static Future<void> add(
-    String page,
-    String title,
-    Map<String, String> more,
-  ) async {
-    if (more.isEmpty) return;
-    final id = idFor(page);
-    final map = await load(page);
-    map.addAll(more);
-    if (title.isNotEmpty) _titles[id] = title;
-    _pages[id] = page;
-    (await ids()).add(id);
-    _writes[id]?.cancel();
-    _writes[id] = Timer(const Duration(seconds: 2), () {
-      _writes.remove(id);
-      unawaited(_write(id, page, map));
-    });
-  }
-
-  /// Writes pending translations now (tests, leaving a page).
-  static Future<void> flush() async {
-    final pending = Map.of(_writes);
-    for (final t in pending.values) {
-      t.cancel();
-    }
-    _writes.clear();
-    for (final id in pending.keys) {
-      final map = _maps[id];
-      final page = _pages[id];
-      if (map != null && page != null) await _write(id, page, map);
-    }
-  }
-
-  static final _pages = <String, String>{};
-
-  static Future<void> _write(
-    String id,
-    String page,
-    Map<String, String> map,
-  ) async {
-    _pages[id] = page;
-    final dir = await _dir();
-    if (dir == null) return;
-    try {
-      final mapFile = File(p.join(dir.path, '$id.map.gz'));
-      await mapFile.writeAsBytes(gzip.encode(utf8.encode(jsonEncode(map))));
-      await File(p.join(dir.path, '$id.json')).writeAsString(
-        jsonEncode({
-          'page': key(page),
-          'title': _titles[id] ?? '',
-          'count': map.length,
-          'updated': DateTime.now().millisecondsSinceEpoch,
-        }),
-      );
-      changes.value++;
-    } catch (e) {
-      AppLog.e('dịch trang', 'Chưa lưu được bản dịch trang: $e');
-    }
-  }
-
-  /// Every translated page, newest first.
-  static Future<List<PageTranslationInfo>> list() async {
-    final dir = await _dir();
-    if (dir == null) return const [];
-    final out = <PageTranslationInfo>[];
-    await for (final e in dir.list()) {
-      final name = p.basename(e.path);
-      if (e is! File || !name.endsWith('.json')) continue;
-      try {
-        final data = jsonDecode(await e.readAsString()) as Map;
-        out.add(
-          PageTranslationInfo(
-            id: name.substring(0, name.length - 5),
-            page: '${data['page'] ?? ''}',
-            title: '${data['title'] ?? ''}',
-            count: (data['count'] as num?)?.toInt() ?? 0,
-            updated: DateTime.fromMillisecondsSinceEpoch(
-              (data['updated'] as num?)?.toInt() ?? 0,
-            ),
-          ),
-        );
-      } catch (_) {}
-    }
-    out.sort((a, b) => b.updated.compareTo(a.updated));
-    return out;
-  }
-
-  /// Forgets [page]'s translation: it opens untranslated from now on.
-  static Future<void> delete(String page) async {
-    final id = idFor(page);
-    _writes.remove(id)?.cancel();
-    _maps.remove(id);
-    _ids?.remove(id);
-    final dir = await _dir();
-    if (dir != null) {
-      for (final name in ['$id.json', '$id.map.gz']) {
-        final f = File(p.join(dir.path, name));
-        if (await f.exists()) await f.delete();
-      }
-    }
-    changes.value++;
-  }
-
-  @visibleForTesting
-  static void resetCache() {
-    for (final t in _writes.values) {
-      t.cancel();
-    }
-    _writes.clear();
-    _maps.clear();
-    _titles.clear();
-    _pages.clear();
-    _ids = null;
+  static Future<void> clearLegacy() async {
+    final base = overrideDir ?? await getApplicationSupportDirectory();
+    final dir = Directory(p.join(base.path, 'page_tr'));
+    if (await dir.exists()) await dir.delete(recursive: true);
   }
 }
 
-/// Answers a page's requests for translations: from memory, then the
-/// page's kept translation, then the translator chosen in Settings.
+/// Answers translation requests using only this tab's in-memory cache.
 class PageTranslator {
   PageTranslator({Translator Function()? engine})
     : _make = engine ?? (() => Translator.create(force: true, forPage: true));
@@ -427,13 +242,23 @@ class PageTranslator {
   final Translator Function() _make;
   Translator? _engine;
 
-  /// Shared by all tabs: menus and tags repeat across a site's pages.
-  static final _memo = <String, String>{};
+  final _memo = <String, String>{};
 
   /// Lines being translated right now (for the bar on the page).
   final busy = ValueNotifier<int>(0);
   int translated = 0;
   String lastError = '';
+  bool _disposed = false;
+  int _generation = 0;
+
+  Future<void> retry() async {
+    if (_disposed) return;
+    _generation++;
+    final old = _engine;
+    _engine = null;
+    lastError = '';
+    await old?.dispose();
+  }
 
   Future<Map<String, String>> translate(
     List<String> texts, {
@@ -441,11 +266,12 @@ class PageTranslator {
     String title = '',
     String htmlLang = '',
   }) async {
+    if (_disposed) return {};
+    final generation = _generation;
     final out = <String, String>{};
-    final kept = await PageTranslations.load(page);
     final missing = <String>[];
     for (final t in texts) {
-      final hit = _memo[t] ?? kept[t];
+      final hit = _memo[t];
       if (hit != null) {
         out[t] = hit;
       } else {
@@ -461,30 +287,36 @@ class PageTranslator {
           lang = guessLanguage(missing);
         }
         final got = await engine.translateBatch(missing, lang);
+        if (_disposed || generation != _generation) return {};
         for (var i = 0; i < missing.length && i < got.length; i++) {
           final v = got[i]?.trim();
           if (v != null && v.isNotEmpty) out[missing[i]] = v;
         }
-        lastError = '';
+        lastError =
+            got.length < missing.length ||
+                got.any((v) => v == null || v.trim().isEmpty)
+            ? 'Một số câu chưa dịch được'
+            : '';
       } catch (e) {
+        if (_disposed || generation != _generation) return {};
         lastError = '$e';
         AppLog.e('dịch trang', lastError);
       } finally {
-        busy.value -= missing.length;
+        if (!_disposed) busy.value -= missing.length;
       }
     }
+    if (_disposed) return {};
     if (_memo.length > 20000) _memo.clear();
     _memo.addAll(out);
     translated += out.length;
-    await PageTranslations.add(page, title, out);
     return out;
   }
 
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    _memo.clear();
     busy.dispose();
     await _engine?.dispose();
   }
-
-  @visibleForTesting
-  static void clearMemo() => _memo.clear();
 }

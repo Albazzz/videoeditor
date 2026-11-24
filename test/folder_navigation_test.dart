@@ -194,7 +194,7 @@ void main() {
     await settleFiles(tester);
     await tester.tap(find.text('Phim'));
     await settleFiles(tester);
-    expect(find.text('Chưa có thư mục'), findsOneWidget);
+    expect(find.text('Chưa phân loại'), findsOneWidget);
     expect(
       find.ancestor(
         of: find.text('Phụ đề trong thư mục'),

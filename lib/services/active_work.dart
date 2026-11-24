@@ -5,6 +5,8 @@ import 'subtitle_session.dart';
 import 'subtitle_store.dart';
 import 'keep_awake.dart';
 import 'app_log.dart';
+import 'background_subtitles.dart';
+import 'bookmarks.dart';
 
 /// The subtitles being made right now, if any, so other screens (the
 /// subtitle store) can show their progress.
@@ -25,26 +27,29 @@ class ActiveWork {
   final SessionSaver? saver;
   final Future<void> Function(SubtitleSession)? onSave;
   final bool hidden;
-  bool _closing = false;
+  bool _finishing = false;
+  Future<void> _saving = Future.value();
   Timer? _saveTimer;
   int _savedRevision = -1;
   late final VoidCallback _listener = _changed;
 
   void _changed() {
     KeepAwake.hold(this, KeepAwake.needed(session));
-    if (session.activity == SessionActivity.done) {
-      unawaited(
-        session.markAudioCompleted().catchError((Object error) {
-          AppLog.e('âm thanh', 'Chưa lưu được trạng thái: $error');
-        }),
-      );
-      unawaited(_persist());
+    BackgroundSubtitles.instance.update(
+      session,
+      active: session.activity != SessionActivity.failed && !session.stopped,
+      fraction: session.progressFraction,
+    );
+    if (session.readyToFinish &&
+        !_finishing &&
+        !_stopping.containsKey(session)) {
+      _finishing = true;
+      unawaited(_finish());
     }
   }
 
-  Future<void> _persist() async {
-    if (_closing || _savedRevision == session.cueRevision) return;
-    _closing = true;
+  Future<void> _persist() => _saving = _saving.then((_) async {
+    if (_finishing || _savedRevision == session.cueRevision) return;
     final revision = session.cueRevision;
     try {
       await saver?.save();
@@ -52,8 +57,35 @@ class ActiveWork {
       _savedRevision = revision;
     } catch (e) {
       AppLog.e('phụ đề', 'Chưa lưu được phiên $id: $e');
+    }
+  });
+
+  Future<void> _finish() async {
+    _saveTimer?.cancel();
+    try {
+      // Yield before detaching or disposing: this can start inside notifyListeners.
+      await _saving;
+      if (!session.readyToFinish || _stopping.containsKey(session)) return;
+      await saver?.close();
+      await onSave?.call(session);
+      if (!session.readyToFinish || _stopping.containsKey(session)) return;
+      await session.markAudioCompleted();
+      await session.closeAudio();
+      if (!session.readyToFinish || _stopping.containsKey(session)) return;
+      if (saver != null) await Bookmarks.moveSubtitles([id], '');
+      if (session.stopped || !_running.containsKey(session)) return;
+      _completedSessions[session] = true;
+      BackgroundSubtitles.instance.finish(session);
+      forgetStopped(id);
+      end(session);
+      session.dispose();
+    } catch (e) {
+      AppLog.e('phụ đề', 'Chưa hoàn tất lưu phiên: $e');
+      if (_running.containsKey(session) && !session.stopped) {
+        session.reportSaveFailure(e);
+      }
     } finally {
-      _closing = false;
+      _finishing = false;
     }
   }
 
@@ -126,6 +158,7 @@ class ActiveWork {
       hidden: hidden,
     );
     _running[session] = work;
+    BackgroundSubtitles.instance.begin(session);
     forgetStopped(id);
     session.addListener(work._listener);
     work._saveTimer = Timer.periodic(
@@ -140,6 +173,9 @@ class ActiveWork {
   /// Work the user stopped, kept as cards with "Làm tiếp" until hidden.
   static final stopped = ValueNotifier<List<StoppedWork>>(const []);
   static final _stoppedSessions = Expando<bool>();
+  static final _completedSessions = Expando<bool>();
+  static bool wasCompleted(SubtitleSession session) =>
+      _completedSessions[session] == true;
 
   /// The user stopped this session (screens showing it should let go).
   static bool wasStopped(SubtitleSession session) =>
@@ -156,6 +192,7 @@ class ActiveWork {
   /// a stuck write or network never keeps the button from working).
   static Future<void> stop(SubtitleSession? session) {
     if (session == null) return Future.value();
+    if (wasCompleted(session)) return Future.value();
     if (_stopping[session] case final Future<void> pending) return pending;
     final work = _running[session];
     // Already stopped elsewhere but still listed: finish the job anyway.
@@ -232,6 +269,7 @@ class ActiveWork {
       work._saveTimer?.cancel();
       work.session.removeListener(work._listener);
       KeepAwake.hold(work, false);
+      if (!wasCompleted(session!)) BackgroundSubtitles.instance.cancel(session);
       all.value = List.unmodifiable(_running.values);
     }
     if (session != null && current.value?.session == session) {

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/cue.dart';
 import 'subtitle_session.dart';
+import 'app_log.dart';
 
 /// Joins overlapping or touching ranges and sorts them.
 List<(double, double)> mergeRanges(List<(double, double)> ranges) {
@@ -702,8 +703,10 @@ class SessionSaver {
   bool _savedFinished = false;
   double _savedCovered = 0;
   Timer? _timer;
+  bool _closed = false;
 
   void _changed() {
+    if (_closed) return;
     final moved = coveredSeconds(session.covered) - _savedCovered > 60;
     if (session.cueRevision == _savedRevision &&
         session.finished == _savedFinished &&
@@ -713,18 +716,23 @@ class SessionSaver {
     // Lines arrive in bursts; one write a few seconds later covers them.
     _timer ??= Timer(const Duration(seconds: 5), () {
       _timer = null;
-      save();
+      unawaited(
+        save().catchError((Object e) {
+          AppLog.e('phụ đề', 'Chưa lưu được phụ đề: $e');
+        }),
+      );
     });
   }
 
   Future<void> _pending = Future.value();
   Future<void> save() {
-    _pending = _pending.then((_) => _save());
-    return _pending;
+    final saving = _pending.then((_) => _save());
+    _pending = saving.catchError((Object _) {});
+    return saving;
   }
 
   Future<void> _save() async {
-    if (session.cues.isEmpty) return;
+    if (session.cues.isEmpty && !session.finished) return;
     final previous = await SubtitleStore.load(id);
     // Snapshot after the disk lookup so a user revision accepted during that
     // lookup cannot be overwritten by an older background snapshot.
@@ -761,11 +769,15 @@ class SessionSaver {
               : (previous?.pageTitle ?? ''),
         ),
       );
-    } catch (_) {}
+    } catch (e) {
+      AppLog.e('phụ đề', 'Chưa lưu được kết quả: $e');
+      rethrow;
+    }
   }
 
   /// Call before the session is disposed.
   Future<void> close() {
+    _closed = true;
     _timer?.cancel();
     session.removeListener(_changed);
     return save();
@@ -779,6 +791,7 @@ class PageSubs {
     required this.whole,
     required this.progress,
     required this.canResume,
+    this.translated = 0,
   });
 
   /// [s] added to what is already known for the page ([before]).
@@ -790,10 +803,12 @@ class PageSubs {
       whole: s.isWholeVideo || (before?.whole ?? false),
       progress: p == null ? b : (b == null || p > b ? p : b),
       canResume: s.canResume || (before?.canResume ?? false),
+      translated: s.lines - s.untranslated + (before?.translated ?? 0),
     );
   }
 
   final int lines;
+  final int translated;
   final bool whole;
   final double? progress;
   final bool canResume;

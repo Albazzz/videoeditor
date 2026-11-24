@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import BackgroundTasks
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -8,6 +9,7 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    registerSubtitleProgress()
     installCrashLog()
     installPrivacyCover()
     return launched
@@ -15,6 +17,9 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "VsubSubtitleProgress") {
+      installSubtitleProgressChannel(registrar.messenger())
+    }
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "VsubNet") {
       installNetChannel(registrar.messenger())
     }
@@ -23,6 +28,106 @@ import UIKit
     }
   }
 }
+
+private var subtitleProgressChannel: FlutterMethodChannel?
+#if compiler(>=6.2)
+private var subtitleProgressTask: AnyObject?
+#endif
+
+private func registerSubtitleProgress() {
+  #if compiler(>=6.2)
+  if #available(iOS 26.0, *) {
+    subtitleProgressTask = ContinuedSubtitleProgress()
+  }
+  #endif
+}
+
+private func installSubtitleProgressChannel(_ messenger: FlutterBinaryMessenger) {
+  let channel = FlutterMethodChannel(name: "vsub/subtitle_progress", binaryMessenger: messenger)
+  subtitleProgressChannel = channel
+  channel.setMethodCallHandler { call, result in
+    if call.method == "opened" { result(false); return }
+    guard call.method == "update", let counts = call.arguments as? [String: Any] else {
+      result(FlutterMethodNotImplemented); return
+    }
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *), let task = subtitleProgressTask as? ContinuedSubtitleProgress {
+      do { try task.update(counts); result(nil) }
+      catch { result(FlutterError(code: "subtitle_progress", message: "iOS chưa cho phép hiển thị tiến trình nền", details: nil)) }
+      return
+    }
+    #endif
+    // Earlier iOS versions keep the anonymous progress bar inside the app.
+    result(nil)
+  }
+}
+
+#if compiler(>=6.2)
+@available(iOS 26.0, *)
+private final class ContinuedSubtitleProgress {
+  private let identifier = (Bundle.main.bundleIdentifier ?? "com.example.video") + ".subtitles.*"
+  private var submitted: String?
+  private var task: BGContinuedProcessingTask?
+  private var completed = 0, total = 0, progress = 0
+  private var active = false
+  private var registered = false
+  private var label: String { "\(completed)/\(total) hoàn thành" }
+
+  init() {
+    registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] received in
+      guard let self, let received = received as? BGContinuedProcessingTask else {
+        received.setTaskCompleted(success: false); return
+      }
+      guard self.active, self.submitted == received.identifier else {
+        received.setTaskCompleted(success: self.total > 0 && self.completed == self.total); return
+      }
+      self.task = received
+      received.expirationHandler = { [weak self, weak received] in
+        DispatchQueue.main.async {
+          guard let self, let received, self.task === received else { return }
+          received.setTaskCompleted(success: false)
+          self.task = nil
+          self.submitted = nil
+          self.active = false
+          subtitleProgressChannel?.invokeMethod("cancel", arguments: nil)
+        }
+      }
+      self.refresh()
+    }
+  }
+
+  func update(_ counts: [String: Any]) throws {
+    total = max(0, counts["total"] as? Int ?? 0)
+    completed = min(total, max(0, counts["completed"] as? Int ?? 0))
+    progress = min(10000, max(0, counts["progress"] as? Int ?? 0))
+    active = counts["active"] as? Bool == true && total > 0
+    if !active {
+      task?.updateTitle("Sub", subtitle: label)
+      if total > 0 && completed == total { task?.progress.completedUnitCount = 10000 }
+      task?.setTaskCompleted(success: total > 0 && completed == total)
+      task = nil
+      if let submitted { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: submitted) }
+      submitted = nil
+      return
+    }
+    if task != nil { refresh(); return }
+    if submitted != nil || UIApplication.shared.applicationState != .active { return }
+    guard registered else { throw NSError(domain: "subtitle_progress", code: 1) }
+    let job = String(identifier.dropLast()) + UUID().uuidString
+    let request = BGContinuedProcessingTaskRequest(identifier: job, title: "Sub", subtitle: label)
+    request.strategy = .fail
+    submitted = job
+    do { try BGTaskScheduler.shared.submit(request) }
+    catch { submitted = nil; throw error }
+  }
+
+  private func refresh() {
+    task?.progress.totalUnitCount = 10000
+    task?.progress.completedUnitCount = Int64(min(progress, 9999))
+    task?.updateTitle("Sub", subtitle: label)
+  }
+}
+#endif
 
 private func installPrivateAudioChannel(_ messenger: FlutterBinaryMessenger) {
   let channel = FlutterMethodChannel(name: "vsub/private_audio", binaryMessenger: messenger)

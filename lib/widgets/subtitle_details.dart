@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'session_retry.dart';
 import '../models/cue.dart';
 import '../services/subtitle_session.dart';
 import '../services/active_work.dart';
@@ -119,6 +120,7 @@ Future<void> showSessionDetails(BuildContext context, SubtitleSession session) {
                       ),
                       const SizedBox(height: 8),
                       Text(session.languageNotice),
+                      SessionRetryButton(session: session),
                       TextButton.icon(
                         icon: const Icon(Icons.lock_outline),
                         label: const Text(

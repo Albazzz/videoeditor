@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 
 import '../services/bookmarks.dart';
 import '../services/open_page.dart';
-import '../services/page_translation.dart';
+import '../services/retained_audio.dart';
+import 'picture_picker.dart';
+import 'asset_marks.dart';
 import '../services/subtitle_store.dart';
 import 'common.dart';
 import 'folder_group.dart';
@@ -37,11 +38,16 @@ Future<String?> showBookmarks(BuildContext context) {
 /// (with a way to make a new one). Returns (title, folder) or null.
 Future<(String, String)?> askBookmarkPlace(
   BuildContext context,
-  String title,
-) async {
+  String title, {
+  Uint8List? initialPicture,
+  CapturePicture? capture,
+  ValueChanged<Uint8List?>? onPicture,
+}) async {
   final folders = await Bookmarks.folders();
   var folder = await Bookmarks.lastFolder();
   if (!context.mounted) return null;
+  var picture = initialPicture;
+  var busy = false;
   final name = TextEditingController(text: title);
   final result = await showDialog<(String, String)>(
     context: context,
@@ -53,6 +59,13 @@ Future<(String, String)?> askBookmarkPlace(
           child: ListView(
             shrinkWrap: true,
             children: [
+              PicturePicker(
+                initial: initialPicture,
+                capture: capture,
+                onChanged: (v) => picture = v,
+                onBusy: (v) => setState(() => busy = v),
+              ),
+              const SizedBox(height: 12),
               ClearableField(controller: name, label: 'Tên trang'),
               const SizedBox(height: 8),
               RadioGroup<String>(
@@ -95,13 +108,16 @@ Future<(String, String)?> askBookmarkPlace(
             child: const Text('Huỷ'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(ctx, (name.text.trim(), folder)),
+            onPressed: busy
+                ? null
+                : () => Navigator.pop(ctx, (name.text.trim(), folder)),
             child: const Text('Lưu'),
           ),
         ],
       ),
     ),
   );
+  if (result != null) onPicture?.call(picture);
   return result;
 }
 
@@ -185,7 +201,6 @@ class BookmarksView extends StatefulWidget {
 class _BookmarksViewState extends State<BookmarksView> {
   List<Bookmark>? _all;
   String? _thumbs;
-  final _thumbSeen = <String, bool>{};
   List<String> _folders = [];
   final _expanded = <String>{};
   bool _restoredFolders = false;
@@ -199,8 +214,7 @@ class _BookmarksViewState extends State<BookmarksView> {
   /// Pages with subtitles in the store, by address.
   Map<String, PageSubs> _subs = const {};
 
-  /// Pages translated before (ids from [PageTranslations.idFor]).
-  Set<String> _translated = const {};
+  Set<String> _audioPages = const {};
   Timer? _subsSoon;
 
   @override
@@ -232,13 +246,15 @@ class _BookmarksViewState extends State<BookmarksView> {
     super.initState();
     _load();
     SubtitleStore.changes.addListener(_onSubsChanged);
-    PageTranslations.changes.addListener(_onSubsChanged);
+    RetainedAudioStore.changes.addListener(_onSubsChanged);
+    Bookmarks.pictureChanges.addListener(_onPictureChanged);
   }
 
   @override
   void dispose() {
     SubtitleStore.changes.removeListener(_onSubsChanged);
-    PageTranslations.changes.removeListener(_onSubsChanged);
+    RetainedAudioStore.changes.removeListener(_onSubsChanged);
+    Bookmarks.pictureChanges.removeListener(_onPictureChanged);
     _subsSoon?.cancel();
     _search.dispose();
     super.dispose();
@@ -253,14 +269,32 @@ class _BookmarksViewState extends State<BookmarksView> {
     });
   }
 
+  void _onPictureChanged() {
+    if (mounted) setState(() {});
+  }
+
   Future<void> _loadSubs() async {
     try {
       final marks = await SubtitleStore.pageMarks();
-      final translated = Set.of(await PageTranslations.ids());
+      if (mounted) setState(() => _subs = marks);
+      final audio = await RetainedAudioStore.instance.list().catchError(
+        (Object _) => <RetainedAudio>[],
+      );
+      final ids = {
+        for (final a in audio)
+          if (a.bytes > 0) a.videoId,
+      };
+      final summaries = ids.isEmpty
+          ? <SubsInfo>[]
+          : await SubtitleStore.summaries();
+      final pages = {
+        for (final sub in summaries)
+          if (ids.contains(sub.id)) SubtitleStore.pageKey(sub.page),
+      };
       if (mounted) {
         setState(() {
           _subs = marks;
-          _translated = translated;
+          _audioPages = pages;
         });
       }
     } catch (_) {
@@ -326,6 +360,8 @@ class _BookmarksViewState extends State<BookmarksView> {
 
   Future<void> _pageAction(Bookmark b, String action) async {
     switch (action) {
+      case 'picture':
+        await editStoredPicture(context, b.url);
       case 'rename':
         final title = await _askName(context, 'Đổi tên trang', b.title);
         if (title != null) await Bookmarks.rename(b.url, title);
@@ -377,31 +413,19 @@ class _BookmarksViewState extends State<BookmarksView> {
     if (!_picked.remove(url)) _picked.add(url);
   });
 
-  Widget _picture(Bookmark b) {
-    final dir = _thumbs;
-    final path = b.thumb.isEmpty || dir == null ? null : p.join(dir, b.thumb);
-    // Looked up once, not on every rebuild of the list.
-    final exists =
-        path != null &&
-        _thumbSeen.putIfAbsent(path, () => File(path).existsSync());
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
-      child: SizedBox(
-        width: 64,
-        height: 40,
-        child: exists
-            ? Image.file(File(path), fit: BoxFit.cover, cacheWidth: 192)
-            : const ColoredBox(
-                color: Color(0x22FFC107),
-                child: Icon(Icons.star, color: Colors.amber),
-              ),
-      ),
-    );
-  }
+  Widget _picture(Bookmark b) => StoredPicture(
+    pictureKey: b.url,
+    directory: _thumbs,
+    placeholder: const ColoredBox(
+      color: Color(0x22FFC107),
+      child: Icon(Icons.star, color: Colors.amber),
+    ),
+  );
 
   Widget _page(Bookmark b) {
     final subs = _subs[SubtitleStore.pageKey(b.url)];
-    final translated = _translated.contains(PageTranslations.idFor(b.url));
+    final translated = (subs?.translated ?? 0) > 0;
+    final audio = _audioPages.contains(SubtitleStore.pageKey(b.url));
     final picked = _picked.contains(b.url);
     return ListTile(
       selected: picked,
@@ -413,7 +437,7 @@ class _BookmarksViewState extends State<BookmarksView> {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      subtitle: subs == null && !translated
+      subtitle: subs == null && !audio
           ? Text(b.host)
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -425,7 +449,7 @@ class _BookmarksViewState extends State<BookmarksView> {
                   runSpacing: 4,
                   children: [
                     if (subs != null) SubsMark(subs),
-                    if (translated) const TranslatedMark(),
+                    AssetMarks(translated: translated, audio: audio),
                   ],
                 ),
               ],
@@ -437,6 +461,10 @@ class _BookmarksViewState extends State<BookmarksView> {
               onSelected: (v) => _pageAction(b, v),
               itemBuilder: (_) => const [
                 PopupMenuItem(value: 'newtab', child: Text('Mở trong tab mới')),
+                PopupMenuItem(
+                  value: 'picture',
+                  child: Text('Đổi ảnh đại diện'),
+                ),
                 PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
                 PopupMenuItem(
                   value: 'move',
@@ -619,39 +647,6 @@ class _BookmarksViewState extends State<BookmarksView> {
                     itemCount: rows.length,
                     itemBuilder: (context, i) => rows[i](),
                   ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// "Đã dịch trang": the page's own text was translated before and opens
-/// translated again.
-class TranslatedMark extends StatelessWidget {
-  const TranslatedMark({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    const color = Colors.teal;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.g_translate, size: 14, color: color),
-          SizedBox(width: 4),
-          Text(
-            'Đã dịch trang',
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontWeight: FontWeight.w600,
-            ),
           ),
         ],
       ),

@@ -7,15 +7,23 @@ import 'screens/settings_screen.dart';
 import 'screens/subtitle_library_screen.dart';
 import 'screens/log_screen.dart';
 import 'services/active_work.dart';
+import 'services/background_subtitles.dart';
+import 'widgets/background_subtitles_bar.dart';
 import 'services/app_log.dart';
 import 'services/app_settings.dart';
 import 'services/open_page.dart';
+import 'services/page_translation.dart';
 import 'services/crash_trail.dart';
 import 'services/subtitle_session.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppLog.init();
+  try {
+    await PageTranslations.clearLegacy();
+  } catch (e) {
+    AppLog.e('dịch trang', 'Chưa dọn được bản dịch trang cũ: $e');
+  }
   final crash = await CrashTrail.init();
   if (crash != null) {
     AppLog.e(
@@ -23,6 +31,14 @@ Future<void> main() async {
       'Lần trước app tắt giữa chừng khi đang: ${crash.steps.join(' / ')}',
     );
   }
+  BackgroundSubtitles.instance.initialize(
+    onCancel: () async {
+      for (final work in List.of(ActiveWork.all.value)) {
+        await ActiveWork.stop(work.session);
+      }
+    },
+    onOpen: () => openSubtitleLibrary.value++,
+  );
   runApp(VideoSubApp(crash: crash));
 }
 
@@ -58,6 +74,9 @@ class _VideoSubAppState extends State<VideoSubApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      BackgroundSubtitles.instance.refreshNative();
+    }
     // Leaving the app locks it again.
     if (state == AppLifecycleState.paused && _hasKey == true && !_locked) {
       setState(() => _locked = true);
@@ -124,7 +143,17 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     openPageRequest.removeListener(_toBrowser);
     openPagesRequest.removeListener(_toBrowser);
+    openSubtitleLibrary.removeListener(_toSubtitles);
     super.dispose();
+  }
+
+  void _toSubtitles() {
+    if (mounted) {
+      setState(() {
+        _subsVisit++;
+        _tab = 2;
+      });
+    }
   }
 
   /// Bumped on every visit so the subtitle list reloads.
@@ -136,6 +165,8 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     openPageRequest.addListener(_toBrowser);
     openPagesRequest.addListener(_toBrowser);
+    openSubtitleLibrary.addListener(_toSubtitles);
+    if (openSubtitleLibrary.value > 0) _tab = 2;
     final crash = widget.crash;
     if (crash != null || AppLog.previousNativeCrash != null) {
       WidgetsBinding.instance.addPostFrameCallback(
@@ -207,41 +238,47 @@ class _HomeScreenState extends State<HomeScreen> {
           _tab == 0 &&
               MediaQuery.orientationOf(context) == Orientation.landscape
           ? null
-          : NavigationBar(
-              height: 60,
-              selectedIndex: _tab,
-              onDestinationSelected: (i) => setState(() {
-                if (i == 2 && _tab != 2) _subsVisit++;
-                if (i == 1 && _tab != 1) _savedVisit++;
-                _tab = i;
-              }),
-              destinations: [
-                NavigationDestination(
-                  icon: Icon(Icons.public),
-                  label: 'Xem web',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.bookmarks_outlined),
-                  label: 'Trang lưu',
-                ),
-                NavigationDestination(
-                  // How many films are having subtitles made right now.
-                  icon: ValueListenableBuilder(
-                    valueListenable: ActiveWork.all,
-                    builder: (context, works, _) {
-                      final n = works.where((w) => !w.hidden).length;
-                      return Badge(
-                        isLabelVisible: n > 0,
-                        label: Text('$n'),
-                        child: const Icon(Icons.subtitles_outlined),
-                      );
-                    },
-                  ),
-                  label: 'Phụ đề',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  label: 'Cài đặt',
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                BackgroundSubtitlesBar(onOpen: _toSubtitles),
+                NavigationBar(
+                  height: 60,
+                  selectedIndex: _tab,
+                  onDestinationSelected: (i) => setState(() {
+                    if (i == 2 && _tab != 2) _subsVisit++;
+                    if (i == 1 && _tab != 1) _savedVisit++;
+                    _tab = i;
+                  }),
+                  destinations: [
+                    NavigationDestination(
+                      icon: Icon(Icons.public),
+                      label: 'Xem web',
+                    ),
+                    NavigationDestination(
+                      icon: Icon(Icons.bookmarks_outlined),
+                      label: 'Trang lưu',
+                    ),
+                    NavigationDestination(
+                      // How many films are having subtitles made right now.
+                      icon: ValueListenableBuilder(
+                        valueListenable: ActiveWork.all,
+                        builder: (context, works, _) {
+                          final n = works.where((w) => !w.hidden).length;
+                          return Badge(
+                            isLabelVisible: n > 0,
+                            label: Text('$n'),
+                            child: const Icon(Icons.subtitles_outlined),
+                          );
+                        },
+                      ),
+                      label: 'Phụ đề',
+                    ),
+                    NavigationDestination(
+                      icon: Icon(Icons.settings_outlined),
+                      label: 'Cài đặt',
+                    ),
+                  ],
                 ),
               ],
             ),

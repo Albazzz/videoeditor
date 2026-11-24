@@ -56,3 +56,6 @@ void requestResumeAll(List<String> pages) {
   }
   requestOpenPages(pages);
 }
+
+/// Opens the subtitle library without exposing any page in system notifications.
+final openSubtitleLibrary = ValueNotifier<int>(0);

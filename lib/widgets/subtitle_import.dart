@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import '../models/subtitle_file.dart';
 import '../services/app_settings.dart';
 import '../services/translator.dart';
 import 'common.dart';
+import 'picture_picker.dart';
 
 /// Subtitles read from a file, translated to Vietnamese when asked.
 class ImportedSubtitles {
@@ -16,6 +18,7 @@ class ImportedSubtitles {
     required this.cues,
     required this.language,
     required this.fileName,
+    this.picture,
   });
 
   /// [Cue.text] is Vietnamese (or the original when not translated),
@@ -23,11 +26,15 @@ class ImportedSubtitles {
   final List<Cue> cues;
   final String language;
   final String fileName;
+  final Uint8List? picture;
 }
 
 /// Lets the user pick a subtitle file, check its language and translate it.
 /// Returns null when cancelled.
-Future<ImportedSubtitles?> importSubtitleFile(BuildContext context) async {
+Future<ImportedSubtitles?> importSubtitleFile(
+  BuildContext context, {
+  CapturePicture? capture,
+}) async {
   // Any type: iOS greys out .srt/.ass when filtering by extension.
   final picked = await FilePicker.pickFiles(type: FileType.any);
   final path = picked.isEmpty ? null : picked.first.path;
@@ -61,32 +68,43 @@ Future<ImportedSubtitles?> importSubtitleFile(BuildContext context) async {
     return null;
   }
 
-  final choice = await showModalBottomSheet<(String, bool)>(
+  final choice = await showModalBottomSheet<(String, bool, Uint8List?)>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) => _ImportSheet(fileName: p.basename(path), cues: cues),
+    builder: (_) =>
+        _ImportSheet(fileName: p.basename(path), cues: cues, capture: capture),
   );
   if (choice == null || !context.mounted) return null;
-  final (language, translate) = choice;
+  final (language, translate, picture) = choice;
 
   final result = !translate
       ? [
           for (final c in cues)
             Cue(start: c.start, end: c.end, text: c.text, source: c.text),
         ]
-      : await showDialog<List<Cue>>(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => _TranslateDialog(cues: cues, language: language),
-        );
+      : await translateImportedCues(context, cues, language);
   if (result == null) return null;
   return ImportedSubtitles(
     cues: result,
     language: language,
     fileName: p.basename(path),
+    picture: picture,
   );
 }
+
+/// Translates a file while keeping successful lines available for retry.
+Future<List<Cue>?> translateImportedCues(
+  BuildContext context,
+  List<Cue> cues,
+  String language, {
+  Translator? translator,
+}) => showDialog<List<Cue>>(
+  context: context,
+  barrierDismissible: false,
+  builder: (_) =>
+      _TranslateDialog(cues: cues, language: language, translator: translator),
+);
 
 /// Shifts every line by [seconds]; negative shows them earlier.
 List<Cue> shiftCues(List<Cue> cues, double seconds) => [
@@ -101,7 +119,12 @@ List<Cue> shiftCues(List<Cue> cues, double seconds) => [
 ];
 
 class _ImportSheet extends StatefulWidget {
-  const _ImportSheet({required this.fileName, required this.cues});
+  const _ImportSheet({
+    required this.fileName,
+    required this.cues,
+    this.capture,
+  });
+  final CapturePicture? capture;
   final String fileName;
   final List<Cue> cues;
 
@@ -110,6 +133,8 @@ class _ImportSheet extends StatefulWidget {
 }
 
 class _ImportSheetState extends State<_ImportSheet> {
+  Uint8List? _picture;
+  bool _pictureBusy = false;
   late String _language = guessLanguage(widget.cues.map((c) => c.text));
   late bool _translate = _language != 'vi';
 
@@ -121,85 +146,96 @@ class _ImportSheetState extends State<_ImportSheet> {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Nhập phụ đề', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 4),
-            Text(
-              '${widget.fileName} · ${widget.cues.length} dòng · '
-              'dài ${formatTime(widget.cues.last.end)}',
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(8),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Nhập phụ đề', style: theme.textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(
+                '${widget.fileName} · ${widget.cues.length} dòng · '
+                'dài ${formatTime(widget.cues.last.end)}',
+                style: theme.textTheme.bodySmall,
               ),
-              child: Text(
-                preview,
-                maxLines: 6,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('Phụ đề đang là: '),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: DropdownButton<String>(
-                    isExpanded: true,
-                    value: _language,
-                    items: [
-                      for (final e in kSubtitleLanguages.entries)
-                        DropdownMenuItem(value: e.key, child: Text(e.value)),
-                    ],
-                    onChanged: (v) => setState(() {
-                      _language = v!;
-                      _translate = v != 'vi';
-                    }),
-                  ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
                 ),
-              ],
-            ),
-            Text(
-              'App đoán ngôn ngữ từ nội dung, sai thì chọn lại.',
-              style: theme.textTheme.bodySmall,
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Dịch sang tiếng Việt'),
-              subtitle: Text(
-                !Translator.available
-                    ? 'Máy này không có bộ dịch'
-                    : _language == 'vi'
-                    ? 'Phụ đề đã là tiếng Việt'
-                    : appSettings.useCloud
-                    ? 'Dịch qua ${Translator.label}'
-                    : 'Dịch ngay trên máy, lần đầu tải gói dịch ~30 MB',
+                child: Text(
+                  preview,
+                  maxLines: 6,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              value: canTranslate && _translate,
-              onChanged: canTranslate
-                  ? (v) => setState(() => _translate = v)
-                  : null,
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: () => Navigator.pop(context, (
-                  _language,
-                  canTranslate && _translate,
-                )),
-                child: const Text('Nhập'),
+              const SizedBox(height: 12),
+              PicturePicker(
+                capture: widget.capture,
+                onChanged: (v) => _picture = v,
+                onBusy: (v) => setState(() => _pictureBusy = v),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('Phụ đề đang là: '),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: _language,
+                      items: [
+                        for (final e in kSubtitleLanguages.entries)
+                          DropdownMenuItem(value: e.key, child: Text(e.value)),
+                      ],
+                      onChanged: (v) => setState(() {
+                        _language = v!;
+                        _translate = v != 'vi';
+                      }),
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                'App đoán ngôn ngữ từ nội dung, sai thì chọn lại.',
+                style: theme.textTheme.bodySmall,
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Dịch sang tiếng Việt'),
+                subtitle: Text(
+                  !Translator.available
+                      ? 'Máy này không có bộ dịch'
+                      : _language == 'vi'
+                      ? 'Phụ đề đã là tiếng Việt'
+                      : appSettings.useCloud
+                      ? 'Dịch qua ${Translator.label}'
+                      : 'Dịch ngay trên máy, lần đầu tải gói dịch ~30 MB',
+                ),
+                value: canTranslate && _translate,
+                onChanged: canTranslate
+                    ? (v) => setState(() => _translate = v)
+                    : null,
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _pictureBusy
+                      ? null
+                      : () => Navigator.pop(context, (
+                          _language,
+                          canTranslate && _translate,
+                          _picture,
+                        )),
+                  child: const Text('Nhập'),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -209,19 +245,25 @@ class _ImportSheetState extends State<_ImportSheet> {
 /// Translates every line with a progress bar. Pops the translated lines,
 /// or null when cancelled.
 class _TranslateDialog extends StatefulWidget {
-  const _TranslateDialog({required this.cues, required this.language});
+  const _TranslateDialog({
+    required this.cues,
+    required this.language,
+    this.translator,
+  });
   final List<Cue> cues;
   final String language;
+  final Translator? translator;
 
   @override
   State<_TranslateDialog> createState() => _TranslateDialogState();
 }
 
 class _TranslateDialogState extends State<_TranslateDialog> {
-  final _translator = Translator.create(force: true);
+  late final _translator = widget.translator ?? Translator.create(force: true);
   String _status = 'Đang chuẩn bị bộ dịch…';
   int _done = 0;
-  int _failed = 0;
+  final _translated = <String, String>{};
+  bool _running = false;
   bool _cancelled = false;
   String? _error;
 
@@ -237,69 +279,77 @@ class _TranslateDialogState extends State<_TranslateDialog> {
     super.dispose();
   }
 
-  Future<void> _run() async {
-    final name = kSubtitleLanguages[widget.language] ?? widget.language;
-    final cloud = appSettings.useCloud;
-    try {
-      if (!cloud) {
-        setState(
-          () => _status =
-              'Đang tải gói dịch $name và tiếng Việt '
-              '(lần đầu khoảng 30 MB mỗi gói)…',
-        );
-      }
-      await _translator.prepare(widget.language);
-    } catch (e) {
-      if (mounted) setState(() => _error = 'Không tải được gói dịch: $e');
-      return;
-    }
-    if (!mounted || _cancelled) return;
-    setState(
-      () => _status = cloud
-          ? 'Đang dịch $name → tiếng Việt qua ${Translator.label}'
-          : 'Đang dịch $name → tiếng Việt',
-    );
+  late final _flat = [
+    for (final c in widget.cues) c.text.replaceAll(RegExp(r'\s*\n\s*'), ' '),
+  ];
 
-    // Repeated lines ("Hả?", "Cảm ơn") are translated once.
-    final flat = [
-      for (final c in widget.cues) c.text.replaceAll(RegExp(r'\s*\n\s*'), ' '),
-    ];
-    final unique = flat.toSet().toList();
-    final List<String?> translated;
+  void _complete() {
+    Navigator.pop(context, [
+      for (var i = 0; i < widget.cues.length; i++)
+        Cue(
+          start: widget.cues[i].start,
+          end: widget.cues[i].end,
+          text: _translated[_flat[i]] ?? widget.cues[i].text,
+          source: widget.cues[i].text,
+        ),
+    ]);
+  }
+
+  Future<void> _run() async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _error = null;
+      _status = 'Đang chuẩn bị bộ dịch…';
+    });
+    final name = kSubtitleLanguages[widget.language] ?? widget.language;
+    final missing = _flat
+        .toSet()
+        .where((t) => !_translated.containsKey(t))
+        .toList();
     try {
-      translated = await _translator.translateBatch(
-        unique,
+      await _translator.prepare(widget.language);
+      if (!mounted || _cancelled) return;
+      setState(() => _status = 'Đang dịch $name → tiếng Việt');
+      final got = await _translator.translateBatch(
+        missing,
         widget.language,
         onProgress: (n) {
-          if (!mounted) return;
-          // Progress is counted in lines of the file, not unique lines.
-          setState(
-            () => _done = (n / unique.length * widget.cues.length).round(),
-          );
+          if (mounted && !_cancelled) {
+            setState(() {
+              final count = _translated.length + n;
+              _done = (count / _flat.toSet().length * widget.cues.length)
+                  .round()
+                  .clamp(0, widget.cues.length);
+            });
+          }
         },
       );
+      if (!mounted || _cancelled) return;
+      for (var i = 0; i < missing.length && i < got.length; i++) {
+        final text = got[i]?.trim();
+        if (text != null && text.isNotEmpty) _translated[missing[i]] = text;
+      }
+      _done = _flat.where(_translated.containsKey).length;
+      if (_done < widget.cues.length) {
+        setState(
+          () => _error =
+              '${widget.cues.length - _done} dòng chưa dịch được. '
+              'Kiểm tra kết nối rồi thử lại; phần đã dịch vẫn được giữ.',
+        );
+        return;
+      }
+      _complete();
     } catch (e) {
-      if (mounted && !_cancelled) setState(() => _error = 'Dịch lỗi: $e');
-      return;
+      if (mounted && !_cancelled) {
+        setState(() {
+          _done = _flat.where(_translated.containsKey).length;
+          _error = 'Dịch lỗi: $e';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _running = false);
     }
-    if (!mounted || _cancelled) return;
-    final byText = {
-      for (var i = 0; i < unique.length; i++) unique[i]: translated[i],
-    };
-    final out = <Cue>[];
-    for (var i = 0; i < widget.cues.length; i++) {
-      final c = widget.cues[i];
-      final t = byText[flat[i]];
-      if (t == null) _failed++;
-      out.add(
-        Cue(start: c.start, end: c.end, text: t ?? c.text, source: c.text),
-      );
-    }
-    if (_failed > 0) {
-      setState(() => _done = widget.cues.length);
-      toast(context, '$_failed dòng không dịch được, giữ nguyên câu gốc');
-    }
-    Navigator.pop(context, out);
   }
 
   @override
@@ -316,14 +366,22 @@ class _TranslateDialogState extends State<_TranslateDialog> {
             const SizedBox(height: 16),
             LinearProgressIndicator(value: _done == 0 ? null : _done / total),
             const SizedBox(height: 8),
-            Text(
-              '$_done / $total dòng'
-              '${_failed > 0 ? ' · $_failed dòng giữ nguyên do lỗi' : ''}',
-            ),
+            Text('$_done / $total dòng'),
           ],
         ],
       ),
       actions: [
+        if (_error != null && !_running) ...[
+          TextButton(
+            onPressed: _complete,
+            child: const Text('Nhập phần đã dịch'),
+          ),
+          FilledButton.icon(
+            onPressed: _run,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Thử lại'),
+          ),
+        ],
         TextButton(
           onPressed: () {
             _cancelled = true;

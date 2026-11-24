@@ -1,3 +1,4 @@
+import '../services/bookmarks.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
@@ -77,7 +78,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _importSubs(VideoItem item) async {
     final imported = await importSubtitleFile(context);
     if (imported == null) return;
-    await VideoLibrary.saveCues(item, imported.cues);
+    await VideoLibrary.saveCues(
+      item,
+      imported.cues,
+      language: imported.language,
+      complete: true,
+      imported: true,
+    );
+    if (imported.picture != null) {
+      await Bookmarks.saveThumb(
+        Bookmarks.subtitlePictureKey('file:${item.file.absolute.path}'),
+        imported.picture!,
+      );
+    }
     if (mounted) {
       toast(context, 'Đã gắn ${imported.cues.length} dòng phụ đề vào video');
     }

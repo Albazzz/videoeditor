@@ -35,11 +35,8 @@ void main() {
   setUp(() async {
     dir = await Directory.systemTemp.createTemp('page_tr');
     PageTranslations.overrideDir = dir;
-    PageTranslations.resetCache();
-    PageTranslator.clearMemo();
   });
   tearDown(() async {
-    PageTranslations.resetCache();
     PageTranslations.overrideDir = null;
     await dir.delete(recursive: true);
   });
@@ -54,36 +51,40 @@ void main() {
     expect(guessLanguage(['Hello']), 'en');
   });
 
-  test('a page is translated once, kept, and opens translated again', () async {
-    const page = 'https://phim.example/list?p=2#top';
-    final fake = _Fake();
-    final tr = PageTranslator(engine: () => fake);
-    final first = await tr.translate(
-      ['Hello', 'World'],
-      page: page,
-      title: 'Danh sách',
-      htmlLang: 'en-US',
-    );
-    expect(first, {'Hello': 'VI:Hello', 'World': 'VI:World'});
-    expect(fake.langs.single, 'en');
-    // Asked again (another tab, a reload): nothing goes to the AI.
-    await tr.translate(['Hello'], page: page);
-    expect(fake.asked, hasLength(1));
-    await PageTranslations.flush();
-    expect(await PageTranslations.has('https://phim.example/list?p=2'), isTrue);
-    final listed = (await PageTranslations.list()).single;
-    expect(listed.title, 'Danh sách');
-    expect(listed.count, 2);
+  test(
+    'translations stay in one tab and never create persistent data',
+    () async {
+      const page = 'https://phim.example/list?p=2#top';
+      final fake = _Fake();
+      final tr = PageTranslator(engine: () => fake);
+      expect(
+        await tr.translate(['Hello', 'World'], page: page, htmlLang: 'en-US'),
+        {'Hello': 'VI:Hello', 'World': 'VI:World'},
+      );
+      expect(fake.langs.single, 'en');
+      await tr.translate(['Hello'], page: page);
+      expect(fake.asked, hasLength(1));
+      expect(dir.listSync(), isEmpty);
+      await tr.dispose();
+      final next = PageTranslator(engine: () => fake);
+      await next.translate(['Hello'], page: page);
+      expect(fake.asked, hasLength(2));
+      await next.dispose();
+      expect(dir.listSync(), isEmpty);
+    },
+  );
 
-    // A fresh start of the app reads it back from disk.
-    PageTranslations.resetCache();
-    PageTranslator.clearMemo();
-    expect(await PageTranslations.load(page), {
-      'Hello': 'VI:Hello',
-      'World': 'VI:World',
-    });
-    await PageTranslations.delete(page);
-    expect(await PageTranslations.has(page), isFalse);
-    expect(await PageTranslations.list(), isEmpty);
-  });
+  test(
+    'upgrade removes all legacy page data and preserves other stores',
+    () async {
+      final legacy = await Directory('${dir.path}/page_tr').create();
+      await File('${legacy.path}/old.json').writeAsString('{}');
+      await File('${legacy.path}/old.map.gz').writeAsBytes([1, 2, 3]);
+      final subs = await File('${dir.path}/subtitle.srt').writeAsString('keep');
+      await PageTranslations.clearLegacy();
+      await PageTranslations.clearLegacy();
+      expect(await legacy.exists(), false);
+      expect(await subs.readAsString(), 'keep');
+    },
+  );
 }
