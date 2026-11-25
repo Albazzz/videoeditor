@@ -57,8 +57,9 @@ List<List<RetainedAudioChunk>> planRetainedAudio(
   List<RetainedAudioChunk> chunks,
   List<(double, double)> covered,
   List<(double, double)> reserved,
-  int slots,
-) {
+  int slots, {
+  double position = 0,
+}) {
   final plans = <List<RetainedAudioChunk>>[];
   final occupied = List<(double, double)>.of(reserved);
   bool available(RetainedAudioChunk c) =>
@@ -70,7 +71,10 @@ List<List<RetainedAudioChunk>> planRetainedAudio(
       return byStart != 0 ? byStart : b.end.compareTo(a.end);
     });
   while (plans.length < slots) {
-    final first = sorted.where(available).firstOrNull;
+    final candidates = sorted.where(available).toList();
+    final first =
+        candidates.where((c) => c.end > position + .001).firstOrNull ??
+        candidates.firstOrNull;
     if (first == null) break;
     final group = <RetainedAudioChunk>[first];
     while (true) {
@@ -90,7 +94,10 @@ List<List<RetainedAudioChunk>> planRetainedAudio(
     plans.add(group);
     occupied.add((group.first.start, group.last.end));
   }
-  if (plans.length == 1 && slots > 1 && plans.single.length > 1) {
+  if (plans.length == 1 &&
+      slots > 1 &&
+      plans.single.length > 1 &&
+      plans.single.last.end - plans.single.first.start > 60) {
     final group = plans.removeLast();
     final mid = group.length ~/ 2;
     plans.addAll([group.sublist(0, mid), group.sublist(mid)]);

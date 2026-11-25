@@ -349,12 +349,101 @@ void main() {
       t.translateBatch(['a'], 'ja'),
       throwsA(
         isA<OpenRouterError>()
-            .having((e) => e.message, 'message', contains('Key'))
+            .having((e) => e.message, 'HTTP status', contains('HTTP 401'))
+            .having((e) => e.message, 'provider reason', contains('No auth'))
             .having((e) => e.account, 'account', isTrue),
       ),
     );
     expect(calls, 1);
   });
+
+  test(
+    'Vercel 403 shows denied access and preserves the actual provider reason',
+    () async {
+      final t = OpenRouterTranslator(
+        provider: kVercel,
+        apiKey: 'private-gateway-key',
+        model: 'test-model',
+        gatherFor: Duration.zero,
+        client: MockClient(
+          (_) async => http.Response(
+            '{"error":{"message":"Forbidden: team access denied","type":"access_denied"}}',
+            403,
+          ),
+        ),
+      );
+      addTearDown(t.dispose);
+      await expectLater(
+        t.translateBatch(['Hello'], 'en'),
+        throwsA(
+          isA<OpenRouterError>()
+              .having((e) => e.message, 'HTTP status', contains('HTTP 403'))
+              .having(
+                (e) => e.message,
+                'provider reason',
+                contains('team access denied'),
+              )
+              .having(
+                (e) => e.message,
+                'provider error type',
+                contains('type=access_denied'),
+              )
+              .having(
+                (e) => e.message,
+                'no false revoked assertion',
+                isNot(contains('không đúng hoặc đã bị thu hồi')),
+              )
+              .having(
+                (e) => e.account,
+                'does not retry an access denial',
+                true,
+              ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'Vercel 401 diagnostics redact echoed keys before reaching the screen',
+    () async {
+      const key = 'private-gateway-key';
+      final t = OpenRouterTranslator(
+        provider: kVercel,
+        apiKey: key,
+        model: 'test-model',
+        gatherFor: Duration.zero,
+        client: MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'error': {
+                'message': 'Authentication failed for $key Bearer secret-token',
+              },
+            }),
+            401,
+          ),
+        ),
+      );
+      addTearDown(t.dispose);
+      await expectLater(
+        t.translateBatch(['Hello'], 'en'),
+        throwsA(
+          isA<OpenRouterError>()
+              .having((e) => e.message, 'HTTP status', contains('HTTP 401'))
+              .having(
+                (e) => e.message,
+                'provider reason',
+                contains('Authentication failed'),
+              )
+              .having((e) => e.message, 'key is redacted', isNot(contains(key)))
+              .having(
+                (e) => e.message,
+                'token is redacted',
+                isNot(contains('secret-token')),
+              ),
+        ),
+      );
+    },
+  );
 
   test('a per-minute limit makes each turn carry every waiting line', () async {
     final good = fakeServer();

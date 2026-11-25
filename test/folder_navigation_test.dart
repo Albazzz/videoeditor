@@ -17,6 +17,7 @@ import 'package:video/services/retained_audio.dart';
 import 'package:video/services/subtitle_store.dart';
 import 'package:video/widgets/bookmarks_sheet.dart';
 import 'package:video/widgets/folder_group.dart';
+import 'package:video/widgets/saved_thumbnail_card.dart';
 
 import 'browser_screen_test.dart' show FakeBrowserPlatform;
 
@@ -88,6 +89,24 @@ void main() {
     await settleFiles(tester);
   }
 
+  Future<void> reveal(
+    WidgetTester tester,
+    Finder target, {
+    bool subtitles = false,
+  }) async {
+    final list = find.byKey(
+      PageStorageKey(subtitles ? 'subtitle-library-list' : 'bookmark-list'),
+    );
+    await tester.scrollUntilVisible(
+      target,
+      200,
+      scrollable: find
+          .descendant(of: list, matching: find.byType(Scrollable))
+          .first,
+    );
+    await tester.pumpAndSettle();
+  }
+
   testWidgets('saved page round trip keeps folder, search and refreshes data', (
     tester,
   ) async {
@@ -96,6 +115,7 @@ void main() {
     await settleFiles(tester);
     await tester.tap(find.text('Phim'));
     await settleFiles(tester);
+    await reveal(tester, find.text('Chưa có thư mục'));
     expect(find.text('Chưa có thư mục'), findsOneWidget);
     final entry = find.ancestor(
       of: find.text('Tập trong thư mục'),
@@ -104,6 +124,7 @@ void main() {
     expect(entry, findsOneWidget);
     await tester.enterText(find.byType(TextField).first, 'Tập');
     await settleFiles(tester);
+    await reveal(tester, find.text('Tập trong thư mục'));
     await tester.tap(find.text('Tập trong thư mục'));
     await settleFiles(tester);
     expect(openPageRequest.value, 'https://example.org/1');
@@ -121,6 +142,7 @@ void main() {
     await tester.enterText(find.byType(TextField).first, '');
     await settleFiles(tester);
     expect(find.text('Tập trong thư mục'), findsOneWidget);
+    await reveal(tester, find.text('Chưa có thư mục'));
     expect(find.text('Chưa có thư mục'), findsOneWidget);
     expect((await Bookmarks.load()).first.folder, 'Phim');
     expect(tester.takeException(), isNull);
@@ -202,6 +224,7 @@ void main() {
       ),
       findsOneWidget,
     );
+    await reveal(tester, find.text('Phụ đề trong thư mục'), subtitles: true);
     await tester.tap(find.text('Phụ đề trong thư mục'));
     await settleFiles(tester);
     expect(openPageRequest.value, 'https://example.org/inside');
@@ -209,6 +232,7 @@ void main() {
     await tester.tap(find.text('Phụ đề'));
     await settleFiles(tester);
     expect(find.text('Phụ đề trong thư mục'), findsOneWidget);
+    await reveal(tester, find.text('Phụ đề chưa xếp'), subtitles: true);
     expect(find.text('Phụ đề chưa xếp'), findsOneWidget);
     expect((await Bookmarks.subtitleFolders())['inside'], 'Phim');
     expect(tester.takeException(), isNull);
@@ -304,6 +328,16 @@ void main() {
             .first;
         final before = position().pixels;
         final top = tester.getTopLeft(target).dy;
+        final card = find
+            .ancestor(of: target, matching: find.byType(SavedThumbnailCard))
+            .first;
+        final photo = find
+            .descendant(of: card, matching: find.byType(AspectRatio))
+            .first;
+        final photoSize = tester.getSize(photo);
+        expect(photoSize.width, greaterThan(250));
+        expect(photoSize.height, closeTo(photoSize.width * 9 / 16, 1));
+        expect(tester.getBottomLeft(photo).dy, lessThanOrEqualTo(top));
         expect(before, greaterThan(0));
         await tester.longPress(target);
         await tester.pumpAndSettle();
@@ -375,12 +409,14 @@ void main() {
     await settleFiles(tester);
     await tester.tap(find.text('Phim'));
     await settleFiles(tester);
+    await reveal(tester, find.text('Tập trong thư mục'));
     await tester.tap(find.text('Tập trong thư mục'));
     await settleFiles(tester);
     expect(opened, 'https://example.org/1');
     await tester.tap(find.text('Mở danh sách'));
     await settleFiles(tester);
     expect(find.text('Tập trong thư mục'), findsOneWidget);
+    await reveal(tester, find.text('Chưa có thư mục'));
     expect(find.text('Chưa có thư mục'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

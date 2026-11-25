@@ -77,6 +77,10 @@ class SubtitleResume {
         const [],
         1,
       ).isNotEmpty;
+      if ((!saved.isWholeVideo || hasChunks) &&
+          lease?.availability(duration: saved.duration).complete != true) {
+        return SubtitleResumeResult.needsSource;
+      }
       if (!hasChunks && saved.untranslated == 0) {
         return saved.isWholeVideo
             ? SubtitleResumeResult.complete

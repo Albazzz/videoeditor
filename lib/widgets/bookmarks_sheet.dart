@@ -7,6 +7,7 @@ import '../services/bookmarks.dart';
 import '../services/open_page.dart';
 import '../services/retained_audio.dart';
 import 'picture_picker.dart';
+import 'saved_thumbnail_card.dart';
 import 'asset_marks.dart';
 import '../services/subtitle_store.dart';
 import 'common.dart';
@@ -415,6 +416,9 @@ class _BookmarksViewState extends State<BookmarksView> {
 
   Widget _picture(Bookmark b) => StoredPicture(
     pictureKey: b.url,
+    width: double.infinity,
+    height: double.infinity,
+    cacheWidth: 960,
     directory: _thumbs,
     placeholder: const ColoredBox(
       color: Color(0x22FFC107),
@@ -427,43 +431,11 @@ class _BookmarksViewState extends State<BookmarksView> {
     final translated = (subs?.translated ?? 0) > 0;
     final audio = _audioPages.contains(SubtitleStore.pageKey(b.url));
     final picked = _picked.contains(b.url);
-    return ListTile(
+    return SavedThumbnailCard(
+      picture: _picture(b),
+      picking: _picking,
       selected: picked,
-      leading: _picking
-          ? SizedBox(
-              width: 64,
-              height: 40,
-              child: Center(
-                child: Checkbox(
-                  value: picked,
-                  onChanged: (_) => _toggle(b.url),
-                ),
-              ),
-            )
-          : _picture(b),
-      title: Text(
-        b.title.isEmpty ? b.host : b.title,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: subs == null && !audio
-          ? Text(b.host)
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(b.host),
-                const SizedBox(height: 2),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: [
-                    if (subs != null) SubsMark(subs),
-                    AssetMarks(translated: translated, audio: audio),
-                  ],
-                ),
-              ],
-            ),
-      trailing: Visibility(
+      actions: Visibility(
         visible: !_picking,
         maintainSize: true,
         maintainAnimation: true,
@@ -482,6 +454,33 @@ class _BookmarksViewState extends State<BookmarksView> {
       ),
       onTap: _picking ? () => _toggle(b.url) : () => widget.onOpen(b.url),
       onLongPress: () => _toggle(b.url),
+      child: ListTile(
+        selected: picked,
+        title: Text(
+          b.title.isEmpty ? b.host : b.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: subs == null && !audio
+            ? Text(b.host)
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(b.host),
+                  const SizedBox(height: 2),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      if (subs != null) SubsMark(subs),
+                      AssetMarks(translated: translated, audio: audio),
+                    ],
+                  ),
+                ],
+              ),
+        onTap: _picking ? () => _toggle(b.url) : () => widget.onOpen(b.url),
+        onLongPress: () => _toggle(b.url),
+      ),
     );
   }
 

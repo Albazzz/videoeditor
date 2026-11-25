@@ -10,6 +10,7 @@ import 'package:video/services/subtitle_session.dart';
 import 'package:video/services/video_pipeline.dart';
 import 'package:video/services/subtitle_store.dart';
 import 'package:video/services/translator.dart';
+import 'support/pcm_audio.dart';
 
 class _Worker implements AsrWorker {
   final controller = StreamController<AsrEvent>.broadcast(sync: true);
@@ -46,6 +47,8 @@ class _Feed extends AudioFeed {
   }) async {
     startAt = startSec;
     length = lengthSec;
+    await writeAudioChunks(outDir, lengthSec ?? 300);
+    done = true;
   }
 }
 
@@ -129,6 +132,7 @@ void main() {
     });
     tearDown(() async {
       session.dispose();
+      await session.closeAudio();
       await _until(
         () =>
             workers.every((w) => w.stopped) &&
@@ -154,9 +158,11 @@ void main() {
         );
         session = create(saved: saved, translator: translator)..duration = 100;
         await session.start(0);
-        await _until(() => feeds.isNotEmpty);
+        await _until(() => workers.isNotEmpty);
         expect(languages, ['ko']);
-        expect(feeds.single.startAt, 60);
+        expect(feeds.single.startAt, 0);
+        expect(feeds.single.length, 100);
+        expect(session.audioAvailability.complete, true);
         expect(session.covered, [(0.0, 60.0)]);
         expect(session.cues.single.text, '안녕');
         expect(session.steps[2].detail, contains('tải gói dịch'));
@@ -174,12 +180,9 @@ void main() {
       () async {
         session = create()..duration = 300;
         await session.start(100);
-        await _until(() => feeds.length == 2);
-        expect(
-          feeds.map((f) => (f.startAt, f.length)),
-          unorderedEquals([(100.0, 200.0), (0.0, 102.0)]),
-        );
-        final primary = workers.singleWhere((w) => w.base == 100),
+        await _until(() => workers.length == 2);
+        expect(feeds.map((f) => (f.startAt, f.length)), [(0.0, 300.0)]);
+        final primary = workers.singleWhere((w) => w.base == 98),
             second = workers.singleWhere((w) => w.base == 0);
         primary.controller.add(AsrProgress(primary.gen, 140, false));
         second.controller.add(AsrProgress(second.gen, 25, false));
@@ -188,18 +191,18 @@ void main() {
           AsrSegment(primary.gen, 112, 113, 'Hello', 'en'),
         );
         expect(session.cues.map((c) => c.start), [12.0, 112.0]);
-        expect(session.covered, [(0.0, 25.0), (100.0, 140.0)]);
+        expect(session.covered, [(0.0, 25.0), (98.0, 140.0)]);
         expect(session.stage, contains('Lượt 2'));
         session.didHaveMemoryPressure();
         expect(second.stopped, true);
         expect(primary.stopped, false);
         expect(session.stage, isNot(contains('Lượt 2')));
         primary.controller.add(AsrProgress(primary.gen, 300, true));
-        await _until(() => feeds.length == 3);
-        expect(feeds.last.startAt, 25);
-        expect(feeds.last.length, 77);
+        await _until(() => workers.length == 3);
+        expect(feeds, hasLength(1));
+        expect(workers.last.base, 18);
         final last = workers.last;
-        last.controller.add(AsrProgress(last.gen, 102, true));
+        last.controller.add(AsrProgress(last.gen, 98, true));
         expect(session.finished, true);
         expect(session.covered, [(0.0, 300.0)]);
       },
@@ -210,22 +213,23 @@ void main() {
       () async {
         session = create()..duration = 300;
         await session.start(0);
-        await _until(() => feeds.length == 2);
+        await _until(() => workers.length == 2);
         final old = List.of(workers);
         for (var i = 0; i < 3; i++) {
           session.updatePosition(230);
         }
-        await _until(() => feeds.length == 4);
+        await _until(() => workers.length == 4);
         expect(old.every((w) => w.stopped), true);
         expect(
-          feeds.skip(2).map((f) => f.startAt),
-          unorderedEquals([230.0, 0.0]),
+          workers.skip(2).map((w) => w.base),
+          unorderedEquals([228.0, 0.0]),
         );
-        expect(session.stage, contains('Lượt 1: 3:50'));
+        expect(session.stage, contains('Lượt 1: 3:48'));
         session.mode = SubtitleMode.follow;
-        await _until(() => feeds.length == 5);
+        await _until(() => workers.length == 5);
         expect(workers.where((w) => !w.stopped).length, 1);
-        expect(feeds.last.startAt, 230);
+        expect(workers.last.base, 228);
+        expect(feeds, hasLength(1));
       },
     );
 
@@ -272,7 +276,7 @@ void main() {
       () async {
         session = create()..duration = 300;
         await session.start(0);
-        await _until(() => feeds.length == 2);
+        await _until(() => workers.length == 2);
         final old = List.of(workers);
         final first = workers.singleWhere((w) => w.base == 0);
         first.controller.add(AsrSegment(first.gen, 10, 11, 'Hello', 'ja'));
@@ -282,19 +286,19 @@ void main() {
         expect(session.covered, [(0.0, 40.0)]);
         final kept = List.of(session.cues);
         await Future.wait([session.retry(), session.retry()]);
-        await _until(() => feeds.length == 4);
+        await _until(() => workers.length == 4);
         expect(session.error, isNull);
         expect(session.canRetry, false);
         expect(old.every((w) => w.stopped), true);
         expect(session.cues, kept);
         expect(session.covered, [(0.0, 40.0)]);
         expect(
-          feeds.skip(2).map((f) => f.startAt),
-          unorderedEquals([40.0, 170.0]),
+          workers.skip(2).map((w) => w.base),
+          unorderedEquals([38.0, 168.0]),
         );
         session.requestStop();
         await session.retry();
-        expect(feeds, hasLength(4));
+        expect(feeds, hasLength(1));
       },
     );
   });

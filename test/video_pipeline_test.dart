@@ -14,6 +14,7 @@ import 'package:video/services/translator.dart';
 import 'package:video/services/video_language.dart';
 import 'package:video/services/video_library.dart';
 import 'package:video/services/video_pipeline.dart';
+import 'support/pcm_audio.dart';
 
 const _old = Cue(start: 2, end: 4, text: 'Cũ', source: 'Original');
 
@@ -78,7 +79,10 @@ class _Feed extends AudioFeed {
     double startSec = 0,
     double? lengthSec,
     bool hls = false,
-  }) async {}
+  }) async {
+    await writeAudioChunks(outDir, lengthSec ?? 100);
+    done = true;
+  }
 }
 
 void main() {

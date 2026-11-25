@@ -245,7 +245,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       });
       return;
     }
-    if (!await ensureModels(context)) return;
     if (!mounted || _session != null) return;
     final storedLanguage = widget.item == null
         ? ''

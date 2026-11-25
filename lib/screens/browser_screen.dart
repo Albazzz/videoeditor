@@ -1279,7 +1279,6 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       );
       if (go != true || !mounted) return;
     }
-    if (!await ensureModels(context)) return;
     var cookies = '';
     try {
       final list = await CookieManager.instance().getCookies(

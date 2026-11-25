@@ -20,8 +20,10 @@ A new Flutter project.
   lời gốc và thời gian, không nói giảm hay che lời tục. File nhập thiếu lời gốc
   vẫn sửa tay được nhưng không dùng bản dịch tiếng Việt thay cho lời gốc để dịch lại.
 
-Pipeline có hàng đợi riêng cho lấy âm thanh, nhận dạng và dịch; giới hạn đồng
-thời 2 lượt lấy âm thanh, 2 bộ nhận dạng và 3 yêu cầu dịch AI. Kết quả gắn với mã
+Pipeline tải trọn và kiểm tra âm thanh trước khi nạp mô hình, nhận dạng hoặc dịch.
+Hàng đợi chỉ tải một video mỗi lượt, giữ lượt đến khi kết thúc và đóng bộ ghi;
+video tiếp theo chờ, kể cả khi video trước mất mạng và đang thử lại. Sau khi
+đủ âm thanh, tối đa 2 bộ nhận dạng và 3 yêu cầu dịch AI xử lý từ file trong app. Kết quả gắn với mã
 video; việc đổi trang hoặc kết quả trả về muộn không được sửa sub của video khác.
 
 Âm thanh được giữ riêng theo video cho đến khi người dùng xác nhận xóa, kể cả
@@ -33,8 +35,8 @@ phiên và chờ đóng các bộ ghi trước khi xóa. Phụ đề và video g
 
 Bấm **Làm tiếp** trong kho phụ đề, chi tiết hoặc kho âm thanh để dùng ngay
 âm thanh đã lưu trong app, bỏ qua các đoạn đã nhận dạng. Nếu chỉ còn câu chưa
-dịch, app dịch tiếp từ lời gốc mà không cần lấy lại âm thanh. App xử lý hết phần
-âm thanh đang có trước; chỉ yêu cầu mở lại web khi còn thiếu đoạn cần nhận dạng.
+dịch, app dịch tiếp từ lời gốc mà không cần lấy lại âm thanh. Nếu âm thanh còn thiếu, app yêu cầu mở nguồn để tải tiếp cho đủ trước khi
+nhận dạng. Đổi chỗ xem, đổi chế độ nhận dạng hoặc ưu tiên video không ngắt lượt tải.
 Các mốc thời gian và file âm thanh gốc được giữ nguyên.
 
 Tiến trình hiển thị riêng **Âm thanh đã lưu: …%**, **Đã nhận dạng: …%** và
@@ -42,7 +44,8 @@ Tiến trình hiển thị riêng **Âm thanh đã lưu: …%**, **Đã nhận d
 âm thanh tính từ các WAV đã ghi xong, gộp các lượt tải trùng và giữ nguyên khoảng
 trống; file đang ghi dở không được tính. Có một file âm thanh chưa có nghĩa là
 đã tải hết. Nếu nguồn bị chặn trước khi đủ âm thanh, app báo mốc thiếu và xử lý
-được phần đã lưu; khi chưa rõ tổng thời lượng, chỉ hiện thời lượng đang có.
+tiếp phần tải dở khi nguồn hoạt động lại; khi chưa rõ tổng thời lượng, chỉ
+hiện thời lượng đang có đến khi xác nhận kết thúc luồng âm thanh.
 
 Trên Android, kho âm thanh ở `noBackupFilesDir`; trên iOS, ở Application Support
 với quyền thư mục chỉ dành cho chủ sở hữu, Data Protection và loại khỏi backup.
@@ -62,6 +65,8 @@ Kiểm tra: `flutter test`, `dart analyze lib test`,
   Trong trình duyệt có thể chụp lại trang; trên điện thoại có thể chụp bằng camera.
   Ảnh chụp được giữ trong dữ liệu riêng của app, không thêm vào thư viện ảnh.
   Menu trang lưu và phụ đề cho phép đổi ảnh; ảnh phụ đề được giữ riêng theo video.
+- Ảnh đại diện trong kho phụ đề và trang đã lưu hiển thị lớn theo tỉ lệ 16:9,
+  nằm trên tên video. Ô chọn hiện trên ảnh mà không đổi chiều cao thẻ hay vị trí cuộn.
 - Nhãn **Có bản dịch** và **Có âm thanh** cho biết nội dung hiện có trong kho.
   Tiến độ nhận dạng vẫn hiển thị riêng để phân biệt phần đã nghe với phần đã dịch.
 - Dịch nội dung trang chỉ giữ tạm trong tab đang mở. App không lưu bản dịch trang

@@ -320,28 +320,20 @@ void main() {
   );
 
   test(
-    'partial cache is processed first; only the genuinely missing tail needs a source',
+    'partial cache waits for a source before any new recognition or translation',
     () async {
       await seed();
       final sub = saved(duration: 58);
       await SubtitleStore.save(sub);
-      expect(await start(sub), SubtitleResumeResult.started);
-      final session = ActiveWork.find('A')!.session;
-      await _until(
-        () => session.needsAudioSource && session.waitingTranslation == 0,
-      );
-      expect(workers.single.starts, [18.0, 28.0]);
-      expect(ActiveWork.wasCompleted(session), false);
-      expect(session.covered, [(0.0, 38.0)]);
-      expect(session.audioAvailability.percent, 65);
-      expect(session.audioAvailability.complete, false);
-      expect(
-        session.steps.firstWhere((s) => s.title == 'Tải và lưu âm thanh').state,
-        StageState.failed,
-      );
-      await ActiveWork.persist('A');
       expect(await start(sub), SubtitleResumeResult.needsSource);
-      expect((await SubtitleStore.load('A'))!.covered, [(0.0, 38.0)]);
+      expect(ActiveWork.find('A'), isNull);
+      expect(workers, isEmpty);
+      expect(modelChecks, 0);
+      expect((await SubtitleStore.load('A'))!.covered, [(0.0, 18.0)]);
+      expect(
+        (await store.list()).single.availability.withDuration(58).percent,
+        65,
+      );
       expect((await store.list()).single.chunks, 5);
     },
   );

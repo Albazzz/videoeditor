@@ -177,10 +177,15 @@ class StoredPicture extends StatelessWidget {
     this.fallbackKey,
     required this.directory,
     required this.placeholder,
+    this.width = 64,
+    this.height = 40,
+    this.cacheWidth = 192,
   });
   final String pictureKey;
   final String? fallbackKey, directory;
   final Widget placeholder;
+  final double width, height;
+  final int cacheWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -197,13 +202,13 @@ class StoredPicture extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
       child: SizedBox(
-        width: 64,
-        height: 40,
+        width: width,
+        height: height,
         child: file != null && file.existsSync() && file.lengthSync() > 0
             ? Image.file(
                 file,
                 fit: BoxFit.cover,
-                cacheWidth: 192,
+                cacheWidth: cacheWidth,
                 errorBuilder: (_, _, _) => placeholder,
               )
             : placeholder,

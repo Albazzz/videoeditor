@@ -181,9 +181,19 @@ void main() {
       );
       await tester.pump();
     }
+    expect(find.text('Chưa dịch'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Có phụ đề · 50%'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const PageStorageKey('bookmark-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     expect(find.text('Có phụ đề · 50%'), findsOneWidget);
     expect(find.text('Có dịch'), findsOneWidget);
-    expect(find.text('Chưa dịch'), findsOneWidget);
   });
 
   testWidgets('a long press picks pages; picked pages go together', (
@@ -199,10 +209,20 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    final scroll = find
+        .descendant(
+          of: find.byKey(const PageStorageKey('bookmark-list')),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    await tester.scrollUntilVisible(find.text('Một'), 200, scrollable: scroll);
+    await tester.pumpAndSettle();
     await tester.longPress(find.text('Một'));
     await tester.pump();
     expect(find.text('Đã chọn 1'), findsOneWidget);
     // While picking, a tap picks instead of opening.
+    await tester.scrollUntilVisible(find.text('Hai'), -200, scrollable: scroll);
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Hai'));
     await tester.pump();
     expect(find.text('Đã chọn 2'), findsOneWidget);

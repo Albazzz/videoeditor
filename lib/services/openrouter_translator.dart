@@ -797,8 +797,34 @@ class OpenRouterTranslator implements Translator {
         final ms = DateTime.now().difference(started).inMilliseconds;
         final code = res.statusCode;
         if (code == 401 || code == 403) {
+          final raw = utf8.decode(res.bodyBytes, allowMalformed: true);
+          var detail = _errorText(raw);
+          try {
+            final payload = jsonDecode(raw);
+            final error = payload is Map ? payload['error'] ?? payload : null;
+            if (error is Map) {
+              detail = [
+                detail,
+                if (error['type'] is String) 'type=${error['type']}',
+                if (error['code'] is String || error['code'] is num)
+                  'code=${error['code']}',
+              ].join(' · ');
+            }
+          } on FormatException {
+            // Some gateways return a plain-text denial instead of JSON.
+          }
+          // Provider diagnostics can echo credentials. Redact the exact key
+          // as well as known secret formats before displaying or logging them.
+          if (apiKey.isNotEmpty) detail = detail.replaceAll(apiKey, '***');
+          detail = AppLog.sanitize(
+            detail,
+          ).replaceAll(RegExp(r'\s+'), ' ').trim();
+          if (detail.length > 300) detail = '${detail.substring(0, 300)}…';
+          final reason = code == 401
+              ? '${provider.name} không chấp nhận xác thực (HTTP 401). Kiểm tra key, hạn dùng và trạng thái tài khoản.'
+              : '${provider.name} từ chối quyền truy cập (HTTP 403). Chưa thể kết luận key sai hay bị thu hồi.';
           throw OpenRouterError(
-            'Key ${provider.name} không đúng hoặc đã bị thu hồi',
+            '$reason${detail.isEmpty ? '' : ' Phản hồi: $detail'}',
             account: true,
           );
         }

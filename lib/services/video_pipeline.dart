@@ -59,9 +59,8 @@ class PipelineStage {
 }
 
 class VideoPipeline {
-  /// ffmpeg is network/disk bound: films waiting for a recogniser keep
-  /// fetching their audio meanwhile (before links expire).
-  static final extraction = PipelineStage(4);
+  /// Finish one video's full audio before another video downloads.
+  static final extraction = PipelineStage(1);
 
   /// Recognisers by priority (see [PrioritySlots]); 1 under memory pressure.
   static final recognizers = PrioritySlots(2);

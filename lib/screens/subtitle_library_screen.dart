@@ -21,6 +21,7 @@ import '../services/video_library.dart';
 import '../widgets/bookmarks_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/picture_picker.dart';
+import '../widgets/saved_thumbnail_card.dart';
 import '../widgets/asset_marks.dart';
 import '../widgets/folder_group.dart';
 import 'downloads_screen.dart';
@@ -234,6 +235,9 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   Widget _picture(SubsInfo s) => StoredPicture(
     pictureKey: Bookmarks.subtitlePictureKey(s.id),
     fallbackKey: s.page,
+    width: double.infinity,
+    height: double.infinity,
+    cacheWidth: 960,
     directory: _thumbs,
     placeholder: const ColoredBox(
       color: Color(0x223D7DFF),
@@ -486,78 +490,11 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     final web = s.page.startsWith('http');
     final picked = _picked.contains(s.id);
     final audio = _audio[s.id];
-    return ListTile(
+    return SavedThumbnailCard(
+      picture: _picture(s),
+      picking: _picking,
       selected: picked,
-      leading: _picking
-          ? SizedBox(
-              width: 64,
-              height: 40,
-              child: Center(
-                child: Checkbox(value: picked, onChanged: (_) => _toggle(s.id)),
-              ),
-            )
-          : _picture(s),
-      title: Text(_name(s), maxLines: 2, overflow: TextOverflow.ellipsis),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            _label(s),
-            style: TextStyle(
-              color: s.isWholeVideo
-                  ? Colors.green
-                  : Theme.of(context).colorScheme.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (s.progress != null) ...[
-            const SizedBox(height: 4),
-            LinearProgressIndicator(
-              value: s.progress,
-              minHeight: 3,
-              color: s.isWholeVideo ? Colors.green : null,
-            ),
-            const SizedBox(height: 4),
-          ],
-          AssetMarks(
-            translated: s.lines > s.untranslated,
-            audio: (audio ?? 0) > 0,
-          ),
-          if (_audioInfo[s.id] case final RetainedAudio stored)
-            Text(stored.availability.withDuration(s.duration).label),
-          Text(
-            '${s.lines} dòng · '
-            '${kLanguages[s.language] ?? s.language} · '
-            '${_date(s.updated)}'
-            '${s.untranslated > 0 ? ' · ${s.untranslated} câu chưa dịch' : ''}'
-            '${audio != null ? ' · chưa xoá âm thanh ${_size(audio)}' : ''}',
-          ),
-          ValueListenableBuilder(
-            valueListenable: ActiveWork.all,
-            builder: (context, _, _) {
-              final running = ActiveWork.find(s.id) != null;
-              if (!running && !s.canResume) return const SizedBox.shrink();
-              return Visibility(
-                visible: !_picking,
-                maintainSize: true,
-                maintainAnimation: true,
-                maintainState: true,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: running
-                      ? const Text('Đang làm')
-                      : TextButton(
-                          onPressed: () => _resume(s),
-                          child: const Text('Làm tiếp'),
-                        ),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-      isThreeLine: true,
-      trailing: Visibility(
+      actions: Visibility(
         visible: !_picking,
         maintainSize: true,
         maintainAnimation: true,
@@ -616,6 +553,75 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
           ? () => requestOpenPage(s.page)
           : () => _view(s),
       onLongPress: () => _toggle(s.id),
+      child: ListTile(
+        selected: picked,
+        title: Text(_name(s), maxLines: 2, overflow: TextOverflow.ellipsis),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _label(s),
+              style: TextStyle(
+                color: s.isWholeVideo
+                    ? Colors.green
+                    : Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (s.progress != null) ...[
+              const SizedBox(height: 4),
+              LinearProgressIndicator(
+                value: s.progress,
+                minHeight: 3,
+                color: s.isWholeVideo ? Colors.green : null,
+              ),
+              const SizedBox(height: 4),
+            ],
+            AssetMarks(
+              translated: s.lines > s.untranslated,
+              audio: (audio ?? 0) > 0,
+            ),
+            if (_audioInfo[s.id] case final RetainedAudio stored)
+              Text(stored.availability.withDuration(s.duration).label),
+            Text(
+              '${s.lines} dòng · '
+              '${kLanguages[s.language] ?? s.language} · '
+              '${_date(s.updated)}'
+              '${s.untranslated > 0 ? ' · ${s.untranslated} câu chưa dịch' : ''}'
+              '${audio != null ? ' · chưa xoá âm thanh ${_size(audio)}' : ''}',
+            ),
+            ValueListenableBuilder(
+              valueListenable: ActiveWork.all,
+              builder: (context, _, _) {
+                final running = ActiveWork.find(s.id) != null;
+                if (!running && !s.canResume) return const SizedBox.shrink();
+                return Visibility(
+                  visible: !_picking,
+                  maintainSize: true,
+                  maintainAnimation: true,
+                  maintainState: true,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: running
+                        ? const Text('Đang làm')
+                        : TextButton(
+                            onPressed: () => _resume(s),
+                            child: const Text('Làm tiếp'),
+                          ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        isThreeLine: true,
+        onTap: _picking
+            ? () => _toggle(s.id)
+            : web
+            ? () => requestOpenPage(s.page)
+            : () => _view(s),
+        onLongPress: () => _toggle(s.id),
+      ),
     );
   }
 
@@ -640,37 +646,8 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     );
   }
 
-  Widget _videoRow(VideoItem item, int count) => ListTile(
-    leading: StoredPicture(
-      pictureKey: Bookmarks.subtitlePictureKey(
-        'file:${item.file.absolute.path}',
-      ),
-      directory: _thumbs,
-      placeholder: const Icon(Icons.movie_outlined),
-    ),
-    title: Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-    subtitle: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('$count dòng phụ đề'),
-        AssetMarks(
-          translated: _videoTranslated[item.file.absolute.path] ?? false,
-          audio: (_audio['file:${item.file.absolute.path}'] ?? 0) > 0,
-        ),
-      ],
-    ),
-    trailing: IconButton(
-      tooltip: 'Đổi ảnh đại diện',
-      icon: const Icon(Icons.image_outlined),
-      onPressed: () async {
-        await editStoredPicture(
-          context,
-          Bookmarks.subtitlePictureKey('file:${item.file.absolute.path}'),
-        );
-        if (mounted) setState(() {});
-      },
-    ),
-    onTap: () async {
+  Widget _videoRow(VideoItem item, int count) {
+    Future<void> openVideo() async {
       final cues = await VideoLibrary.loadCues(item);
       if (!mounted) return;
       await _open(
@@ -688,8 +665,50 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
           }
         },
       );
-    },
-  );
+    }
+
+    return SavedThumbnailCard(
+      picture: StoredPicture(
+        pictureKey: Bookmarks.subtitlePictureKey(
+          'file:${item.file.absolute.path}',
+        ),
+        directory: _thumbs,
+        width: double.infinity,
+        height: double.infinity,
+        cacheWidth: 960,
+        placeholder: const Icon(Icons.movie_outlined),
+      ),
+      picking: false,
+      selected: false,
+      actions: IconButton(
+        tooltip: 'Đổi ảnh đại diện',
+        icon: const Icon(Icons.image_outlined),
+        onPressed: () async {
+          await editStoredPicture(
+            context,
+            Bookmarks.subtitlePictureKey('file:${item.file.absolute.path}'),
+          );
+          if (mounted) setState(() {});
+        },
+      ),
+      onTap: openVideo,
+      onLongPress: null,
+      child: ListTile(
+        title: Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$count dòng phụ đề'),
+            AssetMarks(
+              translated: _videoTranslated[item.file.absolute.path] ?? false,
+              audio: (_audio['file:${item.file.absolute.path}'] ?? 0) > 0,
+            ),
+          ],
+        ),
+        onTap: openVideo,
+      ),
+    );
+  }
 
   Widget _filters() {
     final web = _web ?? const <SubsInfo>[];

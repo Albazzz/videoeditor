@@ -22,6 +22,7 @@ import 'video_language.dart';
 import 'video_pipeline.dart';
 import 'retained_audio.dart';
 import 'audio_availability.dart';
+import 'full_audio_download.dart';
 
 /// How far ahead of the viewer subtitles are made.
 enum SubtitleMode {
@@ -154,22 +155,17 @@ class _Run {
   AsrWorker? worker;
   Future<void>? opening;
   StreamSubscription<AsrEvent>? sub;
-  AudioFeed? feed;
   Directory? dir;
-  Directory? audioDir;
   Timer? poll;
   DateTime lastChunk = DateTime.now();
   int pending = 0, nextChunk = 0;
   bool lastSent = false;
-  bool extractionRecorded = false;
   String phase = 'Đang chuẩn bị âm thanh';
 
   /// Queued for a recogniser (another film's stretch is more urgent).
   bool waitingSlot = false;
   void Function()? releaseRecognition;
   void Function()? releaseModel;
-  void Function()? releaseExtraction;
-  Timer? extractionPoll;
   final cancelled = Completer<void>();
 }
 
@@ -201,6 +197,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
        _parallel = parallel ?? appSettings.parallelSubtitles,
        _translator = translator ?? Translator.create(videoId: videoId ?? input),
        _createWorker = createWorker ?? _spawn,
+       _usesDefaultWorker = createWorker == null,
        _createFeed = createFeed ?? AudioFeed.new,
        audioStore = retainedAudio ?? RetainedAudioStore.instance,
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory {
@@ -219,6 +216,10 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   final String input, videoId;
   final RetainedAudioStore audioStore;
   final bool retainedOnly;
+  final bool _usesDefaultWorker;
+  bool _recognitionReady = false;
+  FullAudioDownload? _download;
+  Future<void>? _audioTask;
   RetainedAudioLease? _retainedInput;
   bool needsAudioSource = false;
   String audioTitle = '';
@@ -230,8 +231,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   bool _audioCompleted = false;
 
   Future<void> markAudioCompleted() async {
+    await _retainedInput?.markCompleted();
     if (retainedOnly) {
-      await _retainedInput?.markCompleted();
       return;
     }
     if (_audioCompleted || _audioArchive == null) return;
@@ -251,9 +252,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> closeAudio() => _audioClosing ??= () async {
+    await _download?.close();
+    await _audioTask;
     await Future.wait(_retiring.toList());
+    await _retainedInput?.close();
     if (retainedOnly) {
-      await _retainedInput?.close();
       return;
     }
     final opening = _audioOpening;
@@ -282,7 +285,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   final _covered = <(double, double)>[];
   final _runs = <int, _Run>{};
   final _retiring = <Future<void>>{};
-  final _retryCount = <int, int>{};
   final _translations = <String, Future<String?>>{};
   final _blockedTranslations = <String>{};
   final _failedTranslations = <String>{};
@@ -332,7 +334,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         _resolving = null;
         _source = null;
         _feedError = '';
-        _retryCount.clear();
         error = null;
         finished = false;
         paused = false;
@@ -364,21 +365,17 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   DateTime lastActivity = DateTime.now(), _lastSeekRestart = DateTime(0);
   Directory? _root;
   Timer? _tick;
-  Timer? _audioScanTimer;
   bool _readingAudio = false;
   AudioAvailability _availableAudio = AudioAvailability();
   AudioAvailability get audioAvailability =>
       _availableAudio.withDuration(duration);
-  bool get downloadingAudio =>
-      _runs.values.any((r) => r.feed != null && !r.feed!.done);
+  bool get downloadingAudio => _download?.downloading ?? false;
   int get translatedCount =>
       cues.where((c) => c.source.isEmpty || c.text != c.source).length;
   Future<String>? _resolving;
   String? _source;
   String _feedError = '';
   double? _resumeAt;
-  double? _audioEnd;
-  double get _planDuration => _audioEnd ?? duration;
 
   int get waitingTranslation => _pendingCues.length;
   double get processedUntil =>
@@ -396,6 +393,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   SessionActivity get activity {
     if (error != null) return SessionActivity.failed;
+    if (!_recognitionReady && _audioTask != null) {
+      return SessionActivity.working;
+    }
     if (finished &&
         waitingTranslation == 0 &&
         (_prepareError != null || _failedTranslations.isNotEmpty)) {
@@ -428,7 +428,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       coversWholeVideo(covered, duration, reachedEnd: reachedEnd);
 
   double get progressFraction {
-    final audio = duration > 0
+    final recognized = duration > 0
         ? (coveredSeconds(covered) / duration).clamp(0.0, 1.0)
         : finished
         ? 1.0
@@ -439,7 +439,10 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
               cues.length;
     return readyToFinish
         ? 1
-        : (audio * 0.9 + translated * 0.1).clamp(0.0, 0.9999);
+        : ((audioAvailability.fraction ?? 0) * 0.45 +
+                  recognized * 0.45 +
+                  translated * 0.1)
+              .clamp(0.0, 0.9999);
   }
 
   void reportSaveFailure(Object error) =>
@@ -579,21 +582,73 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!finished || waitingTranslation > 0) notifyListeners();
     });
-    if (!retainedOnly) {
-      _audioScanTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-        if (!finished && !stopped) unawaited(_refreshAudioAvailability());
-      });
-    }
     AppLog.i(
       'phụ đề',
       'Bắt đầu ${AppLog.url(input)} · tiếng $language · ${cues.length} dòng có sẵn',
     );
-    _prepareTranslator();
     try {
       await _initializeStorage();
       if (!_disposed && !stopped) _schedule();
     } catch (e, st) {
       _fail('$e', st);
+    }
+  }
+
+  Future<void> _downloadThenRecognize() async {
+    final download = _download = FullAudioDownload(
+      videoId: videoId,
+      store: audioStore,
+      archive: _audioArchive!,
+      duration: () => duration,
+      source: () => _resolving ??= _audioSource(),
+      headers: () => _hls && !_noRelay ? const {} : (_liveHeaders ?? headers),
+      hls: () => _hls,
+      createFeed: _createFeed,
+      nextGeneration: () => ++_nextGen,
+      hidden: audioHidden,
+      onProgress: (audio) {
+        if (_disposed || stopped) return;
+        if (audio.seconds > _availableAudio.seconds + .001) {
+          lastActivity = DateTime.now();
+        }
+        _availableAudio = audio;
+        notifyListeners();
+      },
+      onStatus: (message) {
+        if (!_disposed && !stopped) _set(message);
+      },
+      onRetry: (failure) {
+        _resolving = null;
+        _source = null;
+        if (failure.contains('127.0.0.1') && !_noRelay) {
+          _noRelay = true;
+        } else if (!_fileRelay &&
+            !_noRelay &&
+            !_hls &&
+            Platform.isIOS &&
+            input.startsWith('http')) {
+          _fileRelay = true;
+        }
+      },
+    );
+    try {
+      final lease = await download.run();
+      if (_disposed || stopped || lease == null) {
+        await lease?.close();
+        return;
+      }
+      await _retainedInput?.close();
+      _retainedInput = lease;
+      _availableAudio = lease.availability(duration: duration);
+      _recognitionReady = true;
+      needsAudioSource = false;
+      _set('Đã tải đủ âm thanh · bắt đầu nhận dạng và dịch');
+      _prepareTranslator();
+      _schedule();
+    } catch (e, st) {
+      if (!_disposed && !stopped) _fail('Chưa tải đủ âm thanh: $e', st);
+    } finally {
+      _audioTask = null;
     }
   }
 
@@ -662,6 +717,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _prepareTranslator() {
+    if (!_recognitionReady) return;
     final engine = _translator;
     final epoch = _translationEpoch;
     Future<void> prepare() async {
@@ -798,7 +854,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       headers,
       language: language == 'auto' ? '' : language,
     );
-    if (_disposed) throw const TranslationCancelled();
+    if (_disposed || stopped) throw const TranslationCancelled();
     _hls = '$resolved $input'.contains('m3u8');
     if (_noRelay) return _source = resolved;
     // A plain file is read by ffmpeg directly (one fast stream); the relay
@@ -807,7 +863,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     if (!_hls && !_fileRelay) return _source = resolved;
     // HLS goes through the relay, which strips fake picture headers.
     final proxy = _proxy ??= await HlsProxy.start(headers);
-    if (_disposed) {
+    if (_disposed || stopped) {
       await proxy.close();
       throw const TranslationCancelled();
     }
@@ -829,78 +885,26 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     if (_disposed || stopped || _root == null || error != null || paused) {
       return;
     }
-    if (retainedOnly) {
-      _scheduleRetained();
-      return;
-    }
-    final occupied = [
-      ...covered,
-      for (final r in _runs.values) (r.base, r.end ?? double.infinity),
-    ];
-    final free = [
-      for (var i = 0; i < _slots; i++)
-        if (!_runs.containsKey(i)) i,
-    ];
-    if (free.isEmpty) return;
-    late final List<(double, double?)> plan;
-    final length = _planDuration;
-    if (length <= 0) {
-      if (_runs.isNotEmpty) return;
-      var from = _position;
-      for (final r in mergeRanges(occupied)) {
-        if (from >= r.$1 && from < r.$2) from = r.$2;
-      }
-      plan = reachedEnd ? [] : [(from, runEnd(occupied, from))];
-    } else if (_mode == SubtitleMode.follow) {
-      final next = nextStart(
-        covered: occupied,
-        duration: length,
-        position: _position,
-        mode: _mode,
-      );
-      if (next != null && next - _position > kFollowAhead) {
-        _pauseAt(next);
+    if (!_recognitionReady) {
+      final ranges = covered;
+      final textOnly =
+          ranges.length == 1 &&
+          ranges.single.$1 <= .001 &&
+          (duration > 0 ? ranges.single.$2 >= duration - .001 : reachedEnd);
+      if (textOnly || retainedOnly && audioAvailability.complete) {
+        _recognitionReady = true;
+        _prepareTranslator();
+      } else if (retainedOnly) {
+        needsAudioSource = true;
+        paused = true;
+        _set('Cần tải đủ âm thanh trước khi nhận dạng và dịch');
+        return;
+      } else {
+        _audioTask ??= _downloadThenRecognize();
         return;
       }
-      plan = next == null
-          ? []
-          : [
-              (
-                next,
-                planRuns(
-                  covered: occupied,
-                  duration: length,
-                  position: next,
-                  slots: 1,
-                ).first.$2,
-              ),
-            ];
-    } else {
-      plan = planRuns(
-        covered: occupied,
-        duration: length,
-        position: _position,
-        slots: free.length,
-      );
     }
-    if (plan.isEmpty && _runs.isEmpty) {
-      if (!finished) {
-        finished = true;
-        _retranslate();
-        _set(
-          cues.isEmpty
-              ? 'Đã nghe hết nhưng không thấy lời thoại'
-              : 'Đã nghe xong',
-        );
-      }
-      return;
-    }
-    for (var i = 0; i < plan.length; i++) {
-      final r = _Run(free[i], ++_nextGen, plan[i].$1, plan[i].$2);
-      _runs[r.slot] = r;
-      finished = false;
-      r.opening = _startRun(r);
-    }
+    _scheduleRetained();
   }
 
   void _scheduleRetained() {
@@ -913,6 +917,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       covered,
       [for (final r in _runs.values) (r.base, r.end!)],
       free.length,
+      position: _position,
     );
     if (plans.isEmpty && _runs.isEmpty) {
       final ranges = covered;
@@ -956,7 +961,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _startRun(_Run r) async {
     try {
-      // In particular, release the old native workers before reallocating on a seek.
       await Future.wait(_retiring.toList());
       if (!_owns(r)) return;
       final dir = await Directory(p.join(_root!.path, 'g${r.gen}')).create();
@@ -965,65 +969,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       r.dir = dir;
-      if (r.retained != null) {
-        await _openWorker(r);
-        return;
-      }
-      final audioDir = await _audioArchive!.createRun(r.gen, r.base);
-      r.audioDir = audioDir;
-      if (!_owns(r)) return;
-      r.phase = 'Đang kết nối nguồn âm thanh';
-      notifyListeners();
-      final source = await (_resolving ??= _audioSource());
-      if (!_owns(r)) return;
-      r.phase = 'Đang chờ lượt tải âm thanh';
-      notifyListeners();
-      final releaseExtraction = await VideoPipeline.extraction.acquire(
-        videoId,
-        cancelled: r.cancelled.future,
-      );
-      if (!_owns(r)) {
-        releaseExtraction();
-        return;
-      }
-      r.releaseExtraction = releaseExtraction;
-      final feed = r.feed = _createFeed();
-      r.phase = 'Đang tải và lưu âm thanh';
-      notifyListeners();
-      final end = r.end;
-      final stop = end == null
-          ? null
-          : _planDuration > 0
-          ? math.min(_planDuration, end + 2)
-          : end;
-      AppLog.i(
-        'phụ đề',
-        'Lượt ${r.slot + 1} từ ${_clock(r.base)} → ${stop == null ? 'hết phim' : _clock(stop)}',
-      );
-      await feed.start(
-        input: source,
-        outDir: audioDir.path,
-        headers: _hls && !_noRelay ? const {} : headers,
-        hls: _hls,
-        startSec: r.base,
-        lengthSec: stop == null ? null : stop - r.base,
-      );
-      if (!_owns(r)) {
-        await feed.stop();
-        return;
-      }
-      r.extractionPoll = Timer.periodic(const Duration(milliseconds: 400), (
-        timer,
-      ) {
-        if (feed.done || !_owns(r)) {
-          if (feed.done && _owns(r)) _recordExtraction(r);
-          timer.cancel();
-          r.releaseExtraction?.call();
-          r.releaseExtraction = null;
-        }
-      });
-      // Audio extraction can run while another film occupies recognition.
-      // Limit native model allocations as well as simultaneous decoding.
       await _openWorker(r);
     } catch (e, st) {
       if (!_owns(r)) return;
@@ -1053,6 +998,17 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     r.releaseModel = releaseModel;
     r.phase = 'Đang nạp bộ nhận dạng';
     notifyListeners();
+    if (_usesDefaultWorker && !await ModelStore.isReady()) {
+      await ModelStore.download((progress) {
+        if (_owns(r)) {
+          r.phase =
+              'Đang tải bộ nhận dạng: ${(progress * 100).floor()}% · âm thanh đã tải đủ';
+          lastActivity = DateTime.now();
+          _set(r.phase);
+        }
+      });
+      if (!_owns(r)) return;
+    }
     final worker = await _createWorker(language);
     if (!_owns(r)) {
       await worker.dispose();
@@ -1072,51 +1028,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   void _pump(_Run r) {
     if (!_owns(r) || r.lastSent) return;
-    if (r.retained != null) {
-      _pumpRetained(r);
-      return;
-    }
-    final feed = r.feed!;
-    if (waitingTranslation >= 160) {
-      r.lastChunk = DateTime.now();
-      return;
-    }
-    if (!feed.done &&
-        r.pending == 0 &&
-        DateTime.now().difference(r.lastChunk).inSeconds >= 60) {
-      _finish(r, 'Không nhận thêm âm thanh trong 60 giây');
-      return;
-    }
-    while (r.pending < 1) {
-      final current = File(p.join(r.audioDir!.path, chunkName(r.nextChunk)));
-      final next = File(p.join(r.audioDir!.path, chunkName(r.nextChunk + 1)));
-      if (!next.existsSync()) {
-        if (!feed.done) return;
-        r.lastSent = true;
-        if (!current.existsSync()) {
-          if (r.pending == 0) _finish(r, feed.error ?? '');
-          return;
-        }
-      }
-      r.pending++;
-      r.nextChunk++;
-      _chunksFed++;
-      r.lastChunk = DateTime.now();
-      unawaited(() async {
-        try {
-          // The worker may delete its input. It receives a disposable copy;
-          // the original audio remains private until explicit confirmation.
-          final working = await current.copy(
-            p.join(r.dir!.path, p.basename(current.path)),
-          );
-          if (!_owns(r)) return;
-          r.worker!.feed(r.gen, working.path, last: r.lastSent);
-        } catch (e, st) {
-          if (_owns(r)) _fail('$e', st);
-        }
-      }());
-      if (r.lastSent) return;
-    }
+    _pumpRetained(r);
   }
 
   void _pumpRetained(_Run r) {
@@ -1179,7 +1091,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         r.pending--;
         r.processedUntil = event.until;
         if (event.last || (r.lastSent && r.pending <= 0)) {
-          _finish(r, r.feed?.error ?? '');
+          _finish(r, '');
           return;
         }
         if (_mode == SubtitleMode.follow &&
@@ -1197,90 +1109,18 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   void _finish(_Run r, String failure) {
     if (!_owns(r)) return;
-    _recordExtraction(r);
-    if (r.retained == null) unawaited(_refreshAudioAvailability());
-    r.poll?.cancel();
-    r.extractionPoll?.cancel();
-    final at = r.processedUntil;
-    final tail =
-        duration > 0 && r.end == duration && at > r.base && at >= duration - 15;
-    if (tail || r.end == null && failure.isEmpty && at > r.base) {
-      // The container can run a few seconds longer than its audio track.
-      _audioEnd = math.min(at, duration > 0 ? duration : at);
-      reachedEnd = true;
-      failure = '';
-    }
-    // A successful but empty/premature EOF should not schedule the same hole forever.
-    if (!tail && failure.isEmpty && r.end != null && r.end! - at > 3) {
-      failure = 'Âm thanh kết thúc sớm ở ${_clock(at)}';
-    }
     if (failure.isNotEmpty) {
-      if (r.retained != null) {
-        _fail(
-          'Không nhận dạng được âm thanh đã lưu: $failure',
-          StackTrace.current,
-        );
-        return;
-      }
-      _feedError = failure;
-      AppLog.e(
-        'ffmpeg',
-        failure.length > 1500
-            ? failure.substring(failure.length - 1500)
-            : failure,
+      _fail(
+        'Không nhận dạng được âm thanh đã lưu: $failure',
+        StackTrace.current,
       );
-      if (failure.contains('127.0.0.1') && !_noRelay) {
-        _noRelay = true;
-      } else if (!_fileRelay &&
-          !_noRelay &&
-          !_hls &&
-          Platform.isIOS &&
-          input.startsWith('http')) {
-        _fileRelay = true;
-      }
-      final tries = (_retryCount[r.slot] ?? 0) + 1;
-      _retryCount[r.slot] = tries;
-      if (tries > (at - r.base < 1 ? 2 : 6)) {
-        _fail('Mất kết nối ở ${_clock(at)}: $failure', StackTrace.current);
-        return;
-      }
-      _resolving = null;
-      _source = null;
-      _set('Mất kết nối, đang nối lại (lần $tries)…');
-      r.poll = Timer(Duration(seconds: 2 * tries), () {
-        if (!_owns(r)) return;
-        _retire(r);
-        // Reserve this same range during backoff; its sibling keeps working.
-        final retry = _Run(r.slot, ++_nextGen, math.max(r.base, at - 2), r.end);
-        _runs[r.slot] = retry;
-        retry.opening = _startRun(retry);
-      });
       return;
     }
-    _feedError = '';
-    _retryCount.remove(r.slot);
-    if (r.end == null || duration > 0 && at >= duration - 1) reachedEnd = true;
+    final target = _retainedInput?.endOfAudio ?? duration;
+    if (target > 0 && r.processedUntil >= target - .001) reachedEnd = true;
     _retire(r);
     _schedule();
     if (!_disposed) notifyListeners();
-  }
-
-  void _recordExtraction(_Run r) {
-    if (r.retained != null ||
-        r.extractionRecorded ||
-        r.feed?.done != true ||
-        r.feed?.error != null ||
-        (r.end != null && (duration <= 0 || r.end! < duration - 0.1))) {
-      return;
-    }
-    r.extractionRecorded = true;
-    unawaited(
-      _audioArchive!
-          .recordRunEnd(r.gen, r.base, videoDuration: duration)
-          .catchError((Object e) {
-            AppLog.e('âm thanh', 'Chưa lưu được mốc kết thúc: $e');
-          }),
-    );
   }
 
   void _retire(_Run r) {
@@ -1297,12 +1137,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     final stopping =
         (() async {
           try {
-            await r.feed?.stop();
             await workerStopped;
             await r.opening;
           } finally {
-            r.releaseExtraction?.call();
-            r.releaseExtraction = null;
             r.releaseModel?.call();
             r.releaseModel = null;
             if (r.dir != null) await _deleteDir(r.dir!);
@@ -1330,7 +1167,6 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     paused = false;
     finished = false;
     _resumeAt = null;
-    _retryCount.clear();
     await Future.wait(_retiring.toList());
     if (!_disposed && epoch == _epoch) _schedule();
   }
@@ -1415,8 +1251,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void requestStop() {
     if (_disposed || stopped) return;
     stopped = true;
+    _download?.cancel();
     _tick?.cancel();
-    _audioScanTimer?.cancel();
     _translationEpoch++;
     for (final run in _runs.values.toList()) {
       _retire(run);
@@ -1592,11 +1428,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     final host = Uri.tryParse(input)?.host ?? '';
     final workers = _runs.values.where((r) => r.worker != null).length;
     final loadingWorker = _runs.values.any(
-      (r) => r.phase == 'Đang nạp bộ nhận dạng' && r.worker == null,
+      (r) => !r.waitingSlot && r.worker == null,
     );
-    final connectingAudio = _runs.values.any(
-      (r) => r.phase == 'Đang kết nối nguồn âm thanh',
-    );
+    final connectingAudio = _download?.connecting ?? false;
+    final readLocal =
+        retainedOnly || _recognitionReady && _retainedInput != null;
     final textOnly = retainedOnly && _retainedInput?.chunks.isEmpty == true;
     final failed = error != null;
     StageState progress(bool ready, bool active) => ready
@@ -1645,13 +1481,13 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
             : 'Đang chuẩn bị bộ dịch',
       ),
       SessionStep(
-        retainedOnly ? 'Đọc âm thanh trong app' : 'Kết nối luồng âm thanh',
-        retainedOnly
+        readLocal ? 'Đọc âm thanh trong app' : 'Kết nối luồng âm thanh',
+        readLocal
             ? audioAvailability.seconds > 0
                   ? StageState.done
                   : StageState.skipped
             : progress(_source != null, connectingAudio),
-        retainedOnly
+        readLocal
             ? 'Dùng file đã lưu, không kết nối lại trang web'
             : _source == null
             ? connectingAudio
@@ -1719,9 +1555,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _download?.cancel();
     if (_started) WidgetsBinding.instance.removeObserver(this);
     _tick?.cancel();
-    _audioScanTimer?.cancel();
     for (final r in _runs.values.toList()) {
       _retire(r);
     }

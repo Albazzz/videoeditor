@@ -9,6 +9,7 @@ import 'package:video/services/audio_feed.dart';
 import 'package:video/services/retained_audio.dart';
 import 'package:video/services/subtitle_session.dart';
 import 'package:video/services/translator.dart';
+import 'support/pcm_audio.dart';
 
 Future<void> until(bool Function() ready) async {
   final deadline = DateTime.now().add(const Duration(seconds: 5));
@@ -28,8 +29,7 @@ class _Feed extends AudioFeed {
     double? lengthSec,
     bool hls = false,
   }) async {
-    await File('$outDir/${chunkName(0)}').writeAsBytes([1, 2, 3, 4]);
-    await File('$outDir/${chunkName(1)}').writeAsBytes([5, 6, 7, 8]);
+    await writeAudioChunks(outDir, lengthSec ?? 8);
     done = true;
   }
 }
@@ -194,7 +194,7 @@ void main() {
       await until(() => Directory('${temp.path}/vsub').listSync().isEmpty);
       expect(worker.paths.every((path) => path.contains('vsub')), isTrue);
       final retained = (await store.list()).single;
-      expect(retained.bytes, 8);
+      expect(retained.bytes, 8 * 32000 + 2 * 44);
       expect(retained.chunks, 2);
       expect(retained.completed, isTrue);
       await store.deleteConfirmed('A');
