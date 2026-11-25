@@ -14,6 +14,8 @@ import '../services/retained_audio.dart';
 import '../services/subtitle_store.dart';
 import '../services/subtitle_resume.dart';
 import '../widgets/subtitle_resume.dart';
+import '../widgets/subtitle_pipeline_progress.dart';
+import '../widgets/session_progress.dart';
 import '../services/translator.dart';
 import '../services/video_library.dart';
 import '../widgets/bookmarks_sheet.dart';
@@ -86,11 +88,13 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   final _videoTranslated = <String, bool>{};
   Map<String, String> _folderOf = {};
   Map<String, int> _audio = {};
+  Map<String, RetainedAudio> _audioInfo = {};
   int _bytes = 0;
   String? _thumbs;
 
   /// Folders opened to show their subtitles.
   final _expanded = <String>{};
+  final _scroll = ScrollController();
 
   /// Subtitles picked for an action on several at once.
   final _picked = <String>{};
@@ -124,6 +128,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     Bookmarks.pictureChanges.removeListener(_changedSoon);
     ActiveWork.all.removeListener(_changedSoon);
     _soon?.cancel();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -142,15 +147,9 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       SubtitleStore.summaries(),
       SubtitleStore.storageBytes(),
       Bookmarks.subtitleFolders(),
-      RetainedAudioStore.instance
-          .list()
-          .then<Object>(
-            (all) => {
-              for (final a in all)
-                if (a.bytes > 0) a.videoId: a.bytes,
-            },
-          )
-          .catchError((Object _) => <String, int>{}),
+      RetainedAudioStore.instance.list().catchError(
+        (Object _) => <RetainedAudio>[],
+      ),
     ]);
     if (!mounted) return;
     final web = results[0] as List<SubsInfo>;
@@ -158,7 +157,12 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       _web = web;
       _bytes = results[1] as int;
       _folderOf = results[2] as Map<String, String>;
-      _audio = results[3] as Map<String, int>;
+      final audio = results[3] as List<RetainedAudio>;
+      _audioInfo = {
+        for (final a in audio)
+          if (a.bytes > 0) a.videoId: a,
+      };
+      _audio = {for (final a in _audioInfo.values) a.videoId: a.bytes};
       _picked.removeWhere((id) => !web.any((s) => s.id == id));
     });
     // Library videos after: the web list is already on screen.
@@ -485,7 +489,13 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     return ListTile(
       selected: picked,
       leading: _picking
-          ? Checkbox(value: picked, onChanged: (_) => _toggle(s.id))
+          ? SizedBox(
+              width: 64,
+              height: 40,
+              child: Center(
+                child: Checkbox(value: picked, onChanged: (_) => _toggle(s.id)),
+              ),
+            )
           : _picture(s),
       title: Text(_name(s), maxLines: 2, overflow: TextOverflow.ellipsis),
       subtitle: Column(
@@ -513,6 +523,8 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
             translated: s.lines > s.untranslated,
             audio: (audio ?? 0) > 0,
           ),
+          if (_audioInfo[s.id] case final RetainedAudio stored)
+            Text(stored.availability.withDuration(s.duration).label),
           Text(
             '${s.lines} dòng · '
             '${kLanguages[s.language] ?? s.language} · '
@@ -520,87 +532,84 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
             '${s.untranslated > 0 ? ' · ${s.untranslated} câu chưa dịch' : ''}'
             '${audio != null ? ' · chưa xoá âm thanh ${_size(audio)}' : ''}',
           ),
+          ValueListenableBuilder(
+            valueListenable: ActiveWork.all,
+            builder: (context, _, _) {
+              final running = ActiveWork.find(s.id) != null;
+              if (!running && !s.canResume) return const SizedBox.shrink();
+              return Visibility(
+                visible: !_picking,
+                maintainSize: true,
+                maintainAnimation: true,
+                maintainState: true,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: running
+                      ? const Text('Đang làm')
+                      : TextButton(
+                          onPressed: () => _resume(s),
+                          child: const Text('Làm tiếp'),
+                        ),
+                ),
+              );
+            },
+          ),
         ],
       ),
       isThreeLine: true,
-      trailing: _picking
-          ? null
-          : ValueListenableBuilder(
-              valueListenable: ActiveWork.all,
-              builder: (context, _, _) {
-                final running = ActiveWork.find(s.id) != null;
-                final resume = s.canResume && !running;
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (resume)
-                      TextButton(
-                        onPressed: () => _resume(s),
-                        child: const Text('Làm tiếp'),
-                      )
-                    else if (running)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: Text('Đang làm'),
-                      ),
-                    PopupMenuButton<String>(
-                      tooltip: 'Thêm',
-                      onSelected: (v) => _webAction(s, v),
-                      itemBuilder: (_) => [
-                        const PopupMenuItem(
-                          value: 'picture',
-                          child: Text('Đổi ảnh đại diện'),
-                        ),
-                        const PopupMenuItem(
-                          value: 'view',
-                          child: Text('Xem / sửa phụ đề'),
-                        ),
-                        if (web)
-                          const PopupMenuItem(
-                            value: 'open',
-                            child: Text('Mở trang'),
-                          ),
-                        if (resume)
-                          const PopupMenuItem(
-                            value: 'resume',
-                            child: Text('Làm tiếp'),
-                          ),
-                        if (running)
-                          CheckedPopupMenuItem(
-                            value: 'prefer',
-                            checked:
-                                ActiveWork.find(s.id)?.session.preferred ??
-                                false,
-                            child: const Text('Ưu tiên phim này'),
-                          ),
-                        if (web)
-                          const PopupMenuItem(
-                            value: 'restart',
-                            child: Text('Làm lại từ đầu'),
-                          ),
-                        const PopupMenuItem(
-                          value: 'folder',
-                          child: Text('Chuyển vào thư mục…'),
-                        ),
-                        const PopupMenuItem(
-                          value: 'rename',
-                          child: Text('Đổi tên'),
-                        ),
-                        if (audio != null)
-                          const PopupMenuItem(
-                            value: 'audio',
-                            child: Text('Xoá âm thanh đã giữ'),
-                          ),
-                        const PopupMenuItem(
-                          value: 'delete',
-                          child: Text('Xoá'),
-                        ),
-                      ],
-                    ),
-                  ],
-                );
-              },
-            ),
+      trailing: Visibility(
+        visible: !_picking,
+        maintainSize: true,
+        maintainAnimation: true,
+        maintainState: true,
+        child: ValueListenableBuilder(
+          valueListenable: ActiveWork.all,
+          builder: (context, _, _) {
+            final running = ActiveWork.find(s.id) != null;
+            final resume = s.canResume && !running;
+            return PopupMenuButton<String>(
+              tooltip: 'Thêm',
+              onSelected: (v) => _webAction(s, v),
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'picture',
+                  child: Text('Đổi ảnh đại diện'),
+                ),
+                const PopupMenuItem(
+                  value: 'view',
+                  child: Text('Xem / sửa phụ đề'),
+                ),
+                if (web)
+                  const PopupMenuItem(value: 'open', child: Text('Mở trang')),
+                if (resume)
+                  const PopupMenuItem(value: 'resume', child: Text('Làm tiếp')),
+                if (running)
+                  CheckedPopupMenuItem(
+                    value: 'prefer',
+                    checked: ActiveWork.find(s.id)?.session.preferred ?? false,
+                    child: const Text('Ưu tiên phim này'),
+                  ),
+                if (web)
+                  const PopupMenuItem(
+                    value: 'restart',
+                    child: Text('Làm lại từ đầu'),
+                  ),
+                const PopupMenuItem(
+                  value: 'folder',
+                  child: Text('Chuyển vào thư mục…'),
+                ),
+                const PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+                if (audio != null)
+                  const PopupMenuItem(
+                    value: 'audio',
+                    child: Text('Xoá âm thanh đã giữ'),
+                  ),
+                const PopupMenuItem(value: 'delete', child: Text('Xoá')),
+              ],
+            );
+          },
+        ),
+      ),
       onTap: _picking
           ? () => _toggle(s.id)
           : web
@@ -611,7 +620,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
   }
 
   Widget _folderRow(String folder, int count) {
-    final open = _expanded.contains(folder) || _picking;
+    final open = _expanded.contains(folder);
     return FolderGroupHeader(
       expanded: open,
       title: folder,
@@ -706,7 +715,9 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
             ChoiceChip(
               label: Text(choice.$2),
               selected: _filter == choice.$1,
-              onSelected: (_) => setState(() => _filter = choice.$1),
+              onSelected: _picking
+                  ? null
+                  : (_) => setState(() => _filter = choice.$1),
             ),
         ],
       ),
@@ -732,7 +743,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         )
         .toList();
     final rows = <Widget Function()>[
-      if (!_picking) _filters,
+      _filters,
       () => const _ActiveCard(),
       () => const _StoppedCards(),
     ];
@@ -761,7 +772,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
       for (final folder in byFolder.keys.toList()..sort()) {
         final list = byFolder[folder]!;
         rows.add(() => _folderRow(folder, list.length));
-        if (_expanded.contains(folder) || _picking) {
+        if (_expanded.contains(folder)) {
           for (final s in list) {
             rows.add(
               () => FolderGroupEntry(last: s == list.last, child: _webRow(s)),
@@ -784,10 +795,13 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
         }
       }
     }
-    if (videos.isNotEmpty && !_picking) {
+    if (videos.isNotEmpty) {
       rows.add(() => const _Section('Video trong Thư viện'));
       for (final (item, count) in videos) {
-        rows.add(() => _videoRow(item, count));
+        rows.add(
+          () =>
+              IgnorePointer(ignoring: _picking, child: _videoRow(item, count)),
+        );
       }
     }
     if (web.isEmpty && videos.isEmpty) {
@@ -924,6 +938,8 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
                   builder: (context) {
                     final rows = _rows(web);
                     return ListView.builder(
+                      key: const PageStorageKey('subtitle-library-list'),
+                      controller: _scroll,
                       itemCount: rows.length,
                       itemBuilder: (context, i) => rows[i](),
                     );
@@ -1346,9 +1362,13 @@ class _WorkCard extends StatelessWidget {
                     onPressed: () => session.preferred = !session.preferred,
                   ),
                   IconButton(
-                    tooltip: 'Chi tiết phụ đề',
+                    tooltip: 'Xem tiến trình',
                     icon: const Icon(Icons.info_outline),
-                    onPressed: () => showSessionDetails(context, session),
+                    onPressed: () => showSessionProgress(
+                      context,
+                      session,
+                      title: work.title,
+                    ),
                   ),
                   TextButton(
                     onPressed: () => ActiveWork.stop(session),
@@ -1369,16 +1389,7 @@ class _WorkCard extends StatelessWidget {
                 ),
               SessionRetryButton(session: session),
               Text(session.languageNotice),
-              if (session.duration > 0)
-                CoverageBar(
-                  covered: session.covered,
-                  duration: session.duration,
-                  done: coversWholeVideo(
-                    session.covered,
-                    session.duration,
-                    reachedEnd: session.reachedEnd,
-                  ),
-                ),
+              SubtitlePipelineProgress(session: session),
               Text(
                 '${session.stage} · ${session.cues.length} dòng',
                 style: Theme.of(context).textTheme.bodySmall,

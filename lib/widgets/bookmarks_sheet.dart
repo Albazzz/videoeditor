@@ -430,7 +430,16 @@ class _BookmarksViewState extends State<BookmarksView> {
     return ListTile(
       selected: picked,
       leading: _picking
-          ? Checkbox(value: picked, onChanged: (_) => _toggle(b.url))
+          ? SizedBox(
+              width: 64,
+              height: 40,
+              child: Center(
+                child: Checkbox(
+                  value: picked,
+                  onChanged: (_) => _toggle(b.url),
+                ),
+              ),
+            )
           : _picture(b),
       title: Text(
         b.title.isEmpty ? b.host : b.title,
@@ -454,25 +463,23 @@ class _BookmarksViewState extends State<BookmarksView> {
                 ),
               ],
             ),
-      trailing: _picking
-          ? null
-          : PopupMenuButton<String>(
-              tooltip: 'Sửa trang',
-              onSelected: (v) => _pageAction(b, v),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'newtab', child: Text('Mở trong tab mới')),
-                PopupMenuItem(
-                  value: 'picture',
-                  child: Text('Đổi ảnh đại diện'),
-                ),
-                PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
-                PopupMenuItem(
-                  value: 'move',
-                  child: Text('Chuyển vào thư mục…'),
-                ),
-                PopupMenuItem(value: 'remove', child: Text('Xoá')),
-              ],
-            ),
+      trailing: Visibility(
+        visible: !_picking,
+        maintainSize: true,
+        maintainAnimation: true,
+        maintainState: true,
+        child: PopupMenuButton<String>(
+          tooltip: 'Sửa trang',
+          onSelected: (v) => _pageAction(b, v),
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'newtab', child: Text('Mở trong tab mới')),
+            PopupMenuItem(value: 'picture', child: Text('Đổi ảnh đại diện')),
+            PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+            PopupMenuItem(value: 'move', child: Text('Chuyển vào thư mục…')),
+            PopupMenuItem(value: 'remove', child: Text('Xoá')),
+          ],
+        ),
+      ),
       onTap: _picking ? () => _toggle(b.url) : () => widget.onOpen(b.url),
       onLongPress: () => _toggle(b.url),
     );
@@ -571,7 +578,7 @@ class _BookmarksViewState extends State<BookmarksView> {
           inside.isEmpty) {
         continue;
       }
-      final open = searching || _picking || _expanded.contains(folder);
+      final open = searching || _expanded.contains(folder);
       rows.add(() => _folderRow(folder, open, inside.length));
       if (open) {
         if (inside.isEmpty) {

@@ -37,6 +37,13 @@ dịch, app dịch tiếp từ lời gốc mà không cần lấy lại âm than
 âm thanh đang có trước; chỉ yêu cầu mở lại web khi còn thiếu đoạn cần nhận dạng.
 Các mốc thời gian và file âm thanh gốc được giữ nguyên.
 
+Tiến trình hiển thị riêng **Âm thanh đã lưu: …%**, **Đã nhận dạng: …%** và
+**Đã dịch: … / … câu** trong thanh video, kho phụ đề và kho âm thanh. Phần trăm
+âm thanh tính từ các WAV đã ghi xong, gộp các lượt tải trùng và giữ nguyên khoảng
+trống; file đang ghi dở không được tính. Có một file âm thanh chưa có nghĩa là
+đã tải hết. Nếu nguồn bị chặn trước khi đủ âm thanh, app báo mốc thiếu và xử lý
+được phần đã lưu; khi chưa rõ tổng thời lượng, chỉ hiện thời lượng đang có.
+
 Trên Android, kho âm thanh ở `noBackupFilesDir`; trên iOS, ở Application Support
 với quyền thư mục chỉ dành cho chủ sở hữu, Data Protection và loại khỏi backup.
 Kho này không được đưa vào Documents, Tệp, MediaStore hoặc chức năng chia sẻ;
@@ -50,6 +57,8 @@ Kiểm tra: `flutter test`, `dart analyze lib test`,
 ## Ảnh đại diện, bản dịch trang và thử lại
 
 - Khi lưu trang hoặc nhập phụ đề, có thể xem/chọn ảnh đại diện trước khi xác nhận.
+  Menu ba chấm trên trang web có **Chụp ảnh đại diện…** để kéo khoanh vùng và
+  dùng vùng đã chọn, kể cả trước khi lưu trang. Ảnh đã chọn được giữ khi lưu sau đó.
   Trong trình duyệt có thể chụp lại trang; trên điện thoại có thể chụp bằng camera.
   Ảnh chụp được giữ trong dữ liệu riêng của app, không thêm vào thư viện ảnh.
   Menu trang lưu và phụ đề cho phép đổi ảnh; ảnh phụ đề được giữ riêng theo video.

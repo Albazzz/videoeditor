@@ -215,6 +215,146 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  for (final subtitles in [false, true]) {
+    testWidgets(
+      '${subtitles ? 'subtitles' : 'saved pages'} selection keeps scroll and folders until explicitly opened',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.runAsync(() async {
+          await Bookmarks.createFolder('A đang đóng');
+          final inFolder = <String>[];
+          for (var i = 0; i < 18; i++) {
+            final closed = i == 17;
+            final id = 'selection-$i';
+            final title = closed
+                ? 'Nội dung chỉ hiện khi tự mở'
+                : 'Danh sách $i với tên video dài để kiểm tra bố cục khi chọn nhiều';
+            if (subtitles) {
+              await SubtitleStore.save(
+                SavedSubs(
+                  id: id,
+                  title: title,
+                  page: 'https://example.org/$id',
+                  language: 'ja',
+                  updated: DateTime(2026, 11, 24, 0, i),
+                  cues: const [Cue(start: 0, end: 1, text: 'Xin chào')],
+                  covered: const [(0, 400)],
+                  duration: 1000,
+                ),
+              );
+              if (closed) {
+                await Bookmarks.moveSubtitles([id], 'A đang đóng');
+              } else {
+                inFolder.add(id);
+              }
+            } else {
+              await Bookmarks.add(
+                'https://example.org/$id',
+                title,
+                folder: closed ? 'A đang đóng' : 'Phim',
+              );
+            }
+          }
+          if (subtitles) await Bookmarks.moveSubtitles(inFolder, 'Phim');
+        });
+        await tester.pumpWidget(
+          MaterialApp(
+            home: subtitles
+                ? const SubtitleLibraryScreen()
+                : Scaffold(
+                    body: BookmarksView(
+                      onOpen: (_) => fail('Selection must not open a page'),
+                    ),
+                  ),
+          ),
+        );
+        await settleFiles(tester);
+        for (var i = 0; i < 10 && find.text('Phim').evaluate().isEmpty; i++) {
+          await settleFiles(tester);
+        }
+        await tester.tap(find.text('Phim'));
+        await settleFiles(tester);
+        final list = find.byKey(
+          PageStorageKey(subtitles ? 'subtitle-library-list' : 'bookmark-list'),
+        );
+        await tester.drag(list, const Offset(0, -600));
+        await tester.pumpAndSettle();
+        ScrollPosition position() => tester
+            .state<ScrollableState>(
+              find
+                  .descendant(of: list, matching: find.byType(Scrollable))
+                  .first,
+            )
+            .position;
+        final visible = find
+            .byWidgetPredicate(
+              (w) =>
+                  w is ListTile &&
+                  w.title is Text &&
+                  ((w.title as Text).data?.startsWith('Danh sách ') ?? false),
+            )
+            .hitTestable()
+            .first;
+        final title = (tester.widget<ListTile>(visible).title as Text).data!;
+        final target = find
+            .ancestor(of: find.text(title), matching: find.byType(ListTile))
+            .first;
+        final before = position().pixels;
+        final top = tester.getTopLeft(target).dy;
+        expect(before, greaterThan(0));
+        await tester.longPress(target);
+        await tester.pumpAndSettle();
+        expect(find.text('Đã chọn 1'), findsOneWidget);
+        expect(position().pixels, closeTo(before, 1));
+        expect(tester.getTopLeft(target).dy, closeTo(top, 1));
+        await tester.tap(find.byTooltip('Thôi chọn'));
+        await tester.pumpAndSettle();
+        expect(position().pixels, closeTo(before, 1));
+        expect(tester.getTopLeft(target).dy, closeTo(top, 1));
+
+        await tester.longPress(target);
+        await tester.pumpAndSettle();
+        await tester.drag(list, const Offset(0, 2000));
+        await tester.pumpAndSettle();
+        Finder folder(String title) => find.byWidgetPredicate(
+          (w) => w is FolderGroupHeader && w.title == title,
+        );
+        expect(
+          tester.widget<FolderGroupHeader>(folder('A đang đóng')).expanded,
+          false,
+        );
+        await tester.tap(find.text('A đang đóng'));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<FolderGroupHeader>(folder('A đang đóng')).expanded,
+          true,
+        );
+        await tester.tap(find.text('Nội dung chỉ hiện khi tự mở'));
+        await tester.pumpAndSettle();
+        expect(find.text('Đã chọn 2'), findsOneWidget);
+        await tester.tap(find.byTooltip('Thôi chọn'));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<FolderGroupHeader>(folder('A đang đóng')).expanded,
+          true,
+        );
+        await tester.scrollUntilVisible(
+          folder('Phim'),
+          100,
+          scrollable: find
+              .descendant(of: list, matching: find.byType(Scrollable))
+              .first,
+        );
+        expect(tester.widget<FolderGroupHeader>(folder('Phim')).expanded, true);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
   testWidgets('reopening bookmarks sheet restores expanded folders', (
     tester,
   ) async {

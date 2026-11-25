@@ -33,8 +33,10 @@ import '../widgets/link_menu.dart';
 import '../widgets/subtitle_details.dart';
 import '../widgets/subtitle_import.dart';
 import '../widgets/picture_picker.dart';
+import '../widgets/crop_picture.dart';
 import '../widgets/subtitle_picker.dart';
 import '../widgets/session_progress.dart';
+import '../widgets/subtitle_pipeline_progress.dart';
 import '../widgets/subtitle_style.dart';
 import '../widgets/subtitle_revision.dart';
 import '../widgets/video_language.dart';
@@ -319,9 +321,43 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     screenshotConfiguration: ScreenshotConfiguration(
       compressFormat: CompressFormat.JPEG,
       quality: 80,
-      snapshotWidth: 640,
+      snapshotWidth: 1080,
     ),
   );
+
+  Future<Uint8List?> _captureRegion() async {
+    final bytes = await _capturePage();
+    if (!mounted) return null;
+    if (bytes == null) throw StateError('Không chụp được trang này');
+    return cropPicture(context, bytes);
+  }
+
+  Future<void> _captureThumbnail() async {
+    final page = _pageUrl;
+    final video = _video;
+    final id = video == null
+        ? null
+        : _saver?.page == page && _sessionSrc == video.src
+        ? _saver!.id
+        : SubtitleStore.idForVideo(page, video.src);
+    try {
+      final bytes = await _captureRegion();
+      if (bytes == null) return;
+      final name = await Bookmarks.saveThumb(page, bytes);
+      if (name.isEmpty) throw StateError('Không lưu được ảnh');
+      if (id != null) {
+        await Bookmarks.saveThumb(Bookmarks.subtitlePictureKey(id), bytes);
+      }
+      if (mounted) {
+        toast(
+          context,
+          'Đã lưu ảnh đại diện trong app để dùng cho trang và phụ đề',
+        );
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Không chụp được ảnh đại diện: $e');
+    }
+  }
 
   Future<void> _toggleBookmark() async {
     final (page, title) = await _pageInfo();
@@ -332,14 +368,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     } else {
       Uint8List? picture;
       try {
-        picture = await _capturePage();
+        picture = await Bookmarks.loadThumb(page) ?? await _capturePage();
       } catch (_) {}
       if (!mounted) return;
       final place = await askBookmarkPlace(
         context,
         title,
         initialPicture: picture,
-        capture: _capturePage,
+        capture: _captureRegion,
         onPicture: (v) => picture = v,
       );
       if (place == null || !mounted) return;
@@ -1103,7 +1139,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (video == null) return;
     final (page, title) = await _pageInfo();
     if (!mounted || page.isEmpty) return;
-    final imported = await importSubtitleFile(context, capture: _capturePage);
+    final imported = await importSubtitleFile(context, capture: _captureRegion);
     if (imported == null ||
         !mounted ||
         _video?.src != video.src ||
@@ -2234,10 +2270,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
               'home' => _go(kHomePage),
               'save' => _toggleBookmark(),
               'bookmarks' => _openBookmarks(),
+              'capturePicture' => _captureThumbnail(),
               'bookmarkPicture' => editStoredPicture(
                 context,
                 _pageUrl,
-                capture: _capturePage,
+                capture: _captureRegion,
               ),
               'clear' => _clearWebData(),
               'newtab' => widget.onNewTab(),
@@ -2268,6 +2305,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                 const PopupMenuItem(
                   value: 'bookmarkPicture',
                   child: Text('Đổi ảnh trang đã lưu…'),
+                ),
+              if (_pageUrl.startsWith('http'))
+                const PopupMenuItem(
+                  value: 'capturePicture',
+                  child: ListTile(
+                    leading: Icon(Icons.crop),
+                    title: Text('Chụp ảnh đại diện…'),
+                  ),
                 ),
               const PopupMenuItem(
                 value: 'history',
@@ -2377,6 +2422,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final style = theme.textTheme.labelSmall;
     return [
       const SizedBox(height: 4),
+      SubtitlePipelineProgress(session: session),
       Text(
         '${subtitleProgressLabel(covered: session.covered, duration: video.duration, reachedEnd: whole)}'
         ' · ${session.cues.length} dòng',
@@ -2524,7 +2570,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                           SubtitleStore.idForVideo(_pageUrl, video.src),
                         ),
                         fallbackKey: _pageUrl,
-                        capture: _capturePage,
+                        capture: _captureRegion,
                       ),
                       'language' => _changeLanguage(),
                       'revise' => _revise(),

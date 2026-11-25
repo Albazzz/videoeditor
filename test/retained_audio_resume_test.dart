@@ -3,16 +3,19 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video/models/cue.dart';
 import 'package:video/services/active_work.dart';
 import 'package:video/services/asr_worker.dart';
+import 'package:video/services/audio_feed.dart';
 import 'package:video/services/background_subtitles.dart';
 import 'package:video/services/retained_audio.dart';
 import 'package:video/services/subtitle_resume.dart';
 import 'package:video/services/subtitle_session.dart';
 import 'package:video/services/subtitle_store.dart';
 import 'package:video/services/translator.dart';
+import 'package:video/widgets/subtitle_pipeline_progress.dart';
 
 Uint8List _wav(double seconds) {
   final samples = (seconds * 16000).round();
@@ -42,6 +45,7 @@ class _Worker implements AsrWorker {
   int gen = 0;
   double at = 0;
   bool stopped = false;
+  bool emitEvents = true;
   @override
   Stream<AsrEvent> get events => controller.stream;
   @override
@@ -57,6 +61,7 @@ class _Worker implements AsrWorker {
     final start = at;
     at += duration;
     File(path).deleteSync();
+    if (!emitEvents) return;
     scheduleMicrotask(() {
       if (stopped) return;
       controller.add(
@@ -70,6 +75,24 @@ class _Worker implements AsrWorker {
   Future<void> dispose() async {
     stopped = true;
     await Future<void>.microtask(controller.close);
+  }
+}
+
+class _CompleteFeed extends AudioFeed {
+  @override
+  Future<void> start({
+    required String input,
+    required String outDir,
+    Map<String, String> headers = const {},
+    double startSec = 0,
+    double? lengthSec,
+    bool hls = false,
+  }) async {
+    const lengths = [3.0, 5.0, 10.0, 10.0, 10.0];
+    for (var i = 0; i < lengths.length; i++) {
+      await File('$outDir/${chunkName(i)}').writeAsBytes(_wav(lengths[i]));
+    }
+    done = true;
   }
 }
 
@@ -199,6 +222,14 @@ void main() {
       await SubtitleStore.save(sub);
       expect(await start(sub), SubtitleResumeResult.started);
       final session = ActiveWork.find('A')!.session;
+      expect(session.audioAvailability.percent, 100);
+      expect(session.covered, [(0.0, 18.0)]);
+      expect(
+        session.steps.any(
+          (s) => s.detail.contains('không kết nối lại trang web'),
+        ),
+        true,
+      );
       await _until(() => ActiveWork.wasCompleted(session));
       expect(workers.single.starts, [18.0, 28.0]);
       expect(modelChecks, 1);
@@ -233,6 +264,62 @@ void main() {
   );
 
   test(
+    'download can reach 100 percent while recognition is still waiting',
+    () async {
+      final worker = _Worker()..emitEvents = false;
+      final session = SubtitleSession(
+        input: 'test.mp4',
+        videoId: 'A',
+        language: 'en',
+        retainedAudio: store,
+        parallel: false,
+        temporaryDirectory: () async => root,
+        translator: _Translator(),
+        createFeed: _CompleteFeed.new,
+        createWorker: (_) async => worker,
+      )..duration = 38;
+      try {
+        await session.start(0);
+        await _until(() => session.audioAvailability.complete);
+        expect(session.audioAvailability.percent, 100);
+        expect(session.covered, isEmpty);
+        expect(session.readyToFinish, false);
+        expect((await store.list()).single.availability.complete, true);
+      } finally {
+        session.requestStop();
+        session.dispose();
+        await session.closeAudio();
+      }
+    },
+  );
+
+  testWidgets(
+    'cached work visibly advances recognition independently of downloaded audio',
+    (tester) async {
+      await tester.runAsync(() async {
+        await seed();
+        await start(saved());
+      });
+      final session = ActiveWork.find('A')!.session;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: SubtitlePipelineProgress(session: session)),
+        ),
+      );
+      expect(find.text('Âm thanh đã lưu: 100% · 0:38 / 0:38'), findsOneWidget);
+      expect(find.text('Đã nhận dạng: 47% · 0:18 / 0:38'), findsOneWidget);
+      await tester.runAsync(
+        () => _until(() => session.covered.single.$2 >= 28),
+      );
+      await tester.pump();
+      expect(find.text('Đã nhận dạng: 73% · 0:28 / 0:38'), findsOneWidget);
+      expect(find.text('Đã dịch: 2 / 2 câu đã nhận dạng'), findsOneWidget);
+      expect(find.text('Âm thanh đã lưu: 100% · 0:38 / 0:38'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  test(
     'partial cache is processed first; only the genuinely missing tail needs a source',
     () async {
       await seed();
@@ -246,6 +333,12 @@ void main() {
       expect(workers.single.starts, [18.0, 28.0]);
       expect(ActiveWork.wasCompleted(session), false);
       expect(session.covered, [(0.0, 38.0)]);
+      expect(session.audioAvailability.percent, 65);
+      expect(session.audioAvailability.complete, false);
+      expect(
+        session.steps.firstWhere((s) => s.title == 'Tải và lưu âm thanh').state,
+        StageState.failed,
+      );
       await ActiveWork.persist('A');
       expect(await start(sub), SubtitleResumeResult.needsSource);
       expect((await SubtitleStore.load('A'))!.covered, [(0.0, 38.0)]);
@@ -312,6 +405,24 @@ void main() {
       await lease.close();
       await store.deleteConfirmed('A');
       expect(await store.list(), isEmpty);
+    },
+  );
+
+  test(
+    'unfinished WAVs are excluded even when audio files occupy disk space',
+    () async {
+      await seed();
+      final lease = (await store.acquire('A'))!;
+      final unfinished = lease.chunks[2].file;
+      await lease.close();
+      final bytes = await unfinished.readAsBytes();
+      ByteData.sublistView(bytes).setUint32(40, 0xffffffff, Endian.little);
+      await unfinished.writeAsBytes(bytes);
+      final audio = (await store.list()).single;
+      expect(audio.bytes, greaterThan(0));
+      expect(audio.availability.percent, 73);
+      expect(audio.availability.complete, false);
+      expect(audio.availability.firstMissing, 8);
     },
   );
 

@@ -27,7 +27,7 @@ class _Mark extends StatelessWidget {
     children: [
       Icon(icon, size: 14, color: Colors.tealAccent),
       const SizedBox(width: 4),
-      Text(text, style: const TextStyle(fontSize: 12)),
+      Flexible(child: Text(text, style: const TextStyle(fontSize: 12))),
     ],
   );
 }

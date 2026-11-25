@@ -104,22 +104,26 @@ void main() {
 }
 
 void progressTests() {
-  test('a new session lists every step, the first done', () {
-    final s = SubtitleSession(
-      input: 'https://cdn.example/v.m3u8',
-      language: 'ja',
-    );
-    final steps = s.steps;
-    expect(steps.length, 7);
-    expect(steps.first.state, StageState.done);
-    expect(steps.first.detail, 'cdn.example');
-    expect(steps[1].state, StageState.active);
-    // No translator on this machine: translating is skipped, not stuck.
-    expect(steps[2].state, StageState.skipped);
-    expect(steps.last.state, StageState.skipped);
-    expect(s.activity, SessionActivity.working);
-    s.dispose();
-  });
+  test(
+    'a new session lists every step and waits before loading recognition',
+    () {
+      final s = SubtitleSession(
+        input: 'https://cdn.example/v.m3u8',
+        language: 'ja',
+      );
+      final steps = s.steps;
+      expect(steps.length, 7);
+      expect(steps.first.state, StageState.done);
+      expect(steps.first.detail, 'cdn.example');
+      expect(steps[1].state, StageState.waiting);
+      expect(steps[1].detail, 'Chờ lượt nhận dạng');
+      // No translator on this machine: translating is skipped, not stuck.
+      expect(steps[2].state, StageState.skipped);
+      expect(steps.last.state, StageState.skipped);
+      expect(s.activity, SessionActivity.working);
+      s.dispose();
+    },
+  );
 
   testWidgets('the progress sheet opens from the icon', (tester) async {
     final s = SubtitleSession(

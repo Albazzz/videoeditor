@@ -21,6 +21,7 @@ import 'translator.dart';
 import 'video_language.dart';
 import 'video_pipeline.dart';
 import 'retained_audio.dart';
+import 'audio_availability.dart';
 
 /// How far ahead of the viewer subtitles are made.
 enum SubtitleMode {
@@ -161,6 +162,7 @@ class _Run {
   int pending = 0, nextChunk = 0;
   bool lastSent = false;
   bool extractionRecorded = false;
+  String phase = 'Đang chuẩn bị âm thanh';
 
   /// Queued for a recogniser (another film's stretch is more urgent).
   bool waitingSlot = false;
@@ -236,6 +238,12 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _audioCompleted = true;
     try {
       await _audioArchive!.update(completed: true);
+      _availableAudio = await audioStore.availability(
+        videoId,
+        duration: duration,
+        includeHidden: audioHidden,
+      );
+      if (!_disposed) notifyListeners();
     } catch (_) {
       _audioCompleted = false;
       rethrow;
@@ -356,6 +364,15 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   DateTime lastActivity = DateTime.now(), _lastSeekRestart = DateTime(0);
   Directory? _root;
   Timer? _tick;
+  Timer? _audioScanTimer;
+  bool _readingAudio = false;
+  AudioAvailability _availableAudio = AudioAvailability();
+  AudioAvailability get audioAvailability =>
+      _availableAudio.withDuration(duration);
+  bool get downloadingAudio =>
+      _runs.values.any((r) => r.feed != null && !r.feed!.done);
+  int get translatedCount =>
+      cues.where((c) => c.source.isEmpty || c.text != c.source).length;
   Future<String>? _resolving;
   String? _source;
   String _feedError = '';
@@ -562,6 +579,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!finished || waitingTranslation > 0) notifyListeners();
     });
+    if (!retainedOnly) {
+      _audioScanTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        if (!finished && !stopped) unawaited(_refreshAudioAvailability());
+      });
+    }
     AppLog.i(
       'phụ đề',
       'Bắt đầu ${AppLog.url(input)} · tiếng $language · ${cues.length} dòng có sẵn',
@@ -593,6 +615,9 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         videoId,
         includeHidden: audioHidden,
       );
+      _availableAudio =
+          _retainedInput?.availability(duration: duration) ??
+          AudioAvailability(duration: duration);
       return;
     }
     if (_audioArchive == null && !_disposed && !stopped) {
@@ -606,10 +631,33 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
         duration: duration,
       );
       _audioArchive = await _audioOpening;
+      await _refreshAudioAvailability();
       if (_disposed || stopped) {
         await closeAudio();
         return;
       }
+    }
+  }
+
+  Future<void> _refreshAudioAvailability() async {
+    if (_readingAudio || _disposed || stopped) return;
+    _readingAudio = true;
+    try {
+      final available = await audioStore.availability(
+        videoId,
+        duration: duration,
+        includeHidden: audioHidden,
+      );
+      if (_disposed || stopped) return;
+      if (available.seconds > _availableAudio.seconds + 0.01) {
+        lastActivity = DateTime.now();
+      }
+      _availableAudio = available;
+      notifyListeners();
+    } catch (e) {
+      AppLog.e('âm thanh', 'Chưa kiểm tra được phần âm thanh đã lưu: $e');
+    } finally {
+      _readingAudio = false;
     }
   }
 
@@ -924,8 +972,12 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       final audioDir = await _audioArchive!.createRun(r.gen, r.base);
       r.audioDir = audioDir;
       if (!_owns(r)) return;
+      r.phase = 'Đang kết nối nguồn âm thanh';
+      notifyListeners();
       final source = await (_resolving ??= _audioSource());
       if (!_owns(r)) return;
+      r.phase = 'Đang chờ lượt tải âm thanh';
+      notifyListeners();
       final releaseExtraction = await VideoPipeline.extraction.acquire(
         videoId,
         cancelled: r.cancelled.future,
@@ -936,6 +988,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       }
       r.releaseExtraction = releaseExtraction;
       final feed = r.feed = _createFeed();
+      r.phase = 'Đang tải và lưu âm thanh';
+      notifyListeners();
       final end = r.end;
       final stop = end == null
           ? null
@@ -984,6 +1038,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _openWorker(_Run r) async {
     r.waitingSlot = true;
+    r.phase = 'Đang chờ lượt nhận dạng';
     notifyListeners();
     final releaseModel = await VideoPipeline.recognizers.acquire(
       priority: () => _priorityOf(r),
@@ -996,6 +1051,8 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     r.releaseModel = releaseModel;
+    r.phase = 'Đang nạp bộ nhận dạng';
+    notifyListeners();
     final worker = await _createWorker(language);
     if (!_owns(r)) {
       await worker.dispose();
@@ -1141,6 +1198,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
   void _finish(_Run r, String failure) {
     if (!_owns(r)) return;
     _recordExtraction(r);
+    if (r.retained == null) unawaited(_refreshAudioAvailability());
     r.poll?.cancel();
     r.extractionPoll?.cancel();
     final at = r.processedUntil;
@@ -1358,6 +1416,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     if (_disposed || stopped) return;
     stopped = true;
     _tick?.cancel();
+    _audioScanTimer?.cancel();
     _translationEpoch++;
     for (final run in _runs.values.toList()) {
       _retire(run);
@@ -1478,9 +1537,11 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
             ? 'Đang chờ bộ nhận dạng'
             : 'Đang nhường máy cho video đang xem'
       else if (_runs.values.every((r) => r.worker == null))
-        'Đang nạp bộ nhận dạng'
+        _runs.values.first.phase
       else if (_chunksFed == 0)
-        'Đang lấy âm thanh'
+        retainedOnly
+            ? 'Đang đọc âm thanh đã lưu'
+            : 'Đang chờ đoạn âm thanh đầu tiên'
       else
         'Đang nhận dạng',
       if (_runs.isNotEmpty) _runSummary,
@@ -1530,6 +1591,13 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     ].join(' · ');
     final host = Uri.tryParse(input)?.host ?? '';
     final workers = _runs.values.where((r) => r.worker != null).length;
+    final loadingWorker = _runs.values.any(
+      (r) => r.phase == 'Đang nạp bộ nhận dạng' && r.worker == null,
+    );
+    final connectingAudio = _runs.values.any(
+      (r) => r.phase == 'Đang kết nối nguồn âm thanh',
+    );
+    final textOnly = retainedOnly && _retainedInput?.chunks.isEmpty == true;
     final failed = error != null;
     StageState progress(bool ready, bool active) => ready
         ? StageState.done
@@ -1546,12 +1614,18 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
       ),
       SessionStep(
         'Nạp bộ nhận dạng giọng nói',
-        progress(workers > 0 || finished || paused, true),
-        workers > 0
+        textOnly
+            ? StageState.skipped
+            : progress(workers > 0 || finished, loadingWorker),
+        textOnly
+            ? 'Không cần nhận dạng lại'
+            : workers > 0
             ? '$workers bộ nhận dạng SenseVoice'
-            : finished || paused
+            : finished
             ? 'Đã nạp'
-            : 'Đang nạp mô hình…',
+            : loadingWorker
+            ? 'Đang nạp mô hình…'
+            : 'Chờ lượt nhận dạng',
       ),
       SessionStep(
         'Chuẩn bị bộ dịch',
@@ -1571,28 +1645,38 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
             : 'Đang chuẩn bị bộ dịch',
       ),
       SessionStep(
-        'Kết nối luồng âm thanh',
-        progress(_source != null, workers > 0),
-        _source == null
-            ? workers == 0
-                  ? 'Chờ bộ nhận dạng'
-                  : 'Đang mở nguồn âm thanh'
+        retainedOnly ? 'Đọc âm thanh trong app' : 'Kết nối luồng âm thanh',
+        retainedOnly
+            ? audioAvailability.seconds > 0
+                  ? StageState.done
+                  : StageState.skipped
+            : progress(_source != null, connectingAudio),
+        retainedOnly
+            ? 'Dùng file đã lưu, không kết nối lại trang web'
+            : _source == null
+            ? connectingAudio
+                  ? 'Đang kết nối nguồn âm thanh'
+                  : 'Chờ mở nguồn âm thanh'
             : _hls
             ? 'Luồng HLS'
             : 'Đã mở nguồn',
       ),
       SessionStep(
-        'Lấy âm thanh (ffmpeg)',
-        progress(finished || paused, _runs.values.any((r) => r.feed != null)),
-        '$_chunksFed đoạn · ${_feedError.isNotEmpty
-            ? status
-            : _chunksFed == 0
-            ? 'chờ âm thanh từ video'
-            : _runSummary}',
+        'Tải và lưu âm thanh',
+        audioAvailability.complete
+            ? StageState.done
+            : needsAudioSource || failed
+            ? StageState.failed
+            : downloadingAudio
+            ? StageState.active
+            : retainedOnly
+            ? StageState.skipped
+            : StageState.waiting,
+        '${audioAvailability.label}${needsAudioSource ? ' · còn thiếu từ ${AudioAvailability.clock(audioAvailability.firstMissing)}' : ''}',
       ),
       SessionStep(
         'Nhận dạng giọng nói',
-        progress(finished || paused, _chunksFed > 0),
+        progress(finished, _chunksFed > 0 && !paused),
         '$_linesHeard câu · ${_chunksFed == 0 ? 'chờ đoạn âm thanh' : _runSummary}',
       ),
       SessionStep(
@@ -1637,6 +1721,7 @@ class SubtitleSession extends ChangeNotifier with WidgetsBindingObserver {
     _disposed = true;
     if (_started) WidgetsBinding.instance.removeObserver(this);
     _tick?.cancel();
+    _audioScanTimer?.cancel();
     for (final r in _runs.values.toList()) {
       _retire(r);
     }

@@ -248,6 +248,18 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('page menu offers region capture before the page is bookmarked', (
+    tester,
+  ) async {
+    await open(tester);
+    platform.views.single.controller.visit('https://phim.example/1', 'Phim');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Thêm').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Chụp ảnh đại diện…'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'popup stays in the current tab by default, background links wait for Xem',
     (tester) async {

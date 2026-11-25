@@ -5,6 +5,9 @@ import '../services/retained_audio.dart';
 import '../services/subtitle_session.dart';
 import '../widgets/common.dart';
 import '../widgets/subtitle_resume.dart';
+import '../widgets/session_progress.dart';
+import '../widgets/subtitle_pipeline_progress.dart';
+import '../services/subtitle_store.dart';
 
 class RetainedAudioScreen extends StatefulWidget {
   const RetainedAudioScreen({
@@ -31,6 +34,7 @@ class _RetainedAudioScreenState extends State<RetainedAudioScreen> {
   bool get _picking => _picked.isNotEmpty;
   Timer? _refresh;
   bool _loading = false;
+  Map<String, double> _durations = {};
 
   @override
   void initState() {
@@ -53,9 +57,17 @@ class _RetainedAudioScreenState extends State<RetainedAudioScreen> {
         includeHidden: widget.includeHidden,
         videoId: widget.videoId,
       );
+      final durations = <String, double>{};
+      for (final item in audio) {
+        if (item.duration <= 0 && !item.videoId.startsWith('file:')) {
+          durations[item.videoId] =
+              (await SubtitleStore.load(item.videoId))?.duration ?? 0;
+        }
+      }
       if (mounted) {
         setState(() {
           _audio = audio;
+          _durations = durations;
           _error = null;
         });
       }
@@ -147,7 +159,78 @@ class _RetainedAudioScreenState extends State<RetainedAudioScreen> {
     if (!_picked.remove(id)) _picked.add(id);
   });
 
-  Widget _row(RetainedAudio audio) {
+  Future<void> _resume(RetainedAudio audio) async {
+    setState(() => _busy.add(audio.videoId));
+    try {
+      await resumeStoredSubtitles(
+        context,
+        audio.videoId,
+        audioStore: widget.store,
+        includeHidden: widget.includeHidden,
+      );
+    } finally {
+      if (mounted) setState(() => _busy.remove(audio.videoId));
+    }
+    if (!mounted) return;
+    final work = ActiveWork.find(audio.videoId);
+    if (work != null) {
+      await showSessionProgress(context, work.session, title: work.title);
+    }
+    await _load();
+  }
+
+  Widget _row(RetainedAudio audio) => ValueListenableBuilder(
+    valueListenable: ActiveWork.all,
+    builder: (context, _, _) {
+      final work = ActiveWork.find(audio.videoId);
+      final availability = audio.availability.withDuration(
+        _durations[audio.videoId] ?? audio.duration,
+      );
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _tile(audio),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: work != null
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SubtitlePipelineProgress(session: work.session),
+                      TextButton.icon(
+                        onPressed: () => showSessionProgress(
+                          context,
+                          work.session,
+                          title: work.title,
+                        ),
+                        icon: const Icon(Icons.insights),
+                        label: const Text('Xem tiến trình đang chạy'),
+                      ),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(availability.label),
+                      LinearProgressIndicator(
+                        value: availability.fraction ?? 0,
+                      ),
+                      if (!availability.complete)
+                        Text(
+                          availability.total > 0
+                              ? 'Chưa tải đủ âm thanh. Nếu trang bị chặn, phần chưa tải sẽ không làm tiếp được.'
+                              : 'Chưa xác nhận đã tải đủ âm thanh vì chưa rõ tổng thời lượng.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+          ),
+        ],
+      );
+    },
+  );
+
+  Widget _tile(RetainedAudio audio) {
     final picked = _picked.contains(audio.videoId);
     return ListTile(
       selected: picked,
@@ -179,12 +262,7 @@ class _RetainedAudioScreenState extends State<RetainedAudioScreen> {
               children: [
                 IconButton(
                   tooltip: 'Làm tiếp từ âm thanh đã lưu',
-                  onPressed: () => resumeStoredSubtitles(
-                    context,
-                    audio.videoId,
-                    audioStore: widget.store,
-                    includeHidden: widget.includeHidden,
-                  ),
+                  onPressed: () => _resume(audio),
                   icon: const Icon(Icons.play_circle_outline),
                 ),
                 TextButton(

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'audio_availability.dart';
 
 class RetainedAudio {
   RetainedAudio({
@@ -27,6 +28,9 @@ class RetainedAudio {
   final DateTime updated;
   final String source, page, language;
   final double duration;
+  AudioAvailability? _availability;
+  AudioAvailability get availability =>
+      _availability ?? AudioAvailability(duration: duration);
 }
 
 class RetainedAudioChunk {
@@ -101,6 +105,11 @@ class RetainedAudioLease {
   final String _path;
   final List<RetainedAudioChunk> chunks;
   final double? endOfAudio;
+  AudioAvailability availability({double duration = 0}) => AudioAvailability(
+    ranges: [for (final c in chunks) (c.start, c.end)],
+    duration: duration,
+    endOfAudio: endOfAudio,
+  );
   bool _closed = false;
 
   Future<void> markCompleted() => _store._markCompleted(_path);
@@ -129,6 +138,20 @@ class RetainedAudioStore {
       _active.remove(path);
     } else {
       _active[path] = count;
+    }
+  }
+
+  Future<AudioAvailability> availability(
+    String videoId, {
+    double duration = 0,
+    bool includeHidden = false,
+  }) async {
+    final lease = await acquire(videoId, includeHidden: includeHidden);
+    try {
+      return lease?.availability(duration: duration) ??
+          AudioAvailability(duration: duration);
+    } finally {
+      await lease?.close();
     }
   }
 
@@ -244,23 +267,33 @@ class RetainedAudioStore {
     try {
       reader = await file.open();
       final length = await reader.length();
-      final header = await reader.read(12);
-      if (header.length != 12 ||
+      // A single small read usually includes fmt, LIST and data. Revalidate
+      // every time: a writer can rewrite the WAV header without changing size
+      // or the filesystem's coarse modification timestamp.
+      final header = await reader.read(512);
+      Future<Uint8List> readAt(int offset, int count) async {
+        if (offset + count <= header.length) {
+          return Uint8List.sublistView(header, offset, offset + count);
+        }
+        await reader!.setPosition(offset);
+        return reader.read(count);
+      }
+
+      if (header.length < 12 ||
           ascii.decode(header.sublist(0, 4)) != 'RIFF' ||
           ascii.decode(header.sublist(8, 12)) != 'WAVE') {
         return null;
       }
       var offset = 12, formatOk = false;
       for (var i = 0; i < 128 && offset + 8 <= length; i++) {
-        await reader.setPosition(offset);
-        final bytes = await reader.read(8);
+        final bytes = await readAt(offset, 8);
         if (bytes.length != 8) return null;
         final id = ascii.decode(bytes.sublist(0, 4));
         final size = ByteData.sublistView(bytes).getUint32(4, Endian.little);
         if (offset + 8 + size > length) return null;
         if (id == 'fmt ') {
           if (size < 16) return null;
-          final fmt = ByteData.sublistView(await reader.read(16));
+          final fmt = ByteData.sublistView(await readAt(offset + 8, 16));
           formatOk =
               fmt.getUint16(0, Endian.little) == 1 &&
               fmt.getUint16(2, Endian.little) == 1 &&
@@ -447,8 +480,17 @@ class RetainedAudioStore {
         );
       }
     }
-    return summaries.values.where((s) => includeHidden || !s.hidden).toList()
-      ..sort((a, b) => b.updated.compareTo(a.updated));
+    final visible = summaries.values
+        .where((s) => includeHidden || !s.hidden)
+        .toList();
+    for (final audio in visible) {
+      audio._availability = await availability(
+        audio.videoId,
+        duration: audio.duration,
+        includeHidden: includeHidden,
+      );
+    }
+    return visible..sort((a, b) => b.updated.compareTo(a.updated));
   }
 
   /// Call only after the viewer confirms. Active writers must close first.

@@ -40,7 +40,7 @@ class _PicturePickerState extends State<PicturePicker> {
       Uint8List? bytes;
       if (source == 'page') {
         bytes = await widget.capture!();
-        if (bytes == null) throw StateError('Không chụp được trang này');
+        if (bytes == null) return;
       } else {
         final file = await ImagePicker().pickImage(
           source: source == 'camera' ? ImageSource.camera : ImageSource.gallery,

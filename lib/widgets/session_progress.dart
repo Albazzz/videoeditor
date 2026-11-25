@@ -4,10 +4,9 @@ import 'package:flutter/material.dart';
 
 import 'session_retry.dart';
 import '../services/subtitle_session.dart';
-import '../services/subtitle_store.dart';
 import 'activity_icon.dart';
-import 'common.dart';
 import 'subtitle_details.dart';
+import 'subtitle_pipeline_progress.dart';
 
 /// Every step from pressing CC to translated lines, live.
 Future<void> showSessionProgress(
@@ -54,11 +53,6 @@ class _ProgressSheetState extends State<_ProgressSheet> {
     return ListenableBuilder(
       listenable: s,
       builder: (context, _) {
-        final whole = coversWholeVideo(
-          s.covered,
-          s.duration,
-          reachedEnd: s.reachedEnd,
-        );
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
@@ -90,23 +84,8 @@ class _ProgressSheetState extends State<_ProgressSheet> {
                   ),
                   Text(s.stage),
                   const SizedBox(height: 10),
-                  if (s.duration > 0) ...[
-                    CoverageBar(
-                      covered: s.covered,
-                      duration: s.duration,
-                      done: whole,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitleProgressLabel(
-                        covered: s.covered,
-                        duration: s.duration,
-                        reachedEnd: whole,
-                      ),
-                      style: theme.textTheme.labelMedium,
-                    ),
-                    const SizedBox(height: 8),
-                  ],
+                  SubtitlePipelineProgress(session: s),
+                  const SizedBox(height: 8),
                   for (final (i, step) in s.steps.indexed)
                     _StepRow(number: i + 1, step: step),
                   const SizedBox(height: 8),
