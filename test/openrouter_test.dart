@@ -698,4 +698,23 @@ void main() {
     expect(aiProviderById('vercel'), kVercel);
     expect(aiProviderById('device'), isNull);
   });
+
+  test(
+    'custom system prompt is used in messages and falls back to default',
+    () {
+      final def = OpenRouterTranslator(apiKey: 'k', model: 'm');
+      final defMsgs = def.messages(['hello'], 'en');
+      expect(defMsgs.first['role'], 'system');
+      expect(defMsgs.first['content'], kDefaultAiPrompt);
+
+      final custom = OpenRouterTranslator(
+        apiKey: 'k',
+        model: 'm',
+        systemPrompt: 'Dịch theo văn phong hài hước',
+      );
+      final customMsgs = custom.messages(['hello'], 'en');
+      expect(customMsgs.first['role'], 'system');
+      expect(customMsgs.first['content'], 'Dịch theo văn phong hài hước');
+    },
+  );
 }

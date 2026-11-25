@@ -54,4 +54,33 @@ void main() {
     await own.load();
     expect(own.modelFor(kOpenRouter), 'deepseek/deepseek-v4-flash');
   });
+
+  test(
+    'custom AI prompt persists and falls back to kDefaultAiPrompt',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final s = AppSettings();
+      await s.load();
+      expect(s.customAiPrompt, '');
+      expect(s.aiPrompt, kDefaultAiPrompt);
+
+      s.setAiPrompt('Dịch tự nhiên theo phong cách kiếm hiệp');
+      expect(s.customAiPrompt, 'Dịch tự nhiên theo phong cách kiếm hiệp');
+      expect(s.aiPrompt, 'Dịch tự nhiên theo phong cách kiếm hiệp');
+
+      final loaded = AppSettings();
+      await loaded.load();
+      expect(loaded.customAiPrompt, 'Dịch tự nhiên theo phong cách kiếm hiệp');
+      expect(loaded.aiPrompt, 'Dịch tự nhiên theo phong cách kiếm hiệp');
+
+      loaded.resetAiPrompt();
+      expect(loaded.customAiPrompt, '');
+      expect(loaded.aiPrompt, kDefaultAiPrompt);
+
+      final resetLoaded = AppSettings();
+      await resetLoaded.load();
+      expect(resetLoaded.customAiPrompt, '');
+      expect(resetLoaded.aiPrompt, kDefaultAiPrompt);
+    },
+  );
 }

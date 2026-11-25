@@ -48,6 +48,13 @@ class AppSettings extends ChangeNotifier {
   String vercelModel = kVercel.defaultModel;
   String vercelKey = '';
 
+  /// Custom prompt for AI translation. Empty uses [kDefaultAiPrompt].
+  String customAiPrompt = '';
+
+  /// The active AI system prompt, falling back to [kDefaultAiPrompt].
+  String get aiPrompt =>
+      customAiPrompt.trim().isNotEmpty ? customAiPrompt : kDefaultAiPrompt;
+
   /// The AI service chosen for translation, or null for the phone's own.
   AiProvider? get aiProvider => aiProviderById(translateEngine);
 
@@ -88,6 +95,7 @@ class AppSettings extends ChangeNotifier {
     subBg = prefs.getDouble('subBg') ?? 0.72;
     subWhole = prefs.getBool('subWhole') ?? true;
     translateEngine = prefs.getString('translateEngine') ?? 'device';
+    customAiPrompt = prefs.getString('customAiPrompt') ?? '';
     openRouterModel =
         prefs.getString('openRouterModel') ?? kDefaultOpenRouterModel;
     vercelModel = prefs.getString('vercelModel') ?? kVercel.defaultModel;
@@ -186,6 +194,18 @@ class AppSettings extends ChangeNotifier {
         await _secure.write(key: 'openrouter_key', value: openRouterKey);
       }
     } catch (_) {}
+    notifyListeners();
+  }
+
+  void setAiPrompt(String value) {
+    customAiPrompt = value.trim();
+    _prefs?.setString('customAiPrompt', customAiPrompt);
+    notifyListeners();
+  }
+
+  void resetAiPrompt() {
+    customAiPrompt = '';
+    _prefs?.remove('customAiPrompt');
     notifyListeners();
   }
 

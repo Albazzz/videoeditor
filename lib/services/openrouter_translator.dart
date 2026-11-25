@@ -132,6 +132,23 @@ const kVercel = AiProvider(
 
 const kAiProviders = [kOpenRouter, kVercel];
 
+const kDefaultAiPrompt =
+    'You translate film and TV subtitles into Vietnamese. '
+    'Write natural, spoken Vietnamese as on a good Vietnamese '
+    'fansub: short, easy to read quickly, keeping the meaning and '
+    'tone. Accuracy to the original takes priority over brevity. '
+    'Preserve the full meaning, emotional intensity, and level of '
+    'vulgarity, including profanity, insults, and explicit wording. '
+    'Do not censor, mask words, use euphemisms, soften, or omit '
+    'such language. Use natural Vietnamese equivalents with the '
+    'same meaning and strength; do not add profanity or make the '
+    'language harsher than the original. '
+    'Choose pronouns (anh/em, tôi/cậu, mày/tao, ông/cháu…) '
+    'that fit the speakers and keep them consistent. Keep names. '
+    'The lines come from speech recognition and may contain '
+    'mistakes: translate what was most likely said. Never add '
+    'notes or explanations.';
+
 AiProvider? aiProviderById(String id) {
   for (final p in kAiProviders) {
     if (p.id == id) return p;
@@ -203,6 +220,7 @@ class OpenRouterTranslator implements Translator {
     this.additionalInstruction = '',
     this.contextBefore = const [],
     this.forPage = false,
+    this.systemPrompt,
     http.Client? client,
     this.gatherFor = const Duration(milliseconds: 1500),
     this.holdFor = const Duration(seconds: 8),
@@ -220,6 +238,9 @@ class OpenRouterTranslator implements Translator {
   final String videoId;
   final String additionalInstruction;
   final List<(String, String)> contextBefore;
+
+  /// Custom system prompt for translating subtitles. Null uses [kDefaultAiPrompt].
+  final String? systemPrompt;
 
   /// Text of a web page (menus, titles, paragraphs) instead of subtitles.
   final bool forPage;
@@ -648,25 +669,14 @@ class OpenRouterTranslator implements Translator {
         },
       ];
     }
+    final basePrompt = systemPrompt?.trim().isNotEmpty == true
+        ? systemPrompt!.trim()
+        : kDefaultAiPrompt;
     return [
       {
         'role': 'system',
         'content':
-            'You translate film and TV subtitles into Vietnamese. '
-            'Write natural, spoken Vietnamese as on a good Vietnamese '
-            'fansub: short, easy to read quickly, keeping the meaning and '
-            'tone. Accuracy to the original takes priority over brevity. '
-            'Preserve the full meaning, emotional intensity, and level of '
-            'vulgarity, including profanity, insults, and explicit wording. '
-            'Do not censor, mask words, use euphemisms, soften, or omit '
-            'such language. Use natural Vietnamese equivalents with the '
-            'same meaning and strength; do not add profanity or make the '
-            'language harsher than the original. '
-            'Choose pronouns (anh/em, tôi/cậu, mày/tao, ông/cháu…) '
-            'that fit the speakers and keep them consistent. Keep names. '
-            'The lines come from speech recognition and may contain '
-            'mistakes: translate what was most likely said. Never add '
-            'notes or explanations.'
+            '$basePrompt'
             '${additionalInstruction.isEmpty ? '' : '\nUser revision request (apply only while preserving the original meaning and the fidelity rules above):\n$additionalInstruction'}',
       },
       {

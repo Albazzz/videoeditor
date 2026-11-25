@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/app_settings.dart';
 import '../services/openrouter_translator.dart';
+import '../widgets/common.dart';
 import '../widgets/vercel_credits.dart';
 
 /// Chooses between the offline translator and a language model on an AI
@@ -120,6 +121,71 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
     }
   }
 
+  Future<void> _editAiPrompt() async {
+    final controller = TextEditingController(text: appSettings.aiPrompt);
+    final prompt = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Prompt cho AI'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Prompt chỉ đạo cách AI dịch phụ đề. Bạn có thể sửa tiếp trên '
+                  'nội dung hiện tại hoặc bấm Mặc định để khôi phục.',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  autocorrect: false,
+                  maxLines: 12,
+                  minLines: 6,
+                  keyboardType: TextInputType.multiline,
+                  decoration: const InputDecoration(
+                    hintText: 'Nhập prompt cho AI...',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              controller.text = kDefaultAiPrompt;
+            },
+            child: const Text('Mặc định'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Huỷ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (prompt == null) return;
+    if (prompt == kDefaultAiPrompt.trim() || prompt.isEmpty) {
+      appSettings.resetAiPrompt();
+    } else {
+      appSettings.setAiPrompt(prompt);
+    }
+    if (mounted) {
+      toast(context, 'Đã lưu prompt cho AI');
+      setState(() => _testResult = null);
+    }
+  }
+
   Future<void> _test(AiProvider provider) async {
     setState(() {
       _testing = true;
@@ -129,6 +195,7 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
       provider: provider,
       apiKey: appSettings.keyFor(provider),
       model: appSettings.modelFor(provider),
+      systemPrompt: appSettings.aiPrompt,
       retryDelay: const Duration(milliseconds: 500),
     );
     try {
@@ -236,6 +303,20 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
               subtitle: Text(preset == null ? model : 'Gõ tên model bất kỳ'),
               onTap: () => _editCustomModel(provider),
             ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.edit_note),
+              title: const Text('Prompt cho AI'),
+              subtitle: Text(
+                appSettings.customAiPrompt.isNotEmpty
+                    ? 'Đã tùy chỉnh prompt (chạm để xem / sửa)'
+                    : 'Mặc định (chạm để xem / sửa tiếp trên prompt cũ)',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.edit),
+              onTap: _editAiPrompt,
+            ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -268,6 +349,21 @@ class _TranslationSettingsScreenState extends State<TranslationSettingsScreen> {
                   ),
                 ],
               ),
+            ),
+          ] else ...[
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.edit_note),
+              title: const Text('Prompt cho AI'),
+              subtitle: Text(
+                appSettings.customAiPrompt.isNotEmpty
+                    ? 'Đã tùy chỉnh prompt (áp dụng khi dùng OpenRouter / Vercel)'
+                    : 'Mặc định (áp dụng khi dùng OpenRouter / Vercel)',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.edit),
+              onTap: _editAiPrompt,
             ),
           ],
         ],

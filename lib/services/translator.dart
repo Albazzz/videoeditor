@@ -98,6 +98,7 @@ abstract class Translator {
         additionalInstruction: additionalInstruction,
         contextBefore: contextBefore,
         forPage: forPage,
+        systemPrompt: appSettings.aiPrompt,
       );
     }
     return TranslatorPacks.supported
