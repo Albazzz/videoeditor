@@ -11,17 +11,19 @@ class SavedThumbnailCard extends StatelessWidget {
     required this.picking,
     required this.selected,
     this.actions,
+    this.sourceLabel,
   });
   final Widget picture, child;
   final Widget? actions;
   final VoidCallback? onTap, onLongPress;
   final bool picking, selected;
+  final String? sourceLabel;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 10),
       child: Material(
         color: selected
             ? colors.secondaryContainer
@@ -29,7 +31,8 @@ class SavedThumbnailCard extends StatelessWidget {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
           side: BorderSide(
-            color: selected ? colors.primary : colors.outlineVariant,
+            color: selected ? colors.primary : colors.outline,
+            width: selected ? 2 : 1.5,
           ),
         ),
         clipBehavior: Clip.antiAlias,
@@ -69,6 +72,29 @@ class SavedThumbnailCard extends StatelessWidget {
                   ),
               ],
             ),
+            if (sourceLabel case final String label when label.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.public,
+                      size: 15,
+                      color: colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelMedium
+                            ?.copyWith(color: colors.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             child,
           ],
         ),

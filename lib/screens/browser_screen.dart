@@ -22,6 +22,7 @@ import '../services/page_translation.dart';
 import '../services/subtitle_session.dart';
 import '../services/keep_awake.dart';
 import '../services/subtitle_store.dart';
+import '../services/retained_audio.dart';
 import '../services/watch_position.dart';
 import '../services/web_video.dart';
 import '../widgets/activity_icon.dart';
@@ -238,6 +239,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
   String _sessionSrc = '';
   String _selectedVideoKey = '';
   String _fileSource = '';
+  String? _fileStoreId;
   final _sentCues = <(double, String), (double, String)>{};
   String _notifiedLanguage = '';
 
@@ -661,7 +663,13 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _send({'__vsub': 'clear'});
     if (!mounted) return;
     if (cues.isNotEmpty) {
-      _showFileCues(cues, _pageUrl, language, imported: false);
+      _showFileCues(
+        cues,
+        _pageUrl,
+        language,
+        imported: false,
+        storeId: session.videoId,
+      );
       setState(
         () => _canCarryOn =
             !ActiveWork.wasCompleted(session) && (_video?.playable ?? false),
@@ -836,7 +844,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final changed = _video?.reportKey != video.reportKey;
     if (changed &&
         (_session != null || _fileCues != null) &&
-        (_session?.input ?? _fileSource) != video.src) {
+        (_session != null ? _sessionSrc : _fileSource) != video.src) {
       _detachSubtitles();
       _autoPage = '';
     }
@@ -981,14 +989,20 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       if (_session != null || _fileCues != null) return;
       if (saved.imported) {
         AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã nhập');
-        _showFileCues(saved.cues, page, saved.language);
+        _showFileCues(saved.cues, page, saved.language, storeId: saved.id);
         toast(context, 'Đã bật phụ đề đã nhập cho phim này');
       } else {
         // Shown as they are; making more waits for the user ("Làm tiếp").
         if (!mounted) return;
         AppLog.i('web', 'Tự hiện ${saved.cues.length} dòng đã làm');
-        _showFileCues(saved.cues, page, saved.language, imported: false);
-        _canCarryOn = saved.canResume && video.playable;
+        _showFileCues(
+          saved.cues,
+          page,
+          saved.language,
+          imported: false,
+          storeId: saved.id,
+        );
+        _canCarryOn = saved.canResume;
         toast(
           context,
           _canCarryOn
@@ -1053,20 +1067,20 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     return (page, title);
   }
 
-  /// The same film on another site: takes subtitles saved for another
-  /// page, keeps a copy for this one, and shows them or carries on.
+  /// Link the current playback to the chosen entry, including its audio.
   Future<void> _useFromLibrary() async {
     final video = _video;
     final (page, title) = await _pageInfo();
-    if (!mounted || page.isEmpty) return;
-    if (video == null) return;
-    final id = SubtitleStore.idForVideo(page, video.src);
+    if (!mounted || page.isEmpty || video == null) return;
     final choice = await pickSavedSubtitles(
       context,
-      currentId: id,
+      currentId:
+          _session?.videoId ??
+          _fileStoreId ??
+          SubtitleStore.idForVideo(page, video.src),
       pageTitle: title,
       duration: video.duration,
-      canCarryOn: video.playable,
+      canCarryOn: true,
     );
     if (choice == null ||
         !mounted ||
@@ -1075,61 +1089,33 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       return;
     }
     final (src, use) = choice;
-    // The lines this video already has: show them, nothing to copy.
-    if (src.id == id) {
-      if (_session != null) {
-        toast(context, 'Phụ đề này đang được làm và hiện trên video');
-        return;
-      }
-      if (use == PickedUse.carryOn) {
-        await _startSubtitles();
-        return;
-      }
-      _showFileCues(src.cues, page, src.language, imported: src.imported);
-      setState(() => _canCarryOn = src.canResume && video.playable);
-      toast(context, 'Đang hiện ${src.cues.length} dòng của video này');
+    await SubtitleStore.linkVideo(
+      page,
+      video.src,
+      src.id,
+      duration: video.duration,
+      pageTitle: title,
+    );
+    if (!mounted || _video?.src != video.src || _pageUrl != page) return;
+    if (_session?.videoId != src.id) _detachSubtitles();
+    final running = ActiveWork.find(src.id);
+    if (running != null) {
+      _attachWork(running, video);
       return;
     }
-    if (_session != null || _fileCues != null) {
-      // Let the current lines be written before the copy replaces them.
-      final saver = _saver;
-      _saver = null;
-      final closing = saver?.close();
-      await _stopSubtitles();
-      await closing;
-    }
-    await SubtitleStore.save(
-      SavedSubs(
-        id: id,
-        title: title.isEmpty ? src.title : title,
-        page: page,
-        source: video.src,
-        language: src.language,
-        updated: DateTime.now(),
-        cues: src.cues,
-        covered: src.covered,
-        duration: src.duration,
-        complete: src.complete,
-        imported: src.imported,
-      ),
-    );
-    AppLog.i(
-      'web',
-      'Dùng ${src.cues.length} dòng của ${AppLog.url(src.page)} '
-          '(${use.name})',
-    );
-    if (!mounted || _pageUrl != page || _video?.src != video.src) return;
     _autoPage = page;
+    _showFileCues(
+      src.cues,
+      page,
+      src.language,
+      imported: src.imported,
+      storeId: src.id,
+    );
     if (use == PickedUse.carryOn) {
       await _startSubtitles();
     } else {
-      _showFileCues(src.cues, page, src.language, imported: src.imported);
-      _canCarryOn = src.canResume && video.playable;
-      toast(
-        context,
-        'Đã dùng ${src.cues.length} dòng. Lệch giờ thì chỉnh ở ⋮ '
-        '(sớm/muộn 0,5 giây)',
-      );
+      setState(() => _canCarryOn = src.canResume);
+      toast(context, 'Đang dùng phụ đề đã chọn trong kho');
     }
   }
 
@@ -1184,6 +1170,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     String page,
     String language, {
     bool imported = true,
+    String? storeId,
   }) {
     if (_session != null) _stopSubtitles();
     _ackLogged = false;
@@ -1194,6 +1181,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _fileCues = cues;
       _filePage = page;
       _fileSource = _video?.src ?? '';
+      _fileStoreId = storeId ?? SubtitleStore.idForVideo(page, _fileSource);
       _fileLanguage = language;
       _fileOffset = 0;
     });
@@ -1210,7 +1198,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       _fileOffset += seconds;
     });
     _sendAllCues(shifted);
-    final id = SubtitleStore.idForVideo(_filePage, _fileSource);
+    final id = _fileStoreId ?? SubtitleStore.idForVideo(_filePage, _fileSource);
     final saved = await SubtitleStore.load(id);
     if (saved != null) await SubtitleStore.save(saved.withCues(shifted));
   }
@@ -1221,9 +1209,9 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     if (video == null) return;
     final (page, title) = await _pageInfo();
     unawaited(_keepPagePicture(page));
-    final id = SubtitleStore.idForVideo(page, video.src);
+    final lookupId = SubtitleStore.idForVideo(page, video.src);
     final running = ActiveWork.findVideo(
-      id,
+      lookupId,
       page,
       video.duration,
       pageTitle: title,
@@ -1239,20 +1227,43 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       pageTitle: title,
     );
     if (!mounted || _video?.src != video.src || page != _pageUrl) return;
+    final id = saved?.id ?? lookupId;
+    final selectedWork = ActiveWork.find(id);
+    if (selectedWork != null) {
+      _attachWork(selectedWork, video);
+      return;
+    }
+
     if (saved != null &&
         saved.cues.isNotEmpty &&
         _session == null &&
         _fileCues == null) {
-      _showFileCues(saved.cues, page, saved.language, imported: saved.imported);
-      _canCarryOn = saved.canResume && video.playable;
+      _showFileCues(
+        saved.cues,
+        page,
+        saved.language,
+        imported: saved.imported,
+        storeId: saved.id,
+      );
+      _canCarryOn = saved.canResume;
     }
     if (saved != null && saved.imported) {
       toast(context, 'Dùng phụ đề đã nhập từ file');
       return;
     }
     if (!video.playable) {
-      toast(context, 'Trang này giấu luồng video: hãy nhập phụ đề từ file (⋮)');
-      return;
+      final audio = await RetainedAudioStore.instance.availability(
+        id,
+        duration: saved?.duration ?? video.duration,
+      );
+      if (!mounted || _video?.src != video.src || page != _pageUrl) return;
+      if (!audio.complete) {
+        toast(
+          context,
+          'Chưa có đủ âm thanh đã lưu và trang này đang giấu luồng video',
+        );
+        return;
+      }
     }
     // An advert before the film is often what plays when CC is pressed.
     if (video.duration > 0 && video.duration < 90) {
@@ -1305,18 +1316,18 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       videoId: id,
       language: appSettings.language,
       headers: video.headers(cookies),
-      saved: saved,
+      saved: saved?.forSource(video.src),
       mode: _mode,
     )..addListener(_onSession);
     session.duration = video.duration;
     if (saved != null) _sendAllCues(saved.cues);
     _saver = SessionSaver(
       session: session,
-      page: page,
+      page: saved?.page ?? page,
       source: video.src,
       videoId: id,
-      title: title,
-      pageTitle: title,
+      title: saved?.title.isNotEmpty == true ? saved!.title : title,
+      pageTitle: saved?.pageTitle.isNotEmpty == true ? saved!.pageTitle : title,
       duration: () => session.duration,
     );
     setState(() {
@@ -1329,7 +1340,11 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     });
     ActiveWork.begin(
       id,
-      title.isEmpty ? (Uri.tryParse(page)?.host ?? page) : title,
+      saved?.title.isNotEmpty == true
+          ? saved!.title
+          : title.isEmpty
+          ? (Uri.tryParse(page)?.host ?? page)
+          : title,
       session,
       saver: _saver,
     );
@@ -1387,6 +1402,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     _sessionSrc = '';
     _fileCues = null;
     _fileSource = '';
+    _fileStoreId = null;
     _otherVideo = false;
     _canCarryOn = false;
     _sentCues.clear();
@@ -1443,7 +1459,10 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
     final video = _video;
     final page = _pageUrl;
     if (video == null) return;
-    final id = SubtitleStore.idForVideo(page, video.src);
+    final id =
+        _session?.videoId ??
+        _fileStoreId ??
+        SubtitleStore.idForVideo(page, video.src);
     await showSubtitleRevision(
       context,
       videoId: id,
@@ -1502,6 +1521,14 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
         duration: video.duration,
         pageTitle: _titleNow,
       );
+      final linkedWork = saved == null ? null : ActiveWork.find(saved.id);
+      if (linkedWork != null &&
+          mounted &&
+          page == _pageUrl &&
+          _video?.src == video.src) {
+        _attachWork(linkedWork, video);
+        return;
+      }
       if (saved != null) await SubtitleStore.save(saved.withLanguage(language));
       if (mounted && _video?.src == video.src && _pageUrl == page) {
         setState(() => _fileLanguage = language);
@@ -1535,7 +1562,8 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       session!.removeListener(_onSession);
       setState(() {
         _fileCues = List.of(session.cues);
-        _fileSource = session.input;
+        _fileSource = _video?.src ?? session.input;
+        _fileStoreId = session.videoId;
         _filePage = _pageUrl;
         _fileLanguage = session.language;
         _fileImported = false;
@@ -1545,7 +1573,7 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
       });
       return;
     }
-    if (!mounted || session == null || _video?.src != session.input) return;
+    if (!mounted || session == null || _video?.src != _sessionSrc) return;
     if (!_hidden) {
       for (final cue in session.cues) {
         final key = (cue.start, cue.source);
@@ -2556,17 +2584,19 @@ class _BrowserTabViewState extends State<_BrowserTabView> {
                         context,
                         MaterialPageRoute(
                           builder: (_) => RetainedAudioScreen(
-                            videoId: SubtitleStore.idForVideo(
-                              _pageUrl,
-                              video.src,
-                            ),
+                            videoId:
+                                _session?.videoId ??
+                                _fileStoreId ??
+                                SubtitleStore.idForVideo(_pageUrl, video.src),
                           ),
                         ),
                       ),
                       'picture' => editStoredPicture(
                         context,
                         Bookmarks.subtitlePictureKey(
-                          SubtitleStore.idForVideo(_pageUrl, video.src),
+                          _session?.videoId ??
+                              _fileStoreId ??
+                              SubtitleStore.idForVideo(_pageUrl, video.src),
                         ),
                         fallbackKey: _pageUrl,
                         capture: _captureRegion,

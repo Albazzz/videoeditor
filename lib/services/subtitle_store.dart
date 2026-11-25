@@ -285,6 +285,22 @@ class SavedSubs implements SubsHeader {
     pageTitle: pageTitle,
   );
 
+  /// A temporary playback connection; the subtitle/audio identity stays fixed.
+  SavedSubs forSource(String value) => SavedSubs(
+    id: id,
+    title: title,
+    page: page,
+    source: value,
+    language: language,
+    updated: updated,
+    cues: cues,
+    covered: covered,
+    duration: duration,
+    complete: complete,
+    imported: imported,
+    pageTitle: pageTitle,
+  );
+
   bool get isWholeVideo =>
       imported || coversWholeVideo(covered, duration, reachedEnd: complete);
 
@@ -367,10 +383,35 @@ class SubtitleStore {
       return marks;
     }
     final out = <String, PageSubs>{};
-    for (final s in await summaries()) {
+    final all = await summaries();
+    final seen = <String>{};
+    for (final s in all) {
       if (!s.page.startsWith('http') || s.lines == 0) continue;
       final key = pageKey(s.page);
+      seen.add('${s.id}\n$key');
       out[key] = PageSubs.of(s, out[key]);
+    }
+    final byId = {for (final s in all) s.id: s};
+    final links = Directory(p.join((await _dir()).path, 'video_links'));
+    if (await links.exists()) {
+      await for (final file in links.list(followLinks: false)) {
+        if (file is! File || !file.path.endsWith('.json')) continue;
+        try {
+          final link = jsonDecode(await file.readAsString()) as Map;
+          final s = byId[link['id']];
+          final page = link['page'];
+          if (s == null ||
+              s.lines == 0 ||
+              page is! String ||
+              !page.startsWith('http')) {
+            continue;
+          }
+          final key = pageKey(page);
+          if (seen.add('${s.id}\n$key')) out[key] = PageSubs.of(s, out[key]);
+        } catch (_) {
+          /* Ignore an incomplete or old link. */
+        }
+      }
     }
     _marksAt = at;
     return _marks = out;
@@ -410,8 +451,10 @@ class SubtitleStore {
     String pageTitle = '',
   }) async {
     final id = idForVideo(page, source);
+    final linked = await _linkedVideo(page, source, duration, pageTitle);
+    if (linked != null) return linked;
     final saved = await load(id);
-    if (saved != null && saved.source == source && saved.page == page) {
+    if (saved != null && saved.page == page) {
       if (duration > 0 &&
           saved.duration > 0 &&
           (saved.duration - duration).abs() > 5) {
@@ -443,23 +486,108 @@ class SubtitleStore {
     }
     final best = found == null ? null : await load(found.id);
     if (best == null) return null;
-    final moved = SavedSubs(
-      id: id,
-      title: best.title,
-      page: page,
-      source: source,
-      language: best.language,
-      updated: best.updated,
-      cues: best.cues,
-      covered: best.covered,
-      duration: best.duration > 0 ? best.duration : duration,
-      complete: best.complete,
-      imported: best.imported,
-      pageTitle: best.pageTitle.isNotEmpty ? best.pageTitle : pageTitle,
+    await linkVideo(
+      page,
+      source,
+      best.id,
+      duration: duration,
+      pageTitle: pageTitle,
     );
-    await save(moved);
-    await delete(best.id);
-    return moved;
+    return best;
+  }
+
+  /// Explicit reuse points to the original entry; no subtitles or audio move.
+  static Future<void> linkVideo(
+    String page,
+    String source,
+    String id, {
+    double duration = 0,
+    String pageTitle = '',
+  }) async {
+    final key = idForVideo(page, source);
+    await _serial('link:$key', () async {
+      final directory = await Directory(
+        p.join((await _dir()).path, 'video_links'),
+      ).create(recursive: true);
+      final target = File(p.join(directory.path, '$key.json'));
+      final temp = File('${target.path}.tmp');
+      await temp.writeAsString(
+        jsonEncode({
+          'id': id,
+          'page': page,
+          'duration': duration,
+          'title': pageTitle,
+        }),
+        flush: true,
+      );
+      await temp.rename(target.path);
+    });
+    changes.value++;
+  }
+
+  static Future<SavedSubs?> _linkedVideo(
+    String page,
+    String source,
+    double duration,
+    String pageTitle,
+  ) async {
+    try {
+      final file = File(
+        p.join(
+          (await _dir()).path,
+          'video_links',
+          '${idForVideo(page, source)}.json',
+        ),
+      );
+      if (!await file.exists()) {
+        if (duration <= 0 || !await file.parent.exists()) return null;
+        final ids = <String>{};
+        await for (final entry in file.parent.list(followLinks: false)) {
+          if (entry is! File || !entry.path.endsWith('.json')) continue;
+          try {
+            final candidate = jsonDecode(await entry.readAsString()) as Map;
+            if (sameFilm(
+              page: page,
+              duration: duration,
+              title: pageTitle,
+              otherPage: candidate['page'] as String? ?? '',
+              otherDuration: (candidate['duration'] as num?)?.toDouble() ?? 0,
+              otherTitle: candidate['title'] as String? ?? '',
+            )) {
+              final target = candidate['id'];
+              if (target is String && await load(target) != null) {
+                ids.add(target);
+              }
+            }
+          } catch (_) {
+            /* Ignore an incomplete or old link. */
+          }
+        }
+        if (ids.length != 1) return null;
+        await linkVideo(
+          page,
+          source,
+          ids.single,
+          duration: duration,
+          pageTitle: pageTitle,
+        );
+        return load(ids.single);
+      }
+      final link = jsonDecode(await file.readAsString()) as Map;
+      final expected = (link['duration'] as num?)?.toDouble() ?? 0;
+      if (duration > 0 && expected > 0 && (duration - expected).abs() > 5) {
+        return null;
+      }
+      final expectedTitle = link['title'] as String? ?? '';
+      if (pageTitle.isNotEmpty &&
+          expectedTitle.isNotEmpty &&
+          titleKey(pageTitle) != titleKey(expectedTitle)) {
+        return null;
+      }
+      return load(link['id'] as String);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Entries are gzip-compressed JSON (a film's lines shrink to about a

@@ -492,6 +492,7 @@ class _SubtitleLibraryScreenState extends State<SubtitleLibraryScreen> {
     final audio = _audio[s.id];
     return SavedThumbnailCard(
       picture: _picture(s),
+      sourceLabel: Uri.tryParse(s.page)?.host,
       picking: _picking,
       selected: picked,
       actions: Visibility(

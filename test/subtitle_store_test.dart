@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:video/models/cue.dart';
 import 'package:video/services/subtitle_store.dart';
+import 'package:video/services/subtitle_session.dart';
+import 'package:video/services/translator.dart';
 
 void main() {
   late Directory dir;
@@ -187,11 +189,11 @@ void main() {
         duration: 5400,
       ),
     );
-    // Same page, same length, new address: found, moved, no duplicate.
+    // Same page, same length, new address: one identity also keeps its audio.
     final found = await SubtitleStore.loadVideo(page, newSrc, duration: 5401);
     expect(found?.cues.single.text, 'Xin chào');
-    expect(found?.source, newSrc);
-    expect(found?.id, SubtitleStore.idForVideo(page, newSrc));
+    expect(found?.source, oldSrc);
+    expect(found?.id, SubtitleStore.idForVideo(page, oldSrc));
     expect((await SubtitleStore.list()).length, 1);
     // Another film on the page (other length) is not taken for it.
     expect(
@@ -223,6 +225,156 @@ void main() {
     );
     expect(legacy?.cues.single.text, 'Cũ');
   });
+
+  test(
+    'explicit reuse links two sites to one original entry and counts page marks once',
+    () async {
+      const originalPage = 'https://original.example/film';
+      const playbackPage = 'https://other.example/watch';
+      final saved = SavedSubs(
+        id: 'original',
+        title: 'My saved name',
+        page: originalPage,
+        source: 'https://cdn.example/old.mp4',
+        language: 'en',
+        updated: DateTime(2026),
+        cues: const [Cue(start: 1, end: 2, text: 'Chào', source: 'Hello')],
+        covered: const [(0, 20)],
+        duration: 120,
+      );
+      await SubtitleStore.save(saved);
+      await SubtitleStore.linkVideo(
+        playbackPage,
+        'new-token-A',
+        saved.id,
+        duration: 120,
+        pageTitle: 'Film',
+      );
+      await SubtitleStore.linkVideo(
+        playbackPage,
+        'new-token-B',
+        saved.id,
+        duration: 120,
+        pageTitle: 'Film',
+      );
+      final linked = await SubtitleStore.loadVideo(
+        playbackPage,
+        'new-token-B',
+        duration: 120,
+        pageTitle: 'Film',
+      );
+      expect(linked!.id, saved.id);
+      expect(linked.title, 'My saved name');
+      expect(linked.page, originalPage);
+      expect((await SubtitleStore.list()).map((s) => s.id), ['original']);
+      final marks = await SubtitleStore.pageMarks();
+      expect(marks[playbackPage]!.lines, 1);
+      expect(marks[originalPage]!.lines, 1);
+    },
+  );
+
+  test(
+    'a linked site keeps the original identity after signed URLs change and rejects another episode',
+    () async {
+      final saved = SavedSubs(
+        id: 'original',
+        title: 'My name',
+        page: 'https://old.example/film',
+        source: 'old-source',
+        language: 'en',
+        updated: DateTime(2026),
+        cues: const [],
+        covered: const [],
+        duration: 120,
+      );
+      await SubtitleStore.save(saved);
+      const page = 'https://new.example/film';
+      await SubtitleStore.linkVideo(
+        page,
+        'token-A',
+        saved.id,
+        duration: 120,
+        pageTitle: 'Episode 1',
+      );
+      final found = await SubtitleStore.loadVideo(
+        page,
+        'token-B',
+        duration: 120,
+        pageTitle: 'Episode 1',
+      );
+      expect(found!.id, 'original');
+      expect((await SubtitleStore.list()).length, 1);
+      expect(
+        await SubtitleStore.loadVideo(
+          page,
+          'token-C',
+          duration: 900,
+          pageTitle: 'Episode 2',
+        ),
+        isNull,
+      );
+      expect(
+        await SubtitleStore.loadVideo(
+          page,
+          'token-A',
+          duration: 120,
+          pageTitle: 'Episode 2',
+        ),
+        isNull,
+      );
+      await SubtitleStore.delete(saved.id);
+      expect(
+        await SubtitleStore.loadVideo(
+          page,
+          'token-B',
+          duration: 120,
+          pageTitle: 'Episode 1',
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'saving work through another playback source updates the original record',
+    () async {
+      final saved = SavedSubs(
+        id: 'original',
+        title: 'Keep this name',
+        page: 'https://old.example/film',
+        source: 'old-source',
+        language: 'en',
+        updated: DateTime(2026),
+        cues: const [Cue(start: 1, end: 2, text: 'Chào', source: 'Hello')],
+        covered: const [(0, 20)],
+        duration: 120,
+      );
+      await SubtitleStore.save(saved);
+      const source = 'new-source';
+      final session = SubtitleSession(
+        input: source,
+        videoId: saved.id,
+        language: 'en',
+        saved: saved.forSource(source),
+        translator: PassthroughTranslator(),
+      )..duration = 120;
+      final saver = SessionSaver(
+        session: session,
+        videoId: saved.id,
+        page: saved.page,
+        source: source,
+        title: 'A different page name',
+        duration: () => 120,
+      );
+      await saver.close();
+      session.dispose();
+      expect((await SubtitleStore.list()).length, 1);
+      final result = (await SubtitleStore.load(saved.id))!;
+      expect(result.title, 'Keep this name');
+      expect(result.page, saved.page);
+      expect(result.source, source);
+    },
+  );
 
   test('the same page always maps to the same entry', () {
     final a = SubtitleStore.idFor('https://phim.example.com/xem/tap-1#t=30');

@@ -76,11 +76,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String _notifiedLanguage = '';
 
   /// Where the watch position of this video is kept.
+  String? _storeId;
   String? get _positionKey => widget.item != null
       ? 'file:${widget.item!.file.absolute.path}'
       : widget.page == null
       ? null
-      : SubtitleStore.idForVideo(widget.page!, _input);
+      : _storeId ?? SubtitleStore.idForVideo(widget.page!, _input);
 
   /// Where the place in the film is kept: per page for web videos (with
   /// the length check WatchPosition does), like the browser, so a new
@@ -147,6 +148,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           duration: _duration,
           pageTitle: widget.title,
         );
+        if (saved != null) _storeId = saved.id;
         if (saved != null && saved.cues.isNotEmpty && mounted) {
           setState(() {
             _cues = saved.cues;
@@ -178,7 +180,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _onWorks() {
     final session = _session;
     if (session == null ||
-        (!ActiveWork.wasStopped(session) && !ActiveWork.wasCompleted(session))) {
+        (!ActiveWork.wasStopped(session) &&
+            !ActiveWork.wasCompleted(session))) {
       return;
     }
     session.removeListener(_onSession);
@@ -236,6 +239,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             pageTitle: widget.title,
           );
     if (!mounted || _session != null) return;
+    if (page != null && saved != null) _storeId = saved.id;
     if (saved != null && saved.imported) {
       setState(() {
         _fromFile = true;
@@ -260,7 +264,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       videoId: _positionKey ?? _input,
       language: storedLanguage.isEmpty ? appSettings.language : storedLanguage,
       headers: widget.headers,
-      saved: saved,
+      saved: saved?.forSource(_input),
       initialCues: page == null ? _cues : const [],
       // A library file is local: making all of it costs no data.
       mode: appSettings.subWhole || widget.item != null
@@ -271,7 +275,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (page != null) {
       _saver = SessionSaver(
         session: session,
-        page: page,
+        page: saved?.page ?? page,
         source: _input,
         videoId: _positionKey ?? _input,
         title: widget.title,
@@ -484,7 +488,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _keepCues(language: imported.language);
     if (imported.picture != null) {
       final id = widget.item == null
-          ? SubtitleStore.idForVideo(widget.page!, _input)
+          ? _positionKey ?? SubtitleStore.idForVideo(widget.page!, _input)
           : 'file:${widget.item!.file.absolute.path}';
       await Bookmarks.saveThumb(
         Bookmarks.subtitlePictureKey(id),
@@ -510,13 +514,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
         imported: _fromFile ? true : null,
       );
     } else if (page != null) {
-      final id = SubtitleStore.idForVideo(page, _input);
+      final id = _positionKey ?? SubtitleStore.idForVideo(page, _input);
       final old = await SubtitleStore.load(id);
       await SubtitleStore.save(
         SavedSubs(
           id: id,
-          title: widget.title,
-          page: page,
+          title: old?.title ?? widget.title,
+          page: old?.page ?? page,
           source: _input,
           language: language ?? old?.language ?? '',
           updated: DateTime.now(),

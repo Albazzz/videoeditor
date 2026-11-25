@@ -10,6 +10,9 @@ import 'package:video/screens/browser_screen.dart';
 import 'package:video/services/app_settings.dart';
 import 'package:video/services/active_work.dart';
 import 'package:video/services/subtitle_session.dart';
+import 'package:video/services/retained_audio.dart';
+import 'package:video/services/bookmarks.dart';
+import 'support/pcm_audio.dart';
 
 // Exercise the real browser widget and callbacks without launching a native
 // browser or depending on external websites.
@@ -90,12 +93,13 @@ class FakeWebController extends PlatformInAppWebViewController {
   void reportVideo({
     String source = 'https://cdn.example/video.mp4',
     String element = '',
+    double duration = 30,
   }) => handlers['vsub']!([
     {
       'src': source,
       'element': element,
       't': 1,
-      'dur': 30,
+      'dur': duration,
       'page': entries[index].url.toString(),
       'area': 100000,
       'paused': true,
@@ -569,4 +573,122 @@ void main() {
     expect(platform.views.length, 1);
     await tester.pumpWidget(const SizedBox());
   });
+
+  testWidgets(
+    'choosing saved subtitles to carry on reuses their entry, audio and running session',
+    (tester) async {
+      final root = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('reuse_browser_'),
+      ))!;
+      SubtitleStore.overrideDir = root;
+      Bookmarks.overrideThumbDir = Directory('${root.path}/thumbs');
+      final audio = RetainedAudioStore(
+        baseDirectory: () async => Directory('${root.path}/audio'),
+      );
+      const oldPage = 'https://old.example/movie',
+          oldSource = 'https://old-cdn.example/movie.mp4';
+      const page = 'https://new.example/movie',
+          source = 'https://new-cdn.example/movie.mp4';
+      final saved = SavedSubs(
+        id: 'chosen-original',
+        title: 'Kept original',
+        page: oldPage,
+        source: oldSource,
+        language: 'en',
+        updated: DateTime(2026),
+        cues: const [
+          Cue(start: 1, end: 2, text: 'Original stored words', source: 'Hello'),
+        ],
+        covered: const [(0, 20)],
+        duration: 120,
+      );
+      await tester.runAsync(() async {
+        await SubtitleStore.save(saved);
+        final archive = await audio.create(saved.id, duration: 120);
+        final directory = await archive.createRun(1, 0);
+        await writeAudioChunks(directory.path, 120);
+        await archive.recordRunEnd(1, 0, videoDuration: 120);
+        await archive.close();
+      });
+      final session = SubtitleSession(
+        input: oldSource,
+        videoId: saved.id,
+        language: 'en',
+        saved: saved,
+        retainedAudio: audio,
+      )..duration = 120;
+      final saver = SessionSaver(
+        session: session,
+        videoId: saved.id,
+        page: oldPage,
+        source: oldSource,
+        title: saved.title,
+        duration: () => 120,
+      );
+      ActiveWork.begin(saved.id, saved.title, session, saver: saver);
+      addTearDown(() async {
+        SubtitleStore.overrideDir = null;
+        Bookmarks.overrideThumbDir = null;
+        await root.delete(recursive: true);
+      });
+      Future<void> files() async {
+        for (var i = 0; i < 12; i++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 15)),
+          );
+          await tester.pump(const Duration(milliseconds: 40));
+        }
+      }
+
+      await open(tester);
+      final controller = platform.views.single.controller;
+      controller.visit(page, 'Other site');
+      controller.reportVideo(source: source, duration: 120);
+      await files();
+      await tester.tap(find.byTooltip('Thêm').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dùng phụ đề từ kho…'));
+      await files();
+      await tester.tap(find.text(saved.title));
+      await files();
+      await tester.tap(find.widgetWithText(FilledButton, 'Làm tiếp'));
+      await files();
+      expect(ActiveWork.all.value.length, 1);
+      expect(ActiveWork.find(saved.id)!.session, same(session));
+      expect((await tester.runAsync(SubtitleStore.list))!.map((s) => s.id), [
+        saved.id,
+      ]);
+      expect(
+        await tester.runAsync(
+          () => SubtitleStore.load(SubtitleStore.idForVideo(page, source)),
+        ),
+        isNull,
+      );
+      expect(
+        (await tester.runAsync(
+          () => audio.availability(saved.id, duration: 120),
+        ))!.complete,
+        true,
+      );
+      session.applyCues(const [
+        Cue(start: 1, end: 2, text: 'Live original update', source: 'Hello'),
+      ]);
+      await tester.pump();
+      expect(
+        controller.scripts.any((js) => js.contains('Live original update')),
+        true,
+      );
+      controller.reportVideo(source: source, duration: 120);
+      await files();
+      expect(ActiveWork.find(saved.id)!.session, same(session));
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(() async {
+        await ActiveWork.stop(session);
+        await saver.close();
+        await session.closeAudio();
+      });
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    },
+  );
 }

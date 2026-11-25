@@ -433,6 +433,7 @@ class _BookmarksViewState extends State<BookmarksView> {
     final picked = _picked.contains(b.url);
     return SavedThumbnailCard(
       picture: _picture(b),
+      sourceLabel: b.host,
       picking: _picking,
       selected: picked,
       actions: Visibility(
@@ -462,12 +463,10 @@ class _BookmarksViewState extends State<BookmarksView> {
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: subs == null && !audio
-            ? Text(b.host)
+            ? null
             : Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(b.host),
-                  const SizedBox(height: 2),
                   Wrap(
                     spacing: 6,
                     runSpacing: 4,
